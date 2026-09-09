@@ -105,3 +105,42 @@ describe("listSessions", () => {
     expect(ids.indexOf(b.id)).toBeLessThan(ids.indexOf(a.id));
   });
 });
+
+describe("renderSessionMarkdown", () => {
+  const meta = { id: "abc123", cwd: "D:\\proj", startedAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:01:00.000Z", model: "anthropic:claude-sonnet-4-5" };
+
+  it("renders a header with meta and roles", () => {
+    const out = session.renderSessionMarkdown(meta, [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hey" },
+    ]);
+    expect(out).toContain("session `abc123`");
+    expect(out).toContain("D:\\proj");
+    expect(out).toContain("claude-sonnet-4-5");
+    expect(out).toContain("**messages**: 2");
+    expect(out).toContain("## 👤 User");
+    expect(out).toContain("## 🤖 Assistant");
+  });
+
+  it("expands tool calls and results", () => {
+    const out = session.renderSessionMarkdown(meta, [
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "t1", name: "read_file", input: { path: "a.ts" } },
+          { type: "text", text: "done" },
+        ],
+      },
+    ]);
+    expect(out).toContain("read_file");
+    expect(out).toContain('"path": "a.ts"');
+  });
+
+  it("marks tool results and errors", () => {
+    const out = session.renderSessionMarkdown(meta, [
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "42", is_error: true }] },
+    ]);
+    expect(out).toContain("(error)");
+    expect(out).toContain("42");
+  });
+});

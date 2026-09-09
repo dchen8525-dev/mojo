@@ -2,11 +2,12 @@
 import React from "react";
 import path from "node:path";
 import readline from "node:readline";
+import { createRequire } from "node:module";
+import { promises as fs } from "node:fs";
 import { render } from "ink";
-import { Agent, type AgentEvents } from "./agent.js";
+import { Agent, COMPACT_RATIO, type AgentEvents } from "./agent.js";
 import { resolveSettings, knownModelNames } from "./llm.js";
 import { PermissionManager } from "./permissions.js";
-import { createSession, loadSession, listSessions } from "./session.js";
 import type { MessageParam, Risk } from "./types.js";
 import { AgentApp } from "./ui/app.js";
 import { bridge } from "./ui/bridge.js";
@@ -14,6 +15,7 @@ import { McpManager, loadMcpConfig } from "./mcp.js";
 import { HookManager } from "./hooks.js";
 import { loadSlashCommands, renderCommand, expandFileReferences } from "./commands.js";
 import { configureLsp, disposeLsp, getLspManager, loadLspConfig } from "./lsp.js";
+import { renderSessionMarkdown, createSession, loadSession, listSessions } from "./session.js";
 
 const ANSI = {
   dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
@@ -24,11 +26,21 @@ const ANSI = {
   bold: (s: string) => `\x1b[1m${s}\x1b[0m`,
 };
 
+/** A compact 20-char usage bar, red once past the auto-compact threshold. */
+function contextBar(pct: number): string {
+  const filled = Math.max(0, Math.min(20, Math.round(pct / 5)));
+  const bar = "█".repeat(filled) + "░".repeat(20 - filled);
+  return pct >= COMPACT_RATIO * 100 ? `\x1b[31m${bar}\x1b[0m` : `\x1b[2m${bar}\x1b[0m`;
+}
+
 function parseArgs(argv: string[]) {
-  const args = { resume: "", print: "", model: "", provider: "", auto: false, yolo: false, plan: false, mcpServer: false, noMcp: false, noLsp: false };
+  const args = { resume: "", cont: false, print: "", model: "", provider: "", auto: false, yolo: false, plan: false, mcpServer: false, noMcp: false, noLsp: false, help: false, version: false, exportId: "", exportFormat: "md" as "md" | "json" };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--resume" && argv[i + 1]) args.resume = argv[++i];
+    else if (argv[i] === "--continue") args.cont = true;
     else if (argv[i] === "-p" && argv[i + 1]) args.print = argv[++i];
+    else if (argv[i] === "--export" && argv[i + 1]) args.exportId = argv[++i];
+    else if (argv[i] === "--format" && argv[i + 1] && (argv[++i] === "md" || argv[i] === "json")) args.exportFormat = argv[i] as "md" | "json";
     else if (argv[i] === "--model" && argv[i + 1]) args.model = argv[++i];
     else if (argv[i] === "--provider" && argv[i + 1]) args.provider = argv[++i];
     else if (argv[i] === "--auto") args.auto = true;
@@ -37,11 +49,16 @@ function parseArgs(argv: string[]) {
     else if (argv[i] === "--mcp-server") args.mcpServer = true;
     else if (argv[i] === "--no-mcp") args.noMcp = true;
     else if (argv[i] === "--no-lsp") args.noLsp = true;
+    else if (argv[i] === "-h" || argv[i] === "--help") args.help = true;
+    else if (argv[i] === "-v" || argv[i] === "--version") args.version = true;
+    else {
+      // unknown flag - keep parsing but we'll print help and exit later
+    }
   }
   return args;
 }
 
-async function resolveSession(args: { resume: string }) {
+async function resolveSession(args: { resume: string; cont: boolean }) {
   if (args.resume) {
     const loaded = await loadSession(args.resume);
     if (!loaded) {
@@ -55,6 +72,25 @@ async function resolveSession(args: { resume: string }) {
       cwd: loaded.meta.cwd,
       model: loaded.meta.model,
     };
+  }
+  // --continue: jump into the most recently updated session, if any.
+  if (args.cont) {
+    const sessions = await listSessions();
+    if (sessions.length) {
+      const latest = sessions[0]; // listSessions sorts by updatedAt desc
+      const loaded = await loadSession(latest.id);
+      if (loaded) {
+        process.chdir(loaded.meta.cwd);
+        console.error(ANSI.dim(`continuing session ${latest.id} (${latest.updatedAt.slice(0, 16)}, ${latest.model ?? "?"})`));
+        return {
+          id: loaded.meta.id,
+          messages: loaded.messages.length ? loaded.messages : undefined,
+          cwd: loaded.meta.cwd,
+          model: loaded.meta.model,
+        };
+      }
+    }
+    console.error(ANSI.yellow("no previous session to continue - starting a new one."));
   }
   const s = await createSession(process.cwd());
   return { id: s.id, messages: undefined as MessageParam[] | undefined, cwd: process.cwd(), model: undefined as string | undefined };
@@ -112,6 +148,7 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
     return "no";
   });
   await permissions.load();
+  await permissions.loadProject(session.cwd);
   if (args.yolo) permissions.mode = "yolo";
   else if (args.auto) permissions.mode = "auto";
 
@@ -138,6 +175,7 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
 
   const controller = new AbortController();
   process.on("SIGINT", () => controller.abort());
+  const started = Date.now();
   try {
     let prompt = args.print;
     const cm = /^\/([\w:-]+)\s*([\s\S]*)$/.exec(prompt.trim());
@@ -153,9 +191,32 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
     if (msg !== "aborted") console.error(ANSI.red(`Error: ${msg}`));
     else console.log(ANSI.yellow("\n(interrupted)"));
   } finally {
+    const secs = ((Date.now() - started) / 1000).toFixed(1);
+    const used = agent.tokenEstimate();
+    const cost = agent.costs.totalUsd();
+    const costStr = cost > 0 ? ` · $${cost.toFixed(4)}` : "";
+    console.error(ANSI.dim(`— ${secs}s · ${used.toLocaleString()} tok · ` +
+      `${agent.provider}:${agent.model}${costStr}`));
     rl.close();
     await mcp?.shutdown();
   }
+}
+
+/** Export a saved session to Markdown (or raw JSON) in the current directory. */
+async function runExport(args: { exportId: string; exportFormat: "md" | "json" }) {
+  const s = await loadSession(args.exportId);
+  if (!s) {
+    console.error(ANSI.red(`Session "${args.exportId}" not found.`));
+    process.exitCode = 1;
+    return;
+  }
+  const ext = args.exportFormat === "json" ? "json" : "md";
+  const outFile = path.resolve(process.cwd(), `${args.exportId}.${ext}`);
+  const body = args.exportFormat === "json"
+    ? JSON.stringify({ meta: s.meta, messages: s.messages }, null, 2)
+    : renderSessionMarkdown(s.meta, s.messages);
+  await fs.writeFile(outFile, body, "utf8");
+  console.log(ANSI.dim(`exported ${args.exportId} → ${outFile} (${body.length.toLocaleString()} chars)`));
 }
 
 /* ---------------- interactive Ink UI ---------------- */
@@ -169,6 +230,7 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
     (bridge.askPermission ?? (async () => "no" as const))(desc, risk, preview),
   );
   await permissions.load();
+  await permissions.loadProject(session.cwd);
   if (args.yolo) permissions.mode = "yolo";
   else if (args.auto) permissions.mode = "auto";
 
@@ -186,7 +248,7 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
       case "help": {
         const custom = [...customCommands.values()].map((c) => `/${c.name}`).join(" ");
         return [
-          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks · /sessions · /resume <id> · /todos · /undo [-y] · /cost [usd] · /clear · /quit",
+          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp · /lsp · /compact · /context · /review [base] [focus] · /permissions [clear] · /hooks · /sessions · /resume <id> · /todos · /undo [-y] · /cost [usd] · /clear · /quit",
           "file refs: @path/to/file inlines the file; Ctrl+V pastes a clipboard image",
           custom ? `custom commands: ${custom}` : "",
         ].filter(Boolean).join("\n");
@@ -328,6 +390,18 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
         }
         return agent.costs.format();
       }
+      case "context": {
+        const used = agent.tokenEstimate();
+        const window = agent.contextWindow;
+        const pct = (used / window) * 100;
+        const bar = contextBar(pct);
+        return (
+          `context: ${used.toLocaleString()} / ${window.toLocaleString()} tokens (${pct.toFixed(1)}%) ${bar}\n` +
+          `${agent.debugMessages().length} messages loaded\n` +
+          `— tokens include the API's exact input count as an anchor plus a CJK-aware estimate of anything not yet billed\n` +
+          `— at ~${(COMPACT_RATIO * 100).toFixed(0)}% of the window the agent auto-compacts; /compact forces it early`
+        );
+      }
       case "undo": {
         const list = (await agent.checkpointList()).filter((c) => !c.restored);
         if (!list.length) return "nothing to undo (the agent has not modified files in this session)";
@@ -374,10 +448,54 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
   await disposeLsp();
 }
 
+const require = createRequire(import.meta.url);
+const VERSION = (require("../package.json") as { version: string }).version;
+
+const USAGE = `Usage: agent [options]
+
+  Start interactive mode:
+    agent [--resume <id> | --continue] [--model <spec>] [--provider <name>] [--auto | --yolo]
+
+  Single-shot print mode:
+    agent -p "prompt" [--model <spec>]
+
+  Export a saved session (to .md/.json):
+    agent --export <session-id> [--format md|json]
+
+  Options:
+    --resume <id>      Resume a saved session
+    --continue         Jump to the most recently updated session (no need for id)
+    -p <prompt>        Single-shot print mode
+    --export <id>      Export a saved session to Markdown/JSON in the working directory
+    --format md|json   Output format (default md)
+    --model <spec>     Override model (e.g. anthropic:claude-sonnet-4-5 or just sonnet)
+    --provider <name>  Override provider (anthropic|openai)
+    --auto             Auto-approve non-high-risk writes without prompting
+    --yolo             Auto-approve everything (unsafe)
+    --plan             Start in plan mode (read-only exploration only)
+    --mcp-server       Expose this agent as an MCP server over stdio
+    --no-mcp           Don't connect to any local MCP server
+    --no-lsp           Don't start any language server
+    -h, --help         Show this help
+    -v, --version      Show version
+`;
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.provider) process.env.AGENT_PROVIDER = args.provider;
   if (args.model) process.env.AGENT_MODEL = args.model;
+  if (args.help) {
+    console.log(USAGE);
+    process.exit(0);
+  }
+  if (args.version) {
+    console.log(VERSION);
+    process.exit(0);
+  }
+  if (args.exportId) {
+    await runExport(args);
+    return;
+  }
 
   const settings = resolveSettings({ cwd: process.cwd() });
   if (!settings.apiKey) {

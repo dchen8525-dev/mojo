@@ -112,3 +112,40 @@ export async function listSessions(): Promise<SessionMeta[]> {
     return [];
   }
 }
+
+/** Plain-text serialization of a content block (for export / review). */
+function contentToMarkdown(content: MessageParam["content"]): string {
+  const parts: string[] = [];
+  const text = typeof content === "string" ? content : "";
+  if (typeof content === "string") return content;
+  for (const b of content as Array<{ type: string; text?: string; name?: string; input?: unknown; content?: unknown; is_error?: boolean }>) {
+    if (b.type === "text" && b.text) parts.push(b.text);
+    else if (b.type === "image") parts.push("[image]");
+    else if (b.type === "tool_use") {
+      parts.push(`> 🔧 **${b.name}**\n\`\`\`json\n${JSON.stringify(b.input, null, 2)}\n\`\`\``);
+    } else if (b.type === "tool_result") {
+      const text2 = typeof b.content === "string" ? b.content : JSON.stringify(b.content);
+      parts.push(`> ${b.is_error ? "⚠️" : "📄"} tool result${b.is_error ? " (error)" : ""}\n\`\`\`\n${text2}\n\`\`\``);
+    }
+  }
+  return parts.filter(Boolean).join("\n\n");
+}
+
+/**
+ * Render a whole session to a shareable Markdown transcript. Pure so it can be
+ * tested without touching disk.
+ */
+export function renderSessionMarkdown(meta: SessionMeta, messages: MessageParam[]): string {
+  const lines: string[] = [`# mojo session \`${meta.id}\``, ""];
+  lines.push(`- **cwd**: \`${meta.cwd}\``);
+  lines.push(`- **started**: ${meta.startedAt}`);
+  lines.push(`- **updated**: ${meta.updatedAt}`);
+  lines.push(`- **model**: \`${meta.model ?? "default"}\``);
+  lines.push(`- **messages**: ${messages.length}`);
+  lines.push("");
+  for (const m of messages) {
+    const name = m.role === "user" ? "👤 User" : m.role === "assistant" ? "🤖 Assistant" : m.role;
+    lines.push(`## ${name}`, "", contentToMarkdown(m.content), "");
+  }
+  return lines.join("\n");
+}

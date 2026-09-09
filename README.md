@@ -15,9 +15,13 @@ Ink 的交互式 UI。
   替换：glob 选文件 + 字面/正则搜索，合并 diff 一次确认，逐文件快照可 `/undo`）、
   `bash`（含 `run_in_background` 后台任务 + `bash_output` / `bash_kill`）、`glob_files`、
   `grep`、`todo_write`、`task`（研究 / 编码双子智能体）、`get_diagnostics`、
-  `web_search` / `web_fetch`（查文档、跟报错）、`git_status` / `git_commit` / `git_pr`
+  `web_search` / `web_fetch`（查文档、跟报错）、`git_status` / `git_diff` / `git_commit` / `git_pr`
 - **Web 工具**：`web_search`（DuckDuckGo）+ `web_fetch`（HTML 转纯文本，超时与体积
   上限、拒绝非 http(s)），让智能体能查文档、跟陌生报错的解法
+- **工具输入校验 + 二进制检测**：模型参数不符 schema（漏必填项 / 类型错）立刻返回
+  明确错误；`read_file` 识别二进制（NUL 或密集控制字符）不往上下文里倒字节汤
+- **底部状态栏**：常驻显示模型、会话、实时上下文占用（用量/窗口 + 百分比，接近自动
+  压缩阈值时标 ⚠）、累计成本、运行中的后台任务数
 - **上下文压缩三段式**：先免费预剪枝陈旧的 `tool_result` 输出（常足以回到预算内），
   再 LLM 摘要（多次压缩时把上一份交接笔记折叠进新摘要，信息不衰减），摘要调用接入
   `ctx.signal` 可被 Esc 取消；失败回退按交换分组截断
@@ -29,7 +33,10 @@ Ink 的交互式 UI。
   文件），交给模型按严重级别输出可执行的审查意见
 - **Git 工作流护栏**：专用 git 工具比裸 `bash git` 更安全——拒绝在 `main`/`master`
   直接提交、拦截 `.env`/私钥等敏感文件、提交前展示 staged diff、用户拒绝时还原索引、
-  PR 拒绝脏工作区且永不 force push
+  PR 拒绝脏工作区且永不 force push；`git_diff` 以只读方式查看工作区 / staged / 提交区间
+  的改动
+- **Web 工具容灾**：`web_search` 先试 DuckDuckGo，拿不到结果自动降级到 Bing（可用
+  `AGENT_SEARCH_ENGINE=bing` 固定引擎），陌生报错的解法更稳
 - **文件快照与撤销**：`write_file`/`edit_file` 修改前自动快照到
   `~/.node-agent/checkpoints/`，`/undo` 逐步回滚（含删除代理新建的文件），无需依赖 git
 - **宽容的 `edit_file`**：先尝试精确匹配，失败后退回到忽略空白的匹配，并把替换文本重新
@@ -37,7 +44,9 @@ Ink 的交互式 UI。
   统一的 `<diff>`（权限确认提示中同样展示），让你在批准前确切看到改了什么
 - **并行工具执行**：只读 / 子智能体工具并发运行；有副作用的工具保持串行
 - **权限系统**：读操作自动放行，写操作和危险命令需要确认；`y` / `a`（总是允许）/
-  `d`（总是拒绝）/ `n`，规则可持久化，另有 `--auto` 与 `--yolo` 模式
+  `d`（总是拒绝）/ `n`，规则可持久化，另有 `--auto` 与 `--yolo` 模式；也可在项目根
+  `.node-agent/permissions.json` 里预置 `[{ "match": "git status", "decision": "allow" }]`
+  规则（`match` 支持 `*` 通配如 `"bash: npm run *"`），项目规则优先于全局、可提前自动放行/拒绝
 - **多模型**：Anthropic 与 OpenAI（Chat Completions）后端，`/model` 热切换，支持别名
   （`sonnet` / `opus` / `haiku` / `gpt`），按模型区分上下文窗口
 - **流式输出 + 断点恢复**：被中断的流从已产出的部分继续，而不是重发整个请求；瞬时 API
@@ -48,7 +57,8 @@ Ink 的交互式 UI。
   `/cost <usd>` 或 `AGENT_BUDGET_USD` 设预算；用到 80% 告警、耗尽时干净终止当前轮次
   （为未执行的 tool_use 回填错误结果，历史保持合法）
 - **会话持久化**：JSONL 格式存于 `~/.node-agent/sessions/`，`/sessions` + `--resume`
-- **图片输入**：`Ctrl+V` 直接粘贴剪贴板截图（Windows / macOS / Linux）
+- **图片输入**：`Ctrl+V` 直接粘贴剪贴板截图（Windows / macOS / Linux）；当前模型
+  不支持视觉时（DeepSeek / GLM / Qwen 等）明确提示不挂载，而不是静默丢图或报错
 - **`@file` 引用**：把文件内容内联进你的提示词（`@src/foo.ts`、`@"my file.txt"`）
 - **自定义斜杠命令**：`.node-agent/commands/*.md` 中的 markdown 提示词模板
 - **钩子（Hooks）**：在 `PreToolUse` / `PostToolUse` / `UserPromptSubmit` / `Stop` 时机
@@ -256,9 +266,12 @@ node-agent-output\bash-1757...txt - read it with read_file offset/limit.]
 
 ```bash
 agent                         # 交互式 UI
-agent -p "explain this repo"  # 单轮 print 模式
+agent -p "explain this repo"  # 单轮 print 模式（跑完附一行 token/耗时/成本统计）
 agent --resume <id>           # 继续一个已保存的会话
+agent --continue              # 直接回到最近一次更新的会话（免记 id）
+agent --export <id> [--format md|json]  # 把会话导出为 markdown/json 纪要
 agent --model openai:gpt-4o   # 启动时指定模型
+agent --help                  # 用法帮助 · agent --version 打印版本号
 agent --auto                  # 自动批准非高危写操作
 agent --yolo                  # 批准一切（谨慎使用）
 agent --plan                  # 以 Plan 模式启动（先只读探索 + 出计划待批准）
@@ -282,7 +295,7 @@ agent --no-mcp                # 跳过 MCP 服务器
 ### 斜杠命令
 
 `/help` · `/model [spec|list]` · `/auto [on|off]` · `/yolo` · `/plan [on|off]` ·
-`/mcp` · `/lsp` · `/compact` · `/review [base] [focus]` ·
+`/mcp` · `/lsp` · `/compact` · `/context` · `/review [base] [focus]` ·
 `/permissions [clear]` · `/hooks` · `/sessions` · `/resume <id>` · `/todos` · `/undo [-y]` ·
 `/cost [usd]` · `/clear` · `/quit`
 
@@ -296,6 +309,15 @@ Plan 模式下智能体只拿到只读工具加一个 `exit_plan`：它先用探
 `exit_plan` 把完整计划（目标、按文件列出的步骤、风险、验证方式）作为确认预览展示给你。
 批准 → 切回普通模式立即开工；拒绝 → 留在 Plan 模式继续修订。`runTool` 层还有硬防线：
 即使模型幻觉出写工具调用也会被拒绝。worker 子智能体在 Plan 模式下同样被禁止。
+
+### 上下文使用量（/context）
+
+```text
+/context     ← 查看上下文占用：当前用量 / 模型窗口（百分比 + 进度条）、已加载消息数
+```
+
+以 API 返回的精确 input token 为锚点，叠加对未计费部分的 CJK 感知估算；进度条接近
+`COMPACT_RATIO`（75%）时变红，提示该考虑 `/compact` 或精简提示。
 
 ### 代码审查（/review）
 
