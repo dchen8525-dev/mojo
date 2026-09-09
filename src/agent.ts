@@ -3,7 +3,9 @@ import { execSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { ContentBlock, ImageBlockParam, MessageParam, ToolResultBlockParam, ToolUseBlock } from "./types.js";
+import { validateToolInput } from "./types.js";
 import { LLM, type StreamEvents } from "./llm.js";
+import { lookupModel } from "./llm/models.js";
 import { getTool, tools, todoStore } from "./tools/index.js";
 import { exitPlanTool } from "./tools/exitPlan.js";
 import type { PermissionManager } from "./permissions.js";
@@ -29,7 +31,7 @@ import {
 
 const MAX_TOOL_ITERATIONS = 40;
 const MAX_CONTINUATIONS = 3; // auto-resume cap after output hits the token limit
-const COMPACT_RATIO = 0.75; // compact when estimate exceeds this share of the model's window
+export const COMPACT_RATIO = 0.75; // compact when estimate exceeds this share of the model's window
 const COMPACT_TARGET_RATIO = 0.5; // aim to land here so we don't re-compact next turn
 
 export interface AgentEvents extends StreamEvents {
@@ -69,6 +71,11 @@ export class Agent {
   }
   listModels(signal?: AbortSignal): Promise<string[]> {
     return this.llm.listModels(signal);
+  }
+
+  /** Whether the current model accepts image blocks (for `Ctrl+V` paste). */
+  supportsVision(): boolean {
+    return lookupModel(this.llm.model).vision === true;
   }
 
   constructor(
@@ -414,6 +421,11 @@ Rules:
     events?.onToolStart?.(tu.id, tu.name, preview);
     if (!tool) {
       return { type: "tool_result", tool_use_id: tu.id, content: `Unknown tool "${tu.name}".`, is_error: true };
+    }
+    const invalid = validateToolInput(tool.inputSchema, tu.input as Record<string, unknown>);
+    if (invalid) {
+      events?.onToolEnd?.(tu.id, tu.name, false, invalid);
+      return { type: "tool_result", tool_use_id: tu.id, content: `Invalid input for "${tu.name}": ${invalid}`, is_error: true };
     }
     if (this.planMode && !tool.isReadOnly && tool.name !== "exit_plan") {
       return {

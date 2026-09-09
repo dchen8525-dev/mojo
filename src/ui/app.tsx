@@ -1,13 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import TextInput from "ink-text-input";
-import type { Agent, AgentEvents } from "../agent.js";
+import { Agent, COMPACT_RATIO, type AgentEvents } from "../agent.js";
 import type { PermissionManager } from "../permissions.js";
 import type { ImageBlockParam, Risk } from "../types.js";
 import type { TodoItem } from "../tools/todo.js";
 import { bridge } from "./bridge.js";
 import { Markdown } from "./markdown.js";
 import { captureClipboardImage } from "../clipboard.js";
+import { backgroundManager } from "../tools/background.js";
 import { expandFileReferences, renderCommand, type SlashCommand } from "../commands.js";
 
 interface ToolRow {
@@ -192,7 +193,6 @@ export function AgentApp({
   const [input, setInput] = useState("");
   const [permission, setPermission] = useState<PermissionRequest | null>(null);
   const [todos, setTodos] = useState<TodoItem[]>([]);
-  const [usage, setUsage] = useState({ input: 0, output: 0 });
   const [error, setError] = useState("");
   const [pendingImages, setPendingImages] = useState<ImageBlockParam[]>([]);
   const [planMode, setPlanMode] = useState(agent.planMode);
@@ -295,8 +295,13 @@ export function AgentApp({
           pastingRef.current = true;
           captureClipboardImage()
             .then((img) => {
-              if (img) setPendingImages((prev) => [...prev, img]);
-              else setItems((prev) => [...prev, { kind: "system", text: "(clipboard has no image)" }]);
+              if (img && !agent.supportsVision()) {
+                setItems((prev) => [...prev, { kind: "system", text: "(current model does not support vision — image not attached; switch with /model)" }]);
+              } else if (img) {
+                setPendingImages((prev) => [...prev, img]);
+              } else {
+                setItems((prev) => [...prev, { kind: "system", text: "(clipboard has no image)" }]);
+              }
             })
             .finally(() => {
               pastingRef.current = false;
@@ -361,7 +366,6 @@ export function AgentApp({
             ),
           );
         },
-        onUsage: (inp, out) => setUsage({ input: inp, output: out }),
         onCostWarning: (message) => setItems((prev) => [...prev, { kind: "system", text: `[cost] ${message}` }]),
         onCompacting: () => setItems((prev) => [...prev, { kind: "system", text: "… compacting context …" }]),
         onCompacted: (before, after) =>
@@ -494,12 +498,36 @@ export function AgentApp({
         />
       </Box>
 
-      <Text dimColor>
-        {planMode && <Text color="magenta" bold>{"PLAN "}</Text>}
-        {agent.provider}:{agent.model} · session {sessionId} · ctx in {usage.input} / out {usage.output} · mode{" "}
-        {permissions.mode}
-        {expandedAll ? " · all expanded (Ctrl+O)" : ""}
-      </Text>
+      <StatusBar agent={agent} planMode={planMode} expandedAll={expandedAll} permissions={permissions} sessionId={sessionId} />
     </Box>
+  );
+}
+
+/** Bottom status line: model, session, live context usage, spend, bg tasks. */
+function StatusBar({
+  agent,
+  planMode,
+  expandedAll,
+  permissions,
+  sessionId,
+}: {
+  agent: Agent;
+  planMode: boolean;
+  expandedAll: boolean;
+  permissions: PermissionManager;
+  sessionId: string;
+}) {
+  const est = agent.tokenEstimate();
+  const win = agent.contextWindow;
+  const pct = win > 0 ? Math.round((est / win) * 100) : 0;
+  const bgRunning = backgroundManager.list().filter((t) => !t.done).length;
+  return (
+    <Text dimColor>
+      {planMode && <Text color="magenta" bold>{"PLAN "}</Text>}
+      {agent.provider}:{agent.model} · session {sessionId} · ctx {est.toLocaleString()}/{win.toLocaleString()} ({pct}%)
+      {pct >= Math.round(COMPACT_RATIO * 100) ? " ⚠" : ""} · ${agent.costs.totalUsd().toFixed(2)}
+      {bgRunning ? ` · bg ${bgRunning}` : ""} · mode {permissions.mode}
+      {expandedAll ? " · all expanded (Ctrl+O)" : ""}
+    </Text>
   );
 }
