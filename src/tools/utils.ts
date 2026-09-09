@@ -2,14 +2,23 @@ import path from "node:path";
 
 export const MAX_TOOL_OUTPUT = 30_000; // characters
 
-/** Truncate long output so a single tool call cannot blow up the context. */
+/** Truncate long output so a single tool call cannot blow up the context.
+ * Keeps BOTH ends: the head shows how the work started, the tail usually
+ * carries the error or summary line that matters most. Plain head-only
+ * truncation silently drops exactly that.
+ */
 export function truncate(text: string, max = MAX_TOOL_OUTPUT): string {
   if (text.length <= max) return text;
-  const head = text.slice(0, max);
+  const headLen = Math.floor(max * 0.75);
+  const tailLen = Math.floor(max * 0.2);
+  const omitted = text.length - headLen - tailLen;
   return (
-    head +
-    `\n\n[... output truncated: ${text.length - max} more characters omitted. ` +
-    `Narrow your query or read a specific line range instead.]`
+    text.slice(0, headLen) +
+    `\n\n[... ${omitted.toLocaleString()} characters omitted from the middle of this output ` +
+    `(total ${text.length.toLocaleString()} chars; head + tail kept). Narrow your query, page with ` +
+    `offset/limit, or read the saved full output if a file path is mentioned below.]` +
+    `\n\n` +
+    text.slice(text.length - tailLen)
   );
 }
 

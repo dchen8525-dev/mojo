@@ -34,6 +34,25 @@ export async function appendMessages(id: string, messages: MessageParam[]) {
   if (lines) await fs.appendFile(fileFor(id), lines + "\n", "utf8");
 }
 
+/**
+ * Replace the whole message log (used after compaction, where the in-memory
+ * history is shorter than what's on disk). Keeps the meta header; model
+ * markers are dropped, so callers should re-append the current model.
+ */
+export async function rewriteMessages(id: string, messages: MessageParam[]) {
+  const file = fileFor(id);
+  let metaLine = "";
+  try {
+    const raw = await fs.readFile(file, "utf8");
+    metaLine = raw.split("\n").find((l) => l.trim().startsWith('{"type":"meta"')) ?? "";
+  } catch {
+    return; // no session file: nothing to rewrite
+  }
+  if (!metaLine) return;
+  const lines = messages.map((m) => JSON.stringify({ type: "message", message: m })).join("\n");
+  await fs.writeFile(file, metaLine + "\n" + (lines ? lines + "\n" : ""), "utf8");
+}
+
 /** Append a model marker; the last one in the file is the session's model. */
 export async function appendModel(id: string, model: string) {
   await fs.appendFile(fileFor(id), JSON.stringify({ type: "model", model }) + "\n", "utf8");

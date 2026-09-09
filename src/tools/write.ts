@@ -2,6 +2,8 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { Tool, ToolContext, ToolResult } from "../types.js";
 import { relPath, resolvePath, str, truncate, describeError } from "./utils.js";
+import { diagnosticsHint } from "../lsp.js";
+import { applyEdits, diffStats, findAll, findFuzzyEdits, nearestMiss, renderDiff, type Edit } from "./editMatch.js";
 
 export const writeFileTool: Tool = {
   name: "write_file",
@@ -34,9 +36,11 @@ export const writeFileTool: Tool = {
       );
       if (!ok) return { content: "The user rejected this edit. Ask before trying again.", isError: true };
 
+      await ctx.checkpoint?.(abs, "write_file");
       await fs.mkdir(path.dirname(abs), { recursive: true });
       await fs.writeFile(abs, content, "utf8");
-      return { content: `${existed ? "Wrote" : "Created"} ${relPath(ctx.cwd, abs)} (${content.length} chars)` };
+      const hint = await diagnosticsHint(ctx.cwd, abs, content);
+      return { content: `${existed ? "Wrote" : "Created"} ${relPath(ctx.cwd, abs)} (${content.length} chars)${hint}` };
     } catch (err) {
       return { content: `Error: ${describeError(err)}`, isError: true };
     }
@@ -46,10 +50,12 @@ export const writeFileTool: Tool = {
 export const editFileTool: Tool = {
   name: "edit_file",
   description:
-    "Replace an exact string in a file. old_string must match the file byte-for-byte " +
-    "including indentation; line numbers you see from read_file are NOT part of the content. " +
-    "If old_string appears more than once the call fails - add surrounding context to make it " +
-    "unique, or pass replace_all. Always read_file the target first.",
+    "Replace string(s) in a file. old_string should match the file exactly - copy it from " +
+    "read_file output (the \"N\\t\" prefixes are line numbers, not content). As a fallback the " +
+    "match ignores per-line leading/trailing whitespace and re-indents new_string to the file, " +
+    "but do not rely on that: prefer exact text. If old_string appears more than once the call " +
+    "fails unless replace_all is set; add surrounding context to disambiguate. The result shows " +
+    "a diff of what changed plus fresh diagnostics.",
   isReadOnly: false,
   inputSchema: {
     type: "object",
@@ -69,39 +75,63 @@ export const editFileTool: Tool = {
       const replaceAll = input.replace_all === true;
 
       const original = await fs.readFile(abs, "utf8");
-      const count = original.split(oldString).length - 1;
 
-      if (count === 0) {
+      // Strategy 1: exact byte match.
+      let edits: Edit[] = findAll(original, oldString).map((start) => ({
+        start,
+        end: start + oldString.length,
+        text: newString,
+      }));
+      let note = "";
+
+      // Strategy 2: whitespace-insensitive line-window match (re-indents the
+      // replacement to the file). Only when the exact match found nothing.
+      if (edits.length === 0) {
+        const fuzzy = findFuzzyEdits(original, oldString, newString);
+        edits = fuzzy.edits;
+        note = fuzzy.note;
+      }
+
+      if (edits.length === 0) {
+        const near = nearestMiss(original, oldString);
+        const hint = near
+          ? ` The closest region starts at line ${near.line} and says:\n${near.snippet}\n` +
+            `Copy that text (or a wider unique range) as old_string.`
+          : " Re-read the file and copy the exact text (watch indentation and trailing spaces).";
         return {
-          content:
-            `Error: old_string not found in ${relPath(ctx.cwd, abs)}. ` +
-            `Re-read the file and copy the exact text (watch indentation and trailing spaces).`,
+          content: `Error: old_string not found in ${relPath(ctx.cwd, abs)}.${hint}`,
           isError: true,
         };
       }
-      if (count > 1 && !replaceAll) {
+      if (edits.length > 1 && !replaceAll) {
+        const lines = edits.map((e) => lineOf(original, e.start)).join(", ");
         return {
           content:
-            `Error: old_string matches ${count} places in ${relPath(ctx.cwd, abs)}. ` +
-            `Include more surrounding context, or pass replace_all: true.`,
+            `Error: old_string matches ${edits.length} places in ${relPath(ctx.cwd, abs)} ` +
+            `(lines ${lines}). Include more surrounding context, or pass replace_all: true.`,
           isError: true,
         };
       }
 
-      const updated = replaceAll ? original.split(oldString).join(newString) : original.replace(oldString, newString);
+      const updated = applyEdits(original, edits);
+      const diff = renderDiff(original, edits);
 
       const ok = await ctx.askPermission(
-        `Edit ${relPath(ctx.cwd, abs)}: replace ${count === 1 ? "1 occurrence" : `${count} occurrences`} ` +
-          `(${oldString.length} chars -> ${newString.length} chars)`,
+        `Edit ${relPath(ctx.cwd, abs)}: ${edits.length} replacement${edits.length === 1 ? "" : "s"}, ` +
+          `${diffStats(edits, original)}${note ? ` (${note})` : ""}`,
         "high",
+        diff,
       );
       if (!ok) return { content: "The user rejected this edit. Ask before trying again.", isError: true };
 
+      await ctx.checkpoint?.(abs, "edit_file");
       await fs.writeFile(abs, updated, "utf8");
+      const hint = await diagnosticsHint(ctx.cwd, abs, updated);
       return {
         content: truncate(
-          `Edited ${relPath(ctx.cwd, abs)} (${count} occurrence${count === 1 ? "" : "s"} replaced). ` +
-            `File is now ${updated.length} chars.`,
+          `Edited ${relPath(ctx.cwd, abs)} (${edits.length} replacement${edits.length === 1 ? "" : "s"}${
+            note ? `, ${note}` : ""
+          }).\n<diff>\n${diff}\n</diff>${hint}`,
         ),
       };
     } catch (err) {
@@ -109,3 +139,9 @@ export const editFileTool: Tool = {
     }
   },
 };
+
+function lineOf(text: string, offset: number): number {
+  let line = 1;
+  for (let i = 0; i < offset && i < text.length; i++) if (text[i] === "\n") line++;
+  return line;
+}

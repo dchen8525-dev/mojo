@@ -18,23 +18,38 @@ interface Config {
   apiKey?: string;
 }
 
-function readConfigFile(): Config {
+export interface LLMOptions extends Config {
+  /** Project root used to locate .node-agent/config.json (default: process.cwd()). */
+  cwd?: string;
+}
+
+function readConfigFile(p: string): Config {
   try {
-    const raw = readFileSync(path.join(os.homedir(), ".node-agent", "config.json"), "utf8");
+    const raw = readFileSync(p, "utf8");
     // Strip a leading UTF-8 BOM (Windows editors/tools often add one) before parsing.
-    return JSON.parse(raw.replace(/^\uFEFF/, "")) as Config;
+    return JSON.parse(raw.replace(/^﻿/, "")) as Config;
   } catch {
     return {};
   }
 }
 
 /**
+ * Layered config: ~/.node-agent/config.json (global) overridden per-key by
+ * <cwd>/.node-agent/config.json (project). Same layering as hooks/lsp.
+ */
+export function loadConfigFiles(cwd: string = process.cwd(), home: string = os.homedir()): Config {
+  const global = readConfigFile(path.join(home, ".node-agent", "config.json"));
+  const project = readConfigFile(path.join(cwd, ".node-agent", "config.json"));
+  return { ...global, ...project };
+}
+
+/**
  * Resolve provider/model/credentials from (in priority order):
  * explicit opts > runtime override (set via /model) > environment >
- * ~/.node-agent/config.json > defaults.
+ * <cwd>/.node-agent/config.json > ~/.node-agent/config.json > defaults.
  */
-export function resolveSettings(opts: Config = {}) {
-  const file = readConfigFile();
+export function resolveSettings(opts: LLMOptions = {}) {
+  const file = loadConfigFiles(opts.cwd);
   const env = process.env;
   const ov = activeOverride ?? {};
 
@@ -95,10 +110,12 @@ export function parseModelSpec(spec: string, currentProvider: Provider): Config 
  */
 export class LLM {
   private backend: LLMBackend;
+  private cwd: string;
   provider: Provider;
   model: string;
 
-  constructor(opts: Config = {}) {
+  constructor(opts: LLMOptions = {}) {
+    this.cwd = opts.cwd ?? process.cwd();
     const s = resolveSettings(opts);
     this.provider = s.provider;
     this.model = s.model;
@@ -118,7 +135,7 @@ export class LLM {
    */
   switchModel(spec: string): { provider: Provider; model: string } {
     const parsed = parseModelSpec(spec, this.provider);
-    const s = resolveSettings(parsed);
+    const s = resolveSettings({ ...parsed, cwd: this.cwd });
     if (!s.apiKey) {
       throw new Error(
         `No API key for provider "${s.provider}" - set ${s.provider === "openai" ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY"} before switching.`,

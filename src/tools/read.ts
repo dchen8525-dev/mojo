@@ -45,8 +45,11 @@ export const readFileTool: Tool = {
 
       const meta =
         slice.length < all.length - offset
-          ? `\n[Showing lines ${offset + 1}-${offset + slice.length} of ${all.length} total]`
-          : "";
+          ? `\n[Showing lines ${offset + 1}-${offset + slice.length} of ${all.length} total. ` +
+            `Continue with offset=${offset + slice.length}${limit < MAX_LINES ? ` (or raise limit, max ${MAX_LINES})` : ""}.]`
+          : offset > 0 || limit < all.length
+            ? `\n[End of file: ${all.length} lines total.]`
+            : "";
       return { content: truncate(`${relPath(ctx.cwd, abs)}\n${body}${meta}`) };
     } catch (err) {
       return { content: `Error: ${describeError(err)}`, isError: true };

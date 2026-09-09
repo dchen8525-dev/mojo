@@ -118,6 +118,7 @@ export class OpenAiBackend implements LLMBackend {
     let text = "";
     let inputTokens = 0;
     let outputTokens = 0;
+    let cacheReadTokens = 0;
     let finishReason: string | null = null;
     const toolCalls = new Map<number, PartialToolCall>();
 
@@ -140,6 +141,14 @@ export class OpenAiBackend implements LLMBackend {
         if (chunk.usage) {
           inputTokens = chunk.usage.prompt_tokens ?? inputTokens;
           outputTokens = chunk.usage.completion_tokens ?? outputTokens;
+          // OpenAI reports cached prompt tokens as a subset of prompt_tokens;
+          // split them out so cost math matches the Anthropic semantics.
+          const cached = (chunk.usage as { prompt_tokens_details?: { cached_tokens?: number } })
+            .prompt_tokens_details?.cached_tokens;
+          if (typeof cached === "number" && cached > 0) {
+            cacheReadTokens = cached;
+            inputTokens = Math.max(0, inputTokens - cached);
+          }
         }
       }
     } catch (err) {
@@ -177,6 +186,8 @@ export class OpenAiBackend implements LLMBackend {
       content,
       inputTokens,
       outputTokens,
+      cacheReadTokens,
+      cacheWriteTokens: 0,
       stopReason: finishReason === "tool_calls" ? "tool_use" : finishReason === "length" ? "length" : "end_turn",
     };
   }

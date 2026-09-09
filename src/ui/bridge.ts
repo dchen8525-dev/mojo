@@ -5,7 +5,7 @@ import type { Risk } from "../types.js";
  * PermissionManager (created before the UI exists) can call into.
  */
 export interface UiBridge {
-  askPermission?: (description: string, risk: Risk) => Promise<"yes" | "no" | "always" | "always_deny">;
+  askPermission?: (description: string, risk: Risk, preview?: string) => Promise<"yes" | "no" | "always" | "always_deny">;
 }
 
 export const bridge: UiBridge = {};

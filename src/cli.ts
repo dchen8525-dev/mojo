@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import React from "react";
+import path from "node:path";
 import readline from "node:readline";
 import { render } from "ink";
 import { Agent, type AgentEvents } from "./agent.js";
@@ -12,6 +13,7 @@ import { bridge } from "./ui/bridge.js";
 import { McpManager, loadMcpConfig } from "./mcp.js";
 import { HookManager } from "./hooks.js";
 import { loadSlashCommands, renderCommand, expandFileReferences } from "./commands.js";
+import { configureLsp, disposeLsp, getLspManager, loadLspConfig } from "./lsp.js";
 
 const ANSI = {
   dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
@@ -23,7 +25,7 @@ const ANSI = {
 };
 
 function parseArgs(argv: string[]) {
-  const args = { resume: "", print: "", model: "", provider: "", auto: false, yolo: false, noMcp: false };
+  const args = { resume: "", print: "", model: "", provider: "", auto: false, yolo: false, plan: false, mcpServer: false, noMcp: false, noLsp: false };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--resume" && argv[i + 1]) args.resume = argv[++i];
     else if (argv[i] === "-p" && argv[i + 1]) args.print = argv[++i];
@@ -31,7 +33,10 @@ function parseArgs(argv: string[]) {
     else if (argv[i] === "--provider" && argv[i + 1]) args.provider = argv[++i];
     else if (argv[i] === "--auto") args.auto = true;
     else if (argv[i] === "--yolo") args.yolo = true;
+    else if (argv[i] === "--plan") args.plan = true;
+    else if (argv[i] === "--mcp-server") args.mcpServer = true;
     else if (argv[i] === "--no-mcp") args.noMcp = true;
+    else if (argv[i] === "--no-lsp") args.noLsp = true;
   }
   return args;
 }
@@ -78,15 +83,26 @@ async function setupMcp(args: { noMcp: boolean }): Promise<McpManager | null> {
   return manager;
 }
 
+/** Enable the LSP layer unless --no-lsp; servers come from lsp.json over defaults. */
+async function setupLsp(args: { noLsp: boolean }, cwd: string) {
+  if (args.noLsp) {
+    configureLsp(cwd, { enabled: false });
+    return;
+  }
+  configureLsp(cwd, { enabled: true, servers: await loadLspConfig(cwd) });
+}
+
 /* ---------------- plain-text mode (-p) ---------------- */
 
 async function runPrint(args: ReturnType<typeof parseArgs>) {
   const session = await resolveSession(args);
   const mcp = await setupMcp(args);
+  await setupLsp(args, session.cwd);
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
   const ask = (q: string) => new Promise<string>((res) => rl.question(q, res));
-  const permissions = new PermissionManager(async (desc: string, risk: Risk) => {
+  const permissions = new PermissionManager(async (desc: string, risk: Risk, preview?: string) => {
     const tag = risk === "high" ? ANSI.red("[high]") : ANSI.yellow("[write]");
+    if (preview) console.log(ANSI.dim(preview.split("\n").map((l) => `  ${l}`).join("\n")));
     const answer = (await ask(`${tag} ${ANSI.bold(desc)}\n  allow? [y]es / [n]o / [a]lways / [d]eny-always > `))
       .trim()
       .toLowerCase();
@@ -104,6 +120,7 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
 
   const agent = new Agent(session.cwd, session.id, permissions, session.messages, session.model, hooks);
   restoreSessionModel(agent, session.model, args);
+  if (args.plan) agent.planMode = true;
   const events: AgentEvents = {
     onTextDelta: (d) => process.stdout.write(d),
     onToolStart: (_id, name, preview) => {
@@ -115,6 +132,8 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
       console.log(ok ? ANSI.dim(`  ✓ ${name}: ${first}`) : ANSI.red(`  ✗ ${name}: ${first}`));
     },
     onCompacting: () => console.log(ANSI.yellow("… compacting context …")),
+    onCompacted: (before, after) =>
+      console.log(ANSI.dim(`  context: ${before.toLocaleString()} → ${after.toLocaleString()} tokens`)),
   };
 
   const controller = new AbortController();
@@ -144,9 +163,10 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
 async function runInteractive(args: ReturnType<typeof parseArgs>) {
   const session = await resolveSession(args);
   const mcp = await setupMcp(args);
+  await setupLsp(args, session.cwd);
 
-  const permissions = new PermissionManager((desc, risk) =>
-    (bridge.askPermission ?? (async () => "no" as const))(desc, risk),
+  const permissions = new PermissionManager((desc, risk, preview) =>
+    (bridge.askPermission ?? (async () => "no" as const))(desc, risk, preview),
   );
   await permissions.load();
   if (args.yolo) permissions.mode = "yolo";
@@ -158,6 +178,7 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
 
   const agent = new Agent(session.cwd, session.id, permissions, session.messages, session.model, hooks);
   restoreSessionModel(agent, session.model, args);
+  if (args.plan) agent.planMode = true;
 
   async function handleCommand(line: string): Promise<string | null | "quit"> {
     const [cmd, ...rest] = line.slice(1).split(/\s+/);
@@ -165,7 +186,7 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
       case "help": {
         const custom = [...customCommands.values()].map((c) => `/${c.name}`).join(" ");
         return [
-          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /mcp · /permissions [clear] · /hooks · /sessions · /resume <id> · /todos · /clear · /quit",
+          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks · /sessions · /resume <id> · /todos · /undo [-y] · /cost [usd] · /clear · /quit",
           "file refs: @path/to/file inlines the file; Ctrl+V pastes a clipboard image",
           custom ? `custom commands: ${custom}` : "",
         ].filter(Boolean).join("\n");
@@ -207,6 +228,42 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
           .map((s) => `${s.connected ? "✓" : "✗"} ${s.name}: ${s.connected ? `${s.toolCount} tools` : s.error}`)
           .join("\n");
       }
+      case "lsp": {
+        const mgr = getLspManager();
+        if (!mgr) return "LSP diagnostics are disabled (--no-lsp)";
+        const list = mgr.status();
+        return list.length
+          ? list.map((s) => `✓ ${s.ext} → ${s.command} (${s.documents} open document(s))`).join("\n")
+          : "no language servers started yet (they spawn on the first read/edit of a supported file)";
+      }
+      case "compact": {
+        const before = agent.tokenEstimate();
+        const did = await agent.compactNow({
+          onCompacting: () => console.log(ANSI.yellow("… compacting context …")),
+        });
+        return did
+          ? `context compacted: ${before.toLocaleString()} → ${agent.tokenEstimate().toLocaleString()} tokens`
+          : "history too small to compact";
+      }
+      case "review": {
+        // /review [base] [focus text] - no arg reviews uncommitted changes.
+        const known = ["main", "master", "HEAD", "origin/main", "develop"];
+        let target: string | undefined;
+        let focus: string | undefined;
+        if (rest[0] && (known.includes(rest[0]) || rest[0].startsWith("origin/") || /^[0-9a-f]{7,40}$/.test(rest[0]))) {
+          target = rest[0];
+          focus = rest.slice(1).join(" ") || undefined;
+        } else {
+          focus = rest.join(" ") || undefined;
+        }
+        console.log(ANSI.yellow(`… reviewing ${target ? `${target}...HEAD` : "uncommitted changes"} …`));
+        try {
+          const review = await agent.review(target, focus);
+          return review;
+        } catch (err) {
+          return ANSI.red(`review failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
       case "permissions": {
         if (rest[0] === "clear") {
           const n = await permissions.clearRules();
@@ -226,6 +283,15 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
       case "yolo":
         permissions.mode = permissions.mode === "yolo" ? "default" : "yolo";
         return `yolo mode: ${permissions.mode === "yolo" ? "ON — all permissions auto-approved" : "off"}`;
+      case "plan": {
+        const v = rest[0];
+        if (v === "off") agent.planMode = false;
+        else if (v === "on") agent.planMode = true;
+        else agent.planMode = !agent.planMode;
+        return agent.planMode
+          ? "PLAN mode ON — the agent only explores with read-only tools, then presents a plan via exit_plan for your approval (which also switches back to normal mode)"
+          : "plan mode off — normal execution";
+      }
       case "sessions": {
         const list = await listSessions();
         return list.length
@@ -253,6 +319,33 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
         if (!items.length) return "(empty)";
         return items.map((i) => `${i.status === "completed" ? "[x]" : i.status === "in_progress" ? "[>]" : "[ ]"} ${i.content}`).join("\n");
       }
+      case "cost": {
+        if (rest[0]) {
+          const v = Number(rest[0].replace(/^\$/, ""));
+          if (!Number.isFinite(v) || v <= 0) return "usage: /cost [usd]  (bare /cost shows this session's spend)";
+          agent.costs.budgetUsd = v;
+          return `session budget set to $${v.toFixed(2)} (warns at 80%, stops the turn when exhausted)`;
+        }
+        return agent.costs.format();
+      }
+      case "undo": {
+        const list = (await agent.checkpointList()).filter((c) => !c.restored);
+        if (!list.length) return "nothing to undo (the agent has not modified files in this session)";
+        const last = list[list.length - 1];
+        const target = path.isAbsolute(last.file) ? path.relative(session.cwd, last.file) || last.file : last.file;
+        if (rest[0] !== "-y" && rest[0] !== "--yes") {
+          return (
+            `last change: #${last.id} ${last.label} → ${target} (${last.ts.slice(0, 19)})\n` +
+            `run /undo -y to restore ${last.existed ? "its previous content" : "delete the created file"}`
+          );
+        }
+        try {
+          const r = await agent.undoLastCheckpoint();
+          return r ? `undone: ${path.relative(session.cwd, r.file) || r.file} — ${r.action}` : "nothing to undo";
+        } catch (err) {
+          return ANSI.red(`undo failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
       case "clear": {
         const s = await createSession(process.cwd());
         agent.resetSession(s.id);
@@ -278,6 +371,7 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
   );
   await app.waitUntilExit();
   await mcp?.shutdown();
+  await disposeLsp();
 }
 
 async function main() {
@@ -285,14 +379,21 @@ async function main() {
   if (args.provider) process.env.AGENT_PROVIDER = args.provider;
   if (args.model) process.env.AGENT_MODEL = args.model;
 
-  const settings = resolveSettings();
+  const settings = resolveSettings({ cwd: process.cwd() });
   if (!settings.apiKey) {
     console.error(
       ANSI.red(
-        `No API key for provider "${settings.provider}". Set ${settings.provider === "openai" ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY"} or ~/.node-agent/config.json.`,
+        `No API key for provider "${settings.provider}". Set ${settings.provider === "openai" ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY"} or ~/.node-agent/config.json (project override: .node-agent/config.json).`,
       ),
     );
     process.exit(1);
+  }
+
+  if (args.mcpServer) {
+    // stdio carries the JSON-RPC protocol; all logs must go to stderr.
+    const { serveMcp } = await import("./mcpServer.js");
+    await serveMcp(process.cwd());
+    return;
   }
 
   if (args.print) await runPrint(args);

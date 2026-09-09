@@ -16,8 +16,8 @@ const RULES_FILE = path.join(CONFIG_DIR, "permissions.json");
 export class PermissionManager {
   mode: Mode = "default";
   private rules: Rule[] = [];
-  /** Provided by the CLI: prompt the user. */
-  askUser: (description: string, risk: Risk) => Promise<"yes" | "no" | "always" | "always_deny">;
+  /** Provided by the CLI: prompt the user. `preview` is optional multi-line detail (e.g. a diff). */
+  askUser: (description: string, risk: Risk, preview?: string) => Promise<"yes" | "no" | "always" | "always_deny">;
 
   constructor(askUser: PermissionManager["askUser"]) {
     this.askUser = askUser;
@@ -49,7 +49,7 @@ export class PermissionManager {
     return n;
   }
 
-  async check(description: string, risk: Risk, readOnly: boolean): Promise<boolean> {
+  async check(description: string, risk: Risk, readOnly: boolean, preview?: string): Promise<boolean> {
     if (readOnly) return true;
 
     // Persisted rules win over any mode except yolo, so a "deny always" is
@@ -64,7 +64,7 @@ export class PermissionManager {
     // In auto mode, non-high-risk operations are accepted silently.
     if (this.mode === "auto" && risk !== "high") return true;
 
-    const answer = await this.askUser(description, risk);
+    const answer = await this.askUser(description, risk, preview);
     if (answer === "always" || answer === "always_deny") {
       // Persist a rule keyed on the leading verb + target of the description.
       const key = description.slice(0, 60);

@@ -42,6 +42,8 @@ export class AnthropicBackend implements LLMBackend {
     let text = "";
     let inputTokens = 0;
     let outputTokens = 0;
+    let cacheReadTokens = 0;
+    let cacheWriteTokens = 0;
     let toolStarted = false;
 
     try {
@@ -56,6 +58,8 @@ export class AnthropicBackend implements LLMBackend {
         }
         if (event.type === "message_start") {
           inputTokens = event.message.usage.input_tokens ?? 0;
+          cacheReadTokens = event.message.usage.cache_read_input_tokens ?? 0;
+          cacheWriteTokens = event.message.usage.cache_creation_input_tokens ?? 0;
         }
         if (event.type === "message_delta") {
           outputTokens = event.usage.output_tokens ?? outputTokens;
@@ -77,12 +81,17 @@ export class AnthropicBackend implements LLMBackend {
       if (block.type === "tool_use") toolUses.push(block);
     }
 
+    // The final message carries authoritative usage (including cache fields);
+    // fall back to the streamed values if it is somehow absent.
+    const u = final.usage;
     return {
       text,
       toolUses,
       content: final.content,
-      inputTokens,
-      outputTokens,
+      inputTokens: u?.input_tokens ?? inputTokens,
+      outputTokens: u?.output_tokens ?? outputTokens,
+      cacheReadTokens: u?.cache_read_input_tokens ?? cacheReadTokens,
+      cacheWriteTokens: u?.cache_creation_input_tokens ?? cacheWriteTokens,
       stopReason: final.stop_reason,
     };
   }

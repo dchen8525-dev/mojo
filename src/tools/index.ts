@@ -1,11 +1,15 @@
 import type { Tool } from "../types.js";
 import { readFileTool } from "./read.js";
 import { writeFileTool, editFileTool } from "./write.js";
-import { bashTool } from "./bash.js";
+import { bashTool, bashOutputTool, bashKillTool } from "./bash.js";
 import { globTool } from "./glob.js";
 import { grepTool } from "./grep.js";
 import { todoWriteTool } from "./todo.js";
 import { taskTool } from "./task.js";
+import { getDiagnosticsTool } from "../lsp.js";
+import { gitStatusTool, gitCommitTool, gitPrTool } from "./git.js";
+import { webSearchTool, webFetchTool } from "./web.js";
+import { multiEditTool } from "./multiEdit.js";
 
 export const tools: Tool[] = [
   readFileTool,
@@ -14,8 +18,17 @@ export const tools: Tool[] = [
   todoWriteTool,
   taskTool,
   bashTool,
+  bashOutputTool,
+  bashKillTool,
   writeFileTool,
   editFileTool,
+  multiEditTool,
+  getDiagnosticsTool,
+  gitStatusTool,
+  gitCommitTool,
+  gitPrTool,
+  webSearchTool,
+  webFetchTool,
 ];
 
 const byName = new Map(tools.map((t) => [t.name, t]));

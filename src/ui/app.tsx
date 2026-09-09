@@ -27,10 +27,14 @@ type TranscriptItem =
 interface PermissionRequest {
   description: string;
   risk: Risk;
+  preview?: string;
   resolve: (answer: "yes" | "no" | "always" | "always_deny") => void;
 }
 
 const MAX_VISIBLE_TOOLS = 6;
+const COLLAPSE_AFTER_LINES = 14; // assistant replies longer than this fold up
+const COLLAPSE_HEAD_LINES = 10; // lines shown while folded
+const DIFF_WINDOW = 30; // diff lines visible per page in the permission prompt
 
 function ToolRowView({ row }: { row: ToolRow }) {
   const icon = row.status === "running" ? "⚡" : row.status === "ok" ? "✓" : "✗";
@@ -63,19 +67,44 @@ function TodoPanel({ todos }: { todos: TodoItem[] }) {
   );
 }
 
-function PermissionPrompt({ request }: { request: PermissionRequest }) {
+function DiffPreview({ diff, page = 0 }: { diff: string; page?: number }) {
+  const lines = diff.split("\n");
+  const start = page * DIFF_WINDOW;
+  const windowLines = lines.slice(start, start + DIFF_WINDOW);
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      {windowLines.map((l, i) => (
+        <Text
+          key={start + i}
+          color={l.startsWith("+") ? "green" : l.startsWith("-") ? "red" : l.startsWith("@@") ? "cyan" : undefined}
+          dimColor={!l.startsWith("+") && !l.startsWith("-") && !l.startsWith("@@")}
+        >
+          {l}
+        </Text>
+      ))}
+      {lines.length > DIFF_WINDOW && (
+        <Text dimColor>
+          diff {start + 1}-{Math.min(start + DIFF_WINDOW, lines.length)} / {lines.length} lines · PageUp/PageDown to scroll
+        </Text>
+      )}
+    </Box>
+  );
+}
+
+function PermissionPrompt({ request, diffPage }: { request: PermissionRequest; diffPage: number }) {
   return (
     <Box flexDirection="column" borderStyle="double" borderColor={request.risk === "high" ? "red" : "yellow"} paddingX={1}>
       <Text bold color={request.risk === "high" ? "red" : "yellow"}>
         Permission required {request.risk === "high" ? "(high risk)" : "(write)"}
       </Text>
       <Text>{request.description}</Text>
+      {request.preview && <DiffPreview diff={request.preview} page={diffPage} />}
       <Text dimColor>y = allow once · a = always allow · d = always deny · n / Esc = deny once</Text>
     </Box>
   );
 }
 
-function TranscriptView({ items }: { items: TranscriptItem[] }) {
+function TranscriptView({ items, expandedAll }: { items: TranscriptItem[]; expandedAll: boolean }) {
   return (
     <Box flexDirection="column">
       {items.map((item, i) => {
@@ -88,16 +117,53 @@ function TranscriptView({ items }: { items: TranscriptItem[] }) {
               <Text>{item.text}</Text>
             </Box>
           );
-        if (item.kind === "assistant")
+        if (item.kind === "assistant") {
+          const lines = item.text.split("\n");
+          const foldable = lines.length > COLLAPSE_AFTER_LINES;
+          const collapsed = foldable && !expandedAll;
+          if (collapsed) {
+            return (
+              <Box key={i} flexDirection="column" marginBottom={1}>
+                <Markdown text={lines.slice(0, COLLAPSE_HEAD_LINES).join("\n")} />
+                <Text dimColor>
+                  … {lines.length - COLLAPSE_HEAD_LINES} more lines · Ctrl+O to expand
+                </Text>
+              </Box>
+            );
+          }
           return (
             <Box key={i} marginBottom={1}>
               <Markdown text={item.text} />
             </Box>
           );
+        }
         if (item.kind === "tool") return <ToolRowView key={i} row={item.row} />;
         return (
           <Text key={i} dimColor>
             {item.text}
+          </Text>
+        );
+      })}
+    </Box>
+  );
+}
+
+function HistoryPicker({ items, sel }: { items: string[]; sel: number }) {
+  const shown = items.slice(-8);
+  const offset = items.length - shown.length;
+  return (
+    <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1} marginBottom={1}>
+      <Text bold dimColor>
+        Prompt history (↑/↓ select · Enter fill · Esc close)
+      </Text>
+      {shown.map((t, i) => {
+        const idx = offset + i;
+        const active = idx === sel;
+        const one = t.split("\n")[0].slice(0, 100);
+        return (
+          <Text key={idx} color={active ? "cyan" : undefined} dimColor={!active}>
+            {active ? "❯ " : "  "}
+            {one}
           </Text>
         );
       })}
@@ -129,6 +195,14 @@ export function AgentApp({
   const [usage, setUsage] = useState({ input: 0, output: 0 });
   const [error, setError] = useState("");
   const [pendingImages, setPendingImages] = useState<ImageBlockParam[]>([]);
+  const [planMode, setPlanMode] = useState(agent.planMode);
+  const [expandedAll, setExpandedAll] = useState(false);
+  const [diffPage, setDiffPage] = useState(0);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historySel, setHistorySel] = useState(0);
+  const historyRef = useRef<string[]>([]); // user prompts this session, newest last
+  const historyOpenRef = useRef(false);
+  historyOpenRef.current = historyOpen;
 
   const abortRef = useRef<AbortController | null>(null);
   const streamRef = useRef("");
@@ -142,8 +216,8 @@ export function AgentApp({
 
   // Register the permission handler for the UI.
   useEffect(() => {
-    bridge.askPermission = (description: string, risk: Risk) =>
-      new Promise<"yes" | "no" | "always" | "always_deny">((resolve) => setPermission({ description, risk, resolve }));
+    bridge.askPermission = (description: string, risk: Risk, preview?: string) =>
+      new Promise<"yes" | "no" | "always" | "always_deny">((resolve) => setPermission({ description, risk, preview, resolve }));
     return () => {
       delete bridge.askPermission;
     };
@@ -151,46 +225,91 @@ export function AgentApp({
 
   // Keyboard: Esc interrupts / denies; permission shortcuts when a prompt is up.
   useInput(
-    useCallback((ch, key) => {
-      const perm = permissionRef.current;
-      if (perm) {
-        const a = ch.toLowerCase();
-        if (a === "y") {
-          perm.resolve("yes");
-          setPermission(null);
-        } else if (a === "a") {
-          perm.resolve("always");
-          setPermission(null);
-        } else if (a === "d") {
-          perm.resolve("always_deny");
-          setPermission(null);
-        } else if (a === "n" || key.escape) {
-          perm.resolve("no");
-          setPermission(null);
+    useCallback(
+      (ch, key) => {
+        const perm = permissionRef.current;
+        if (perm) {
+          if (key.pageDown) {
+            setDiffPage((p) => p + 1);
+            return;
+          }
+          if (key.pageUp) {
+            setDiffPage((p) => Math.max(0, p - 1));
+            return;
+          }
+          const a = ch.toLowerCase();
+          if (a === "y") {
+            perm.resolve("yes");
+            setPermission(null);
+          } else if (a === "a") {
+            perm.resolve("always");
+            setPermission(null);
+          } else if (a === "d") {
+            perm.resolve("always_deny");
+            setPermission(null);
+          } else if (a === "n" || key.escape) {
+            perm.resolve("no");
+            setPermission(null);
+          }
+          return;
         }
-        return;
-      }
-      if (key.escape && busyRef.current) {
-        abortRef.current?.abort();
-      }
-      if (key.ctrl && ch === "v" && !busyRef.current && !pastingRef.current) {
-        // Paste an image from the clipboard into the pending attachments.
-        pastingRef.current = true;
-        captureClipboardImage()
-          .then((img) => {
-            if (img) setPendingImages((prev) => [...prev, img]);
-            else setItems((prev) => [...prev, { kind: "system", text: "(clipboard has no image)" }]);
-          })
-          .finally(() => {
-            pastingRef.current = false;
-          });
-        return;
-      }
-      if (key.ctrl && ch === "c") {
-        if (busyRef.current) abortRef.current?.abort();
-        else exit();
-      }
-    }, []),
+        if (key.ctrl && ch === "o") {
+          setExpandedAll((v) => !v);
+          return;
+        }
+        if (historyOpenRef.current) {
+          const list = historyRef.current;
+          if (key.escape) {
+            setHistoryOpen(false);
+            return;
+          }
+          if (key.upArrow || (key.ctrl && ch === "p")) {
+            setHistorySel((s) => Math.max(0, s - 1));
+            return;
+          }
+          if (key.downArrow || (key.ctrl && ch === "n")) {
+            setHistorySel((s) => Math.min(list.length - 1, s + 1));
+            return;
+          }
+          if (key.return) {
+            const picked = list[historySel];
+            setHistoryOpen(false);
+            if (picked !== undefined) setInput(picked);
+            return;
+          }
+          // Any other key closes the picker and falls through to the input box.
+          setHistoryOpen(false);
+        }
+        if (key.escape && busyRef.current) {
+          abortRef.current?.abort();
+          return;
+        }
+        if (key.escape && !busyRef.current && historyRef.current.length) {
+          const last = historyRef.current.length - 1;
+          setHistorySel(last);
+          setHistoryOpen(true);
+          return;
+        }
+        if (key.ctrl && ch === "v" && !busyRef.current && !pastingRef.current) {
+          // Paste an image from the clipboard into the pending attachments.
+          pastingRef.current = true;
+          captureClipboardImage()
+            .then((img) => {
+              if (img) setPendingImages((prev) => [...prev, img]);
+              else setItems((prev) => [...prev, { kind: "system", text: "(clipboard has no image)" }]);
+            })
+            .finally(() => {
+              pastingRef.current = false;
+            });
+          return;
+        }
+        if (key.ctrl && ch === "c") {
+          if (busyRef.current) abortRef.current?.abort();
+          else exit();
+        }
+      },
+      [historySel, exit],
+    ),
   );
 
   // Poll the shared todo store after each turn.
@@ -207,6 +326,12 @@ export function AgentApp({
       setBusy(true);
       setStreamText("");
       setPendingImages([]);
+      setDiffPage(0);
+      // Remember plain user prompts (not slash commands) for the Esc history picker.
+      if (!display.startsWith("/") && display.trim()) {
+        const h = historyRef.current;
+        if (h[h.length - 1] !== display) h.push(display);
+      }
       setItems((prev) => [...prev, { kind: "user", text: display + (images.length ? ` [+${images.length} image${images.length > 1 ? "s" : ""}]` : "") }]);
       const controller = new AbortController();
       abortRef.current = controller;
@@ -237,8 +362,18 @@ export function AgentApp({
           );
         },
         onUsage: (inp, out) => setUsage({ input: inp, output: out }),
+        onCostWarning: (message) => setItems((prev) => [...prev, { kind: "system", text: `[cost] ${message}` }]),
         onCompacting: () => setItems((prev) => [...prev, { kind: "system", text: "… compacting context …" }]),
+        onCompacted: (before, after) =>
+          setItems((prev) => [
+            ...prev,
+            { kind: "system", text: `context compacted: ${before.toLocaleString()} → ${after.toLocaleString()} tokens` },
+          ]),
         onHook: (event, message) => setItems((prev) => [...prev, { kind: "system", text: `[hook ${event}] ${message}` }]),
+        onPlanApproved: () => {
+          setItems((prev) => [...prev, { kind: "system", text: "plan approved — switching to execution mode" }]);
+          setPlanMode(false);
+        },
       };
 
       try {
@@ -284,6 +419,7 @@ export function AgentApp({
           exit();
           return;
         }
+        setPlanMode(agent.planMode);
         if (result) setItems((prev) => [...prev, { kind: "system", text: result }]);
         refreshTodos();
         return;
@@ -323,7 +459,7 @@ export function AgentApp({
 
   return (
     <Box flexDirection="column">
-      <TranscriptView items={visibleItems} />
+      <TranscriptView items={visibleItems} expandedAll={expandedAll} />
 
       {busy && streamText && (
         <Box marginBottom={1}>
@@ -337,11 +473,13 @@ export function AgentApp({
         </Text>
       )}
 
-      {permission && <PermissionPrompt request={permission} />}
+      {permission && <PermissionPrompt request={permission} diffPage={diffPage} />}
 
       {error && <Text color="red">Error: {error}</Text>}
 
       <TodoPanel todos={todos} />
+
+      {historyOpen && <HistoryPicker items={historyRef.current} sel={historySel} />}
 
       <Box>
         <Text color="green" bold>
@@ -351,14 +489,16 @@ export function AgentApp({
           value={input}
           onChange={setInput}
           onSubmit={onSubmit}
-          focus={!permission}
-          placeholder={busy ? "waiting for agent…" : "ask the agent… (/help)"}
+          focus={!permission && !historyOpen}
+          placeholder={busy ? "waiting for agent…" : "ask the agent… (/help · Esc history · Ctrl+O expand)"}
         />
       </Box>
 
       <Text dimColor>
+        {planMode && <Text color="magenta" bold>{"PLAN "}</Text>}
         {agent.provider}:{agent.model} · session {sessionId} · ctx in {usage.input} / out {usage.output} · mode{" "}
         {permissions.mode}
+        {expandedAll ? " · all expanded (Ctrl+O)" : ""}
       </Text>
     </Box>
   );

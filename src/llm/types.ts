@@ -5,8 +5,13 @@ export interface AssistantTurn {
   toolUses: ToolUseBlock[];
   /** Full blocks in Anthropic format (OpenAI backend converts back). */
   content: ContentBlock[];
+  /** Fresh (non-cached) input tokens. */
   inputTokens: number;
   outputTokens: number;
+  /** Input tokens served from the prompt cache (0 when the provider hides it). */
+  cacheReadTokens: number;
+  /** Input tokens written to the prompt cache (Anthropic only). */
+  cacheWriteTokens: number;
   stopReason: string | null;
 }
 

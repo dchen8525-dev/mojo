@@ -67,6 +67,28 @@ describe("createSession / loadSession", () => {
   it("returns null for unknown sessions", async () => {
     expect(await session.loadSession("deadbeef")).toBeNull();
   });
+
+  it("rewriteMessages replaces the log but keeps the meta header", async () => {
+    const { id, meta } = await session.createSession("D:\\proj");
+    await session.appendMessages(id, [
+      { role: "user", content: "old1" },
+      { role: "assistant", content: "old2" },
+      { role: "user", content: "old3" },
+    ]);
+    await session.appendModel(id, "anthropic:claude-sonnet-4-5");
+    await session.rewriteMessages(id, [
+      { role: "user", content: "summary" },
+      { role: "assistant", content: "ack" },
+    ]);
+    const loaded = await session.loadSession(id);
+    expect(loaded?.meta.id).toBe(id);
+    expect(loaded?.meta.cwd).toBe("D:\\proj");
+    expect(loaded?.meta.model).toBeUndefined(); // model markers dropped by the rewrite
+    expect(loaded?.messages.map((m) => m.content)).toEqual(["summary", "ack"]);
+    // Appending afterwards still works.
+    await session.appendMessages(id, [{ role: "user", content: "next" }]);
+    expect((await session.loadSession(id))?.messages).toHaveLength(3);
+  });
 });
 
 describe("listSessions", () => {
