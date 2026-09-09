@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { compareUrl, gitCommitTool, gitPrTool, gitStatusTool, looksSecret } from "../src/tools/git.js";
+import { compareUrl, gitCommitTool, gitDiffTool, gitPrTool, gitStatusTool, looksSecret } from "../src/tools/git.js";
 import type { ToolContext } from "../src/types.js";
 
 function git(cwd: string, ...args: string[]): string {
@@ -173,6 +173,74 @@ describe("git_commit", () => {
     expect(r.content).toContain("Nothing staged");
     backToMain();
     git(dir, "branch", "-D", "empty-commit");
+  });
+});
+
+describe("git_diff", () => {
+  function workBranch(name: string) {
+    git(dir, "checkout", "-b", name);
+  }
+  function backToMain() {
+    git(dir, "checkout", "main");
+  }
+
+  it("shows unstaged changes", async () => {
+    await fs.writeFile(path.join(dir, "readme.md"), "# project v2\n", "utf8");
+    const r = await gitDiffTool.execute({}, ctx());
+    expect(r.isError).toBeUndefined();
+    expect(r.content).toContain("readme.md");
+    expect(r.content).toContain("-# project");
+    expect(r.content).toContain("+# project v2");
+    git(dir, "checkout", "--", "readme.md");
+  });
+
+  it("shows staged changes", async () => {
+    await fs.writeFile(path.join(dir, "staged.txt"), "hello\n", "utf8");
+    git(dir, "add", "staged.txt");
+    const r = await gitDiffTool.execute({ staged: true }, ctx());
+    expect(r.content).toContain("staged.txt");
+    expect(r.content).toContain("+hello");
+    git(dir, "restore", "--staged", "staged.txt");
+    await fs.rm(path.join(dir, "staged.txt"));
+  });
+
+  it("shows a committed range diff (base...HEAD)", async () => {
+    workBranch("diff-range");
+    await fs.writeFile(path.join(dir, "range.ts"), "export default 1;\n", "utf8");
+    git(dir, "add", "range.ts");
+    git(dir, "commit", "-m", "add range");
+    const base = git(dir, "rev-parse", "main");
+    const r = await gitDiffTool.execute({ base }, ctx());
+    expect(r.content).toContain("range.ts");
+    expect(r.content).toContain("+export default 1;");
+    backToMain();
+    git(dir, "branch", "-D", "diff-range");
+  });
+
+  it("limits the diff to a single path", async () => {
+    await fs.writeFile(path.join(dir, "aaa.txt"), "a\n", "utf8");
+    await fs.writeFile(path.join(dir, "bbb.txt"), "b\n", "utf8");
+    const r = await gitDiffTool.execute({ path: "aaa.txt" }, ctx());
+    expect(r.content).toContain("aaa.txt");
+    expect(r.content).not.toContain("bbb.txt");
+    await fs.rm(path.join(dir, "aaa.txt"));
+    await fs.rm(path.join(dir, "bbb.txt"));
+  });
+
+  it("reports no changes when the tree is clean", async () => {
+    const r = await gitDiffTool.execute({}, ctx());
+    expect(r.isError).toBeUndefined();
+    expect(r.content).toContain("No changes");
+  });
+
+  it("errors outside a repo", async () => {
+    const bare = await fs.mkdtemp(path.join(os.tmpdir(), "agent-nogit-diff-"));
+    try {
+      const r = await gitDiffTool.execute({}, ctx({ cwd: bare }));
+      expect(r.isError).toBe(true);
+    } finally {
+      await fs.rm(bare, { recursive: true, force: true });
+    }
   });
 });
 
