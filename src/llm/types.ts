@@ -17,6 +17,8 @@ export interface AssistantTurn {
 
 export interface StreamEvents {
   onTextDelta?: (delta: string) => void;
+  /** Reasoning/thinking tokens streamed before (or between) visible output. */
+  onThinkingDelta?: (delta: string) => void;
   onToolUseStart?: (name: string, id: string) => void;
 }
 

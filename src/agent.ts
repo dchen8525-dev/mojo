@@ -467,6 +467,11 @@ Rules:
     return todoStore.items;
   }
 
+  /** Read-only view of the conversation history (for UIs rendering transcripts). */
+  getMessages(): readonly MessageParam[] {
+    return this.messages;
+  }
+
   /** Files the agent has modified so far this session (newest last). */
   checkpointList() {
     return this.checkpoints.list();

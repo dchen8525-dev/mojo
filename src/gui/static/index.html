@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>mojo</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script src="/vendor/marked.min.js"></script>
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <div class="side-head">
+          <span class="brand">mojo</span>
+        </div>
+        <div class="side-new">
+          <button id="new-session" title="新建会话">＋ 新建任务</button>
+        </div>
+        <div class="side-label">任务</div>
+        <div id="session-list" class="session-list"></div>
+        <div class="side-foot">
+          <button id="quit" class="quit" title="退出">⏻ 退出</button>
+        </div>
+      </aside>
+
+      <main id="main">
+        <section id="welcome" class="welcome">
+          <h1>mojo，我帮你</h1>
+          <p class="welcome-sub">一个会话、一条命令，把活儿交给智能体</p>
+        </section>
+
+        <section id="transcript" class="hidden"></section>
+
+        <footer id="statusbar"></footer>
+
+        <div id="composer">
+          <div id="attachments"></div>
+          <div id="palette" class="hidden"></div>
+          <div id="model-pop" class="hidden">
+            <input id="model-input" placeholder="provider:model 或别名，回车确认" />
+            <button id="model-apply">切换</button>
+          </div>
+          <div class="composer-box">
+            <textarea id="input" rows="1" placeholder="今天帮你做些什么？输入 / 调用命令"></textarea>
+            <div class="composer-bar">
+              <div class="bar-left">
+                <button id="attach" title="添加图片">＋</button>
+                <div class="mode-picker" id="mode-picker">
+                  <button data-mode="default" class="active">默认</button>
+                  <button data-mode="auto">自动</button>
+                  <button data-mode="yolo">YOLO</button>
+                </div>
+                <label class="plan-toggle"><input type="checkbox" id="plan-toggle" /> PLAN</label>
+              </div>
+              <div class="bar-right">
+                <div class="ctx-bar" title="上下文占用">
+                  <div class="ctx-fill" id="ctx-fill"></div>
+                  <span id="ctx-text"></span>
+                </div>
+                <div class="model-picker">
+                  <select id="model-select" title="选择模型"></select>
+                  <button id="model-custom" title="自定义模型">✎</button>
+                </div>
+                <input type="file" id="file-input" accept="image/*" multiple hidden />
+                <button id="send" title="发送">↑</button>
+                <button id="stop" class="hidden" title="停止">■</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <div id="perm-modal" class="modal hidden">
+      <div class="modal-card">
+        <div class="perm-head">
+          <span id="perm-risk" class="badge"></span>
+          <span id="perm-desc" class="perm-desc"></span>
+        </div>
+        <pre id="perm-preview" class="perm-preview"></pre>
+        <div class="perm-actions">
+          <button data-decision="yes" class="primary">允许一次 <kbd>Y</kbd></button>
+          <button data-decision="always">总是允许 <kbd>A</kbd></button>
+          <button data-decision="no">拒绝一次 <kbd>N</kbd></button>
+          <button data-decision="always_deny" class="danger">总是拒绝 <kbd>D</kbd></button>
+        </div>
+      </div>
+    </div>
+
+    <div id="input-modal" class="modal hidden">
+      <div class="modal-card narrow">
+        <div id="input-title" class="input-title"></div>
+        <input id="input-field" type="text" maxlength="80" />
+        <div class="perm-actions">
+          <button id="input-ok" class="primary">确定</button>
+          <button id="input-cancel">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="hidden"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
