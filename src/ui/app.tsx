@@ -8,6 +8,7 @@ import type { TodoItem } from "../tools/todo.js";
 import { bridge } from "./bridge.js";
 import { Markdown } from "./markdown.js";
 import { ThemeContext, useTheme, type Theme } from "./theme.js";
+import { clipCell, GUTTER, looksLikeDiff, splitColumnWidth, splitDiffRows } from "./splitDiff.js";
 import { captureClipboardImage } from "../clipboard.js";
 import { backgroundManager } from "../tools/background.js";
 import { expandFileReferences, renderCommand, type SlashCommand } from "../commands.js";
@@ -74,13 +75,53 @@ function TodoPanel({ todos }: { todos: TodoItem[] }) {
   );
 }
 
-function DiffPreview({ diff, page = 0 }: { diff: string; page?: number }) {
+function DiffPreview({ diff, page = 0, split, termCols }: { diff: string; page?: number; split: boolean; termCols: number }) {
   const theme = useTheme();
+  const isDiff = looksLikeDiff(diff);
+  const showSplit = split && isDiff;
+  const tint = (l: string) =>
+    l.startsWith("+") ? theme.diffAdd : l.startsWith("-") ? theme.diffDel : l.startsWith("@@") ? theme.diffMeta : undefined;
+
+  if (showSplit) {
+    const rows = splitDiffRows(diff);
+    const start = page * DIFF_WINDOW;
+    const windowRows = rows.slice(start, start + DIFF_WINDOW);
+    const w = splitColumnWidth(termCols);
+    const side = GUTTER + w;
+    return (
+      <Box flexDirection="column" marginTop={1}>
+        {windowRows.map((r, i) =>
+          r.kind === "meta" ? (
+            <Text key={start + i} color={theme.diffMeta} wrap="truncate">
+              {r.text}
+            </Text>
+          ) : (
+            <Box key={start + i}>
+              <Box width={side}>
+                <Text dimColor>{r.left.num === null ? "   " : `${String(r.left.num).padStart(2)} `}</Text>
+                <Text color={r.changed ? theme.diffDel : undefined} dimColor={!r.changed} wrap="truncate">
+                  {clipCell(r.left.text, w)}
+                </Text>
+              </Box>
+              <Box width={side}>
+                <Text dimColor>{r.right.num === null ? "   " : `${String(r.right.num).padStart(2)} `}</Text>
+                <Text color={r.changed ? theme.diffAdd : undefined} dimColor={!r.changed} wrap="truncate">
+                  {clipCell(r.right.text, w)}
+                </Text>
+              </Box>
+            </Box>
+          ),
+        )}
+        <Text dimColor>
+          split · rows {start + 1}-{Math.min(start + DIFF_WINDOW, rows.length)} / {rows.length} · PageUp/PageDown scroll · t = unified
+        </Text>
+      </Box>
+    );
+  }
+
   const lines = diff.split("\n");
   const start = page * DIFF_WINDOW;
   const windowLines = lines.slice(start, start + DIFF_WINDOW);
-  const tint = (l: string) =>
-    l.startsWith("+") ? theme.diffAdd : l.startsWith("-") ? theme.diffDel : l.startsWith("@@") ? theme.diffMeta : undefined;
   return (
     <Box flexDirection="column" marginTop={1}>
       {windowLines.map((l, i) => (
@@ -88,20 +129,20 @@ function DiffPreview({ diff, page = 0 }: { diff: string; page?: number }) {
           key={start + i}
           color={tint(l)}
           dimColor={!l.startsWith("+") && !l.startsWith("-") && !l.startsWith("@@")}
+          wrap="truncate"
         >
           {l}
         </Text>
       ))}
-      {lines.length > DIFF_WINDOW && (
-        <Text dimColor>
-          diff {start + 1}-{Math.min(start + DIFF_WINDOW, lines.length)} / {lines.length} lines · PageUp/PageDown to scroll
-        </Text>
-      )}
+      <Text dimColor>
+        {lines.length > DIFF_WINDOW ? `diff ${start + 1}-${Math.min(start + DIFF_WINDOW, lines.length)} / ${lines.length} lines · PageUp/PageDown to scroll` : ""}
+        {isDiff ? `${lines.length > DIFF_WINDOW ? " · " : ""}t = split` : ""}
+      </Text>
     </Box>
   );
 }
 
-function PermissionPrompt({ request, diffPage }: { request: PermissionRequest; diffPage: number }) {
+function PermissionPrompt({ request, diffPage, diffSplit, termCols }: { request: PermissionRequest; diffPage: number; diffSplit: boolean; termCols: number }) {
   const theme = useTheme();
   const danger = request.risk === "high";
   const tone = danger ? theme.borderDanger : theme.borderWarn;
@@ -111,8 +152,8 @@ function PermissionPrompt({ request, diffPage }: { request: PermissionRequest; d
         Permission required {danger ? "(high risk)" : "(write)"}
       </Text>
       <Text>{request.description}</Text>
-      {request.preview && <DiffPreview diff={request.preview} page={diffPage} />}
-      <Text dimColor>y = allow once · a = always allow · d = always deny · n / Esc = deny once</Text>
+      {request.preview && <DiffPreview diff={request.preview} page={diffPage} split={diffSplit} termCols={termCols} />}
+      <Text dimColor>y = allow once · a = always allow · d = always deny · n / Esc = deny once · t = toggle split diff</Text>
     </Box>
   );
 }
@@ -215,6 +256,8 @@ export function AgentApp({
   const [planMode, setPlanMode] = useState(agent.planMode);
   const [expandedAll, setExpandedAll] = useState(false);
   const [diffPage, setDiffPage] = useState(0);
+  const [diffSplit, setDiffSplit] = useState(true);
+  const [termCols, setTermCols] = useState(() => stdout.columns ?? 80);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historySel, setHistorySel] = useState(0);
   const historyRef = useRef<string[]>([]); // user prompts this session, newest last
@@ -243,10 +286,22 @@ export function AgentApp({
     };
   }, []);
 
+  // Keep split-diff column widths in sync with terminal resizes.
+  useEffect(() => {
+    const onResize = () => setTermCols(stdout.columns ?? 80);
+    stdout.on("resize", onResize);
+    return () => {
+      stdout.off("resize", onResize);
+    };
+  }, [stdout]);
+
   // Register the permission handler for the UI.
   useEffect(() => {
     bridge.askPermission = (description: string, risk: Risk, preview?: string) =>
-      new Promise<"yes" | "no" | "always" | "always_deny">((resolve) => setPermission({ description, risk, preview, resolve }));
+      new Promise<"yes" | "no" | "always" | "always_deny">((resolve) => {
+        setDiffPage(0);
+        setPermission({ description, risk, preview, resolve });
+      });
     return () => {
       delete bridge.askPermission;
     };
@@ -267,6 +322,11 @@ export function AgentApp({
             return;
           }
           const a = ch.toLowerCase();
+          if (a === "t" && permissionRef.current?.preview) {
+            setDiffSplit((v) => !v);
+            setDiffPage(0);
+            return;
+          }
           if (a === "y") {
             perm.resolve("yes");
             setPermission(null);
@@ -507,7 +567,7 @@ export function AgentApp({
           </Text>
         )}
 
-        {permission && <PermissionPrompt request={permission} diffPage={diffPage} />}
+        {permission && <PermissionPrompt request={permission} diffPage={diffPage} diffSplit={diffSplit} termCols={termCols} />}
 
         {error && <Text color={theme.error}>Error: {error}</Text>}
 
