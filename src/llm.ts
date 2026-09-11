@@ -11,11 +11,13 @@ import { lookupModel } from "./llm/models.js";
 export type { AssistantTurn, StreamEvents, Provider } from "./llm/types.js";
 export { knownModelNames, lookupModel } from "./llm/models.js";
 
-interface Config {
+export interface Config {
   provider?: Provider;
   model?: string;
   baseURL?: string;
   apiKey?: string;
+  /** UI theme: "dark" | "light" | "auto" (see src/ui/theme.ts). */
+  theme?: string;
 }
 
 export interface LLMOptions extends Config {
@@ -37,9 +39,19 @@ function readConfigFile(p: string): Config {
  * Layered config: ~/.node-agent/config.json (global) overridden per-key by
  * <cwd>/.node-agent/config.json (project). Same layering as hooks/lsp.
  */
+/**
+ * Both config layers unmerged, so callers can tell *which* file a key came
+ * from (the theme picker reports that back to the user).
+ */
+export function loadConfigLayers(cwd: string = process.cwd(), home: string = os.homedir()): { global: Config; project: Config } {
+  return {
+    global: readConfigFile(path.join(home, ".node-agent", "config.json")),
+    project: readConfigFile(path.join(cwd, ".node-agent", "config.json")),
+  };
+}
+
 export function loadConfigFiles(cwd: string = process.cwd(), home: string = os.homedir()): Config {
-  const global = readConfigFile(path.join(home, ".node-agent", "config.json"));
-  const project = readConfigFile(path.join(cwd, ".node-agent", "config.json"));
+  const { global, project } = loadConfigLayers(cwd, home);
   return { ...global, ...project };
 }
 

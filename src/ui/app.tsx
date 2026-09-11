@@ -7,6 +7,7 @@ import type { ImageBlockParam, Risk } from "../types.js";
 import type { TodoItem } from "../tools/todo.js";
 import { bridge } from "./bridge.js";
 import { Markdown } from "./markdown.js";
+import { ThemeContext, useTheme, type Theme } from "./theme.js";
 import { captureClipboardImage } from "../clipboard.js";
 import { backgroundManager } from "../tools/background.js";
 import { expandFileReferences, renderCommand, type SlashCommand } from "../commands.js";
@@ -38,8 +39,9 @@ const COLLAPSE_HEAD_LINES = 10; // lines shown while folded
 const DIFF_WINDOW = 30; // diff lines visible per page in the permission prompt
 
 function ToolRowView({ row }: { row: ToolRow }) {
+  const theme = useTheme();
   const icon = row.status === "running" ? "⚡" : row.status === "ok" ? "✓" : "✗";
-  const color = row.status === "running" ? "cyan" : row.status === "ok" ? "green" : "red";
+  const color = row.status === "running" ? theme.toolRunning : row.status === "ok" ? theme.toolOk : theme.toolError;
   const resultLine = row.result ? row.result.split("\n")[0] : "";
   return (
     <Box>
@@ -52,14 +54,18 @@ function ToolRowView({ row }: { row: ToolRow }) {
 }
 
 function TodoPanel({ todos }: { todos: TodoItem[] }) {
+  const theme = useTheme();
   if (!todos.length) return null;
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1} marginBottom={1}>
+    <Box flexDirection="column" borderStyle="round" borderColor={theme.border} paddingX={1} marginBottom={1}>
       <Text bold dimColor>
         Tasks
       </Text>
       {todos.map((t) => (
-        <Text key={t.id} color={t.status === "completed" ? "green" : t.status === "in_progress" ? "yellow" : "gray"}>
+        <Text
+          key={t.id}
+          color={t.status === "completed" ? theme.todoDone : t.status === "in_progress" ? theme.todoActive : theme.todoPending}
+        >
           {t.status === "completed" ? "[x] " : t.status === "in_progress" ? "[>] " : "[ ] "}
           {t.content}
         </Text>
@@ -69,15 +75,18 @@ function TodoPanel({ todos }: { todos: TodoItem[] }) {
 }
 
 function DiffPreview({ diff, page = 0 }: { diff: string; page?: number }) {
+  const theme = useTheme();
   const lines = diff.split("\n");
   const start = page * DIFF_WINDOW;
   const windowLines = lines.slice(start, start + DIFF_WINDOW);
+  const tint = (l: string) =>
+    l.startsWith("+") ? theme.diffAdd : l.startsWith("-") ? theme.diffDel : l.startsWith("@@") ? theme.diffMeta : undefined;
   return (
     <Box flexDirection="column" marginTop={1}>
       {windowLines.map((l, i) => (
         <Text
           key={start + i}
-          color={l.startsWith("+") ? "green" : l.startsWith("-") ? "red" : l.startsWith("@@") ? "cyan" : undefined}
+          color={tint(l)}
           dimColor={!l.startsWith("+") && !l.startsWith("-") && !l.startsWith("@@")}
         >
           {l}
@@ -93,10 +102,13 @@ function DiffPreview({ diff, page = 0 }: { diff: string; page?: number }) {
 }
 
 function PermissionPrompt({ request, diffPage }: { request: PermissionRequest; diffPage: number }) {
+  const theme = useTheme();
+  const danger = request.risk === "high";
+  const tone = danger ? theme.borderDanger : theme.borderWarn;
   return (
-    <Box flexDirection="column" borderStyle="double" borderColor={request.risk === "high" ? "red" : "yellow"} paddingX={1}>
-      <Text bold color={request.risk === "high" ? "red" : "yellow"}>
-        Permission required {request.risk === "high" ? "(high risk)" : "(write)"}
+    <Box flexDirection="column" borderStyle="double" borderColor={tone} paddingX={1}>
+      <Text bold color={tone}>
+        Permission required {danger ? "(high risk)" : "(write)"}
       </Text>
       <Text>{request.description}</Text>
       {request.preview && <DiffPreview diff={request.preview} page={diffPage} />}
@@ -106,13 +118,14 @@ function PermissionPrompt({ request, diffPage }: { request: PermissionRequest; d
 }
 
 function TranscriptView({ items, expandedAll }: { items: TranscriptItem[]; expandedAll: boolean }) {
+  const theme = useTheme();
   return (
     <Box flexDirection="column">
       {items.map((item, i) => {
         if (item.kind === "user")
           return (
             <Box key={i} marginBottom={1}>
-              <Text color="green" bold>
+              <Text color={theme.user} bold>
                 {"❯ "}
               </Text>
               <Text>{item.text}</Text>
@@ -150,10 +163,11 @@ function TranscriptView({ items, expandedAll }: { items: TranscriptItem[]; expan
 }
 
 function HistoryPicker({ items, sel }: { items: string[]; sel: number }) {
+  const theme = useTheme();
   const shown = items.slice(-8);
   const offset = items.length - shown.length;
   return (
-    <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1} marginBottom={1}>
+    <Box flexDirection="column" borderStyle="single" borderColor={theme.border} paddingX={1} marginBottom={1}>
       <Text bold dimColor>
         Prompt history (↑/↓ select · Enter fill · Esc close)
       </Text>
@@ -162,7 +176,7 @@ function HistoryPicker({ items, sel }: { items: string[]; sel: number }) {
         const active = idx === sel;
         const one = t.split("\n")[0].slice(0, 100);
         return (
-          <Text key={idx} color={active ? "cyan" : undefined} dimColor={!active}>
+          <Text key={idx} color={active ? theme.accent : undefined} dimColor={!active}>
             {active ? "❯ " : "  "}
             {one}
           </Text>
@@ -178,15 +192,18 @@ export function AgentApp({
   sessionId,
   onCommand,
   customCommands,
+  initialTheme,
 }: {
   agent: Agent;
   permissions: PermissionManager;
   sessionId: string;
   onCommand: (line: string) => Promise<string | null | "quit">;
   customCommands: Map<string, SlashCommand>;
+  initialTheme: Theme;
 }) {
   const { exit } = useApp();
   const { stdout } = useStdout();
+  const [theme, setTheme] = useState<Theme>(initialTheme);
   const [items, setItems] = useState<TranscriptItem[]>([]);
   const [streamText, setStreamText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -213,6 +230,18 @@ export function AgentApp({
   const imagesRef = useRef<ImageBlockParam[]>([]);
   imagesRef.current = pendingImages;
   const pastingRef = useRef(false);
+  const themeRef = useRef(theme);
+  themeRef.current = theme;
+
+  // Let /theme (CLI side, outside React) swap the palette in place.
+  useEffect(() => {
+    bridge.setTheme = (next) => setTheme(next);
+    bridge.getTheme = () => themeRef.current;
+    return () => {
+      delete bridge.setTheme;
+      delete bridge.getTheme;
+    };
+  }, []);
 
   // Register the permission handler for the UI.
   useEffect(() => {
@@ -462,44 +491,46 @@ export function AgentApp({
   }, [items]);
 
   return (
-    <Box flexDirection="column">
-      <TranscriptView items={visibleItems} expandedAll={expandedAll} />
+    <ThemeContext.Provider value={theme}>
+      <Box flexDirection="column">
+        <TranscriptView items={visibleItems} expandedAll={expandedAll} />
 
-      {busy && streamText && (
-        <Box marginBottom={1}>
-          <Markdown text={streamText} />
+        {busy && streamText && (
+          <Box marginBottom={1}>
+            <Markdown text={streamText} />
+          </Box>
+        )}
+
+        {busy && !streamText && (
+          <Text dimColor>
+            ⏺ thinking… <Text color={theme.border}>(Esc to interrupt)</Text>
+          </Text>
+        )}
+
+        {permission && <PermissionPrompt request={permission} diffPage={diffPage} />}
+
+        {error && <Text color={theme.error}>Error: {error}</Text>}
+
+        <TodoPanel todos={todos} />
+
+        {historyOpen && <HistoryPicker items={historyRef.current} sel={historySel} />}
+
+        <Box>
+          <Text color={theme.user} bold>
+            {"❯ "}
+          </Text>
+          <TextInput
+            value={input}
+            onChange={setInput}
+            onSubmit={onSubmit}
+            focus={!permission && !historyOpen}
+            placeholder={busy ? "waiting for agent…" : "ask the agent… (/help · Esc history · Ctrl+O expand)"}
+          />
         </Box>
-      )}
 
-      {busy && !streamText && (
-        <Text dimColor>
-          ⏺ thinking… <Text color="gray">(Esc to interrupt)</Text>
-        </Text>
-      )}
-
-      {permission && <PermissionPrompt request={permission} diffPage={diffPage} />}
-
-      {error && <Text color="red">Error: {error}</Text>}
-
-      <TodoPanel todos={todos} />
-
-      {historyOpen && <HistoryPicker items={historyRef.current} sel={historySel} />}
-
-      <Box>
-        <Text color="green" bold>
-          {"❯ "}
-        </Text>
-        <TextInput
-          value={input}
-          onChange={setInput}
-          onSubmit={onSubmit}
-          focus={!permission && !historyOpen}
-          placeholder={busy ? "waiting for agent…" : "ask the agent… (/help · Esc history · Ctrl+O expand)"}
-        />
+        <StatusBar agent={agent} planMode={planMode} expandedAll={expandedAll} permissions={permissions} sessionId={sessionId} />
       </Box>
-
-      <StatusBar agent={agent} planMode={planMode} expandedAll={expandedAll} permissions={permissions} sessionId={sessionId} />
-    </Box>
+    </ThemeContext.Provider>
   );
 }
 
@@ -521,13 +552,16 @@ function StatusBar({
   const win = agent.contextWindow;
   const pct = win > 0 ? Math.round((est / win) * 100) : 0;
   const bgRunning = backgroundManager.list().filter((t) => !t.done).length;
+  const theme = useTheme();
+  const tight = pct >= Math.round(COMPACT_RATIO * 100);
   return (
     <Text dimColor>
-      {planMode && <Text color="magenta" bold>{"PLAN "}</Text>}
+      {planMode && <Text color={theme.plan} bold>{"PLAN "}</Text>}
       {agent.provider}:{agent.model} · session {sessionId} · ctx {est.toLocaleString()}/{win.toLocaleString()} ({pct}%)
-      {pct >= Math.round(COMPACT_RATIO * 100) ? " ⚠" : ""} · ${agent.costs.totalUsd().toFixed(2)}
+      {tight ? <Text color={theme.warn}>{" ⚠"}</Text> : ""} · ${agent.costs.totalUsd().toFixed(2)}
       {bgRunning ? ` · bg ${bgRunning}` : ""} · mode {permissions.mode}
       {expandedAll ? " · all expanded (Ctrl+O)" : ""}
+      <Text color={theme.border}>{` · ${theme.id}`}</Text>
     </Text>
   );
 }

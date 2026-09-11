@@ -122,6 +122,21 @@ describe("background tasks", () => {
     ...overrides,
   });
 
+  /**
+   * Windows spawns (cmd → node) can take well over the old fixed 400ms when the
+   * whole suite is running, so poll for the expected output instead of sleeping
+   * once and hoping.
+   */
+  async function waitForOutput(id: string, done: (content: string) => boolean, timeoutMs = 15_000) {
+    let last = await bashOutputTool.execute({ id, since: 0 }, ctx());
+    const deadline = Date.now() + timeoutMs;
+    while (!done(last.content) && Date.now() < deadline) {
+      await sleep(50);
+      last = await bashOutputTool.execute({ id, since: 0 }, ctx());
+    }
+    return last;
+  }
+
   it("run_in_background returns immediately with a task id", async () => {
     const r = await bashTool.execute(
       { command: `node -e "console.log('bg-marker'); setTimeout(()=>{}, 5000)"`, run_in_background: true },
@@ -140,8 +155,9 @@ describe("background tasks", () => {
       ctx(),
     );
     const id = /task (bg\d+)/.exec(start.content)![1];
-    await sleep(400); // let it print and exit
-    const r = await bashOutputTool.execute({ id, since: 0 }, ctx());
+    // Poll until the child has printed *and* exited — on a loaded Windows box
+    // spawning cmd → node can take longer than any single fixed sleep.
+    const r = await waitForOutput(id, (c) => c.includes("hello-bg") && /exited with code 0/.test(c));
     expect(r.content).toContain("hello-bg");
     expect(r.content).toMatch(/exited with code 0/);
     expect(r.content).toMatch(/\[next_offset=\d+\]/);
@@ -153,9 +169,11 @@ describe("background tasks", () => {
       ctx(),
     );
     const id = /task (bg\d+)/.exec(start.content)![1];
-    await sleep(150);
-    const r = await bashOutputTool.execute({ id, since: 0 }, ctx());
-    expect(r.content).toContain("still running");
+    // The task sleeps 4s, so the very first read must still see it running…
+    const first = await bashOutputTool.execute({ id, since: 0 }, ctx());
+    expect(first.content).toContain("still running");
+    // …and the marker shows up as soon as the interpreter gets going.
+    const r = await waitForOutput(id, (c) => c.includes("up"));
     expect(r.content).toContain("up");
     backgroundManager.kill(id);
 

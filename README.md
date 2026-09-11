@@ -57,6 +57,9 @@ Ink 的交互式 UI。
   `/cost <usd>` 或 `AGENT_BUDGET_USD` 设预算；用到 80% 告警、耗尽时干净终止当前轮次
   （为未执行的 tool_use 回填错误结果，历史保持合法）
 - **会话持久化**：JSONL 格式存于 `~/.node-agent/sessions/`，`/sessions` + `--resume`
+- **三套主题**：`dark` / `light` / `auto`（跟随终端背景）——深色终端与浅色终端都不
+  刺眼；`auto` 通过 OSC 11 询问终端背景色，`COLORFGBG` 兜底，拿不到再退回深色。
+  `/theme [dark|light|auto]` 热切换并写回配置，`--theme <name>` / `AGENT_THEME` 单次覆盖
 - **图片输入**：`Ctrl+V` 直接粘贴剪贴板截图（Windows / macOS / Linux）；当前模型
   不支持视觉时（DeepSeek / GLM / Qwen 等）明确提示不挂载，而不是静默丢图或报错
 - **`@file` 引用**：把文件内容内联进你的提示词（`@src/foo.ts`、`@"my file.txt"`）
@@ -150,6 +153,37 @@ $env:AGENT_BASE_URL = "https://mirror.example/v1"; agent -p "hello"
 
 启动后输入 `/model`（无参数）会显示当前 `provider:model` 与上下文窗口；
 缺 key 报错时的提示语会指明该去哪个文件补配置。
+
+### 主题（dark / light / auto）
+
+UI 不再硬编码颜色：所有组件只认语义色（"工具成功"、`diffAdd`、`accent` …），主题负责
+把这些语义映射到具体色值。三套主题：
+
+| 主题 | 说明 |
+| --- | --- |
+| `dark` | 深色终端（默认兜底） |
+| `light` | 浅色终端——压暗前景、降低饱和度，避免在白底上发灰 |
+| `auto` | 跟随终端背景：先发 OSC 11 查询背景色（300ms 超时），拿不到再看 `COLORFGBG`，都没有才退回深色 |
+
+解析优先级（高 → 低）：`--theme <name>` → `/theme <name>` 的运行时选择 → `AGENT_THEME`
+→ 项目 `.node-agent/config.json` → 全局 `~/.node-agent/config.json` → `auto`。
+
+```bash
+agent --theme light                 # 单次生效
+AGENT_THEME=dark agent              # 环境变量，同样单次生效
+AGENT_BACKGROUND=light agent        # 只给 auto 一个明确提示（跳过终端探测）
+```
+
+```json
+{ "provider": "anthropic", "apiKey": "sk-...", "theme": "auto" }
+```
+
+交互中输入 `/theme` 查看当前主题及其来源，`/theme light` 立即换色并写入全局配置
+（`apiKey`、`model` 等原有键值保留）。若项目级配置里也写了 `theme`，它会遮蔽全局设置，
+此时命令会明确提示你。
+
+主题同时作用于：Ink 交互 UI、diff 预览、任务面板、状态栏，以及 Markdown 渲染
+（`marked-terminal` 的代码块 / 标题 / 链接配色），`-p` 纯文本模式同样按主题取色。
 
 ### Windows 兼容
 
@@ -271,6 +305,7 @@ agent --resume <id>           # 继续一个已保存的会话
 agent --continue              # 直接回到最近一次更新的会话（免记 id）
 agent --export <id> [--format md|json]  # 把会话导出为 markdown/json 纪要
 agent --model openai:gpt-4o   # 启动时指定模型
+agent --theme light           # 启动时指定主题（dark | light | auto）
 agent --help                  # 用法帮助 · agent --version 打印版本号
 agent --auto                  # 自动批准非高危写操作
 agent --yolo                  # 批准一切（谨慎使用）
@@ -295,7 +330,7 @@ agent --no-mcp                # 跳过 MCP 服务器
 ### 斜杠命令
 
 `/help` · `/model [spec|list]` · `/auto [on|off]` · `/yolo` · `/plan [on|off]` ·
-`/mcp` · `/lsp` · `/compact` · `/context` · `/review [base] [focus]` ·
+`/theme [dark|light|auto]` · `/mcp` · `/lsp` · `/compact` · `/context` · `/review [base] [focus]` ·
 `/permissions [clear]` · `/hooks` · `/sessions` · `/resume <id>` · `/todos` · `/undo [-y]` ·
 `/cost [usd]` · `/clear` · `/quit`
 

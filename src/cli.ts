@@ -16,25 +16,30 @@ import { HookManager } from "./hooks.js";
 import { loadSlashCommands, renderCommand, expandFileReferences } from "./commands.js";
 import { configureLsp, disposeLsp, getLspManager, loadLspConfig } from "./lsp.js";
 import { renderSessionMarkdown, createSession, loadSession, listSessions } from "./session.js";
+import {
+  ansiHelpers,
+  ansiPaint,
+  getTheme,
+  parseThemeName,
+  resolveTheme,
+  resolveThemeAsync,
+  saveTheme,
+  THEME_NAMES,
+  type Theme,
+  type ThemeName,
+} from "./ui/theme.js";
 
-const ANSI = {
-  dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
-  cyan: (s: string) => `\x1b[36m${s}\x1b[0m`,
-  green: (s: string) => `\x1b[32m${s}\x1b[0m`,
-  yellow: (s: string) => `\x1b[33m${s}\x1b[0m`,
-  red: (s: string) => `\x1b[31m${s}\x1b[0m`,
-  bold: (s: string) => `\x1b[1m${s}\x1b[0m`,
-};
+let ANSI = ansiHelpers(getTheme("dark"));
 
-/** A compact 20-char usage bar, red once past the auto-compact threshold. */
-function contextBar(pct: number): string {
+/** A compact 20-char usage bar, warning-colored once past the compact threshold. */
+function contextBar(pct: number, theme: Theme): string {
   const filled = Math.max(0, Math.min(20, Math.round(pct / 5)));
   const bar = "█".repeat(filled) + "░".repeat(20 - filled);
-  return pct >= COMPACT_RATIO * 100 ? `\x1b[31m${bar}\x1b[0m` : `\x1b[2m${bar}\x1b[0m`;
+  return pct >= COMPACT_RATIO * 100 ? ansiPaint(theme.error, bar) : ANSI.dim(bar);
 }
 
 function parseArgs(argv: string[]) {
-  const args = { resume: "", cont: false, print: "", model: "", provider: "", auto: false, yolo: false, plan: false, mcpServer: false, noMcp: false, noLsp: false, help: false, version: false, exportId: "", exportFormat: "md" as "md" | "json" };
+  const args = { resume: "", cont: false, print: "", model: "", provider: "", theme: "", auto: false, yolo: false, plan: false, mcpServer: false, noMcp: false, noLsp: false, help: false, version: false, exportId: "", exportFormat: "md" as "md" | "json" };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--resume" && argv[i + 1]) args.resume = argv[++i];
     else if (argv[i] === "--continue") args.cont = true;
@@ -43,6 +48,7 @@ function parseArgs(argv: string[]) {
     else if (argv[i] === "--format" && argv[i + 1] && (argv[++i] === "md" || argv[i] === "json")) args.exportFormat = argv[i] as "md" | "json";
     else if (argv[i] === "--model" && argv[i + 1]) args.model = argv[++i];
     else if (argv[i] === "--provider" && argv[i + 1]) args.provider = argv[++i];
+    else if (argv[i] === "--theme" && argv[i + 1]) args.theme = argv[++i];
     else if (argv[i] === "--auto") args.auto = true;
     else if (argv[i] === "--yolo") args.yolo = true;
     else if (argv[i] === "--plan") args.plan = true;
@@ -62,7 +68,7 @@ async function resolveSession(args: { resume: string; cont: boolean }) {
   if (args.resume) {
     const loaded = await loadSession(args.resume);
     if (!loaded) {
-      console.error(ANSI.red(`Session "${args.resume}" not found.`));
+      console.error(ANSI.error(`Session "${args.resume}" not found.`));
       process.exit(1);
     }
     process.chdir(loaded.meta.cwd);
@@ -90,7 +96,7 @@ async function resolveSession(args: { resume: string; cont: boolean }) {
         };
       }
     }
-    console.error(ANSI.yellow("no previous session to continue - starting a new one."));
+    console.error(ANSI.warn("no previous session to continue - starting a new one."));
   }
   const s = await createSession(process.cwd());
   return { id: s.id, messages: undefined as MessageParam[] | undefined, cwd: process.cwd(), model: undefined as string | undefined };
@@ -114,7 +120,7 @@ async function setupMcp(args: { noMcp: boolean }): Promise<McpManager | null> {
   const statuses = await manager.connectAll(configs);
   for (const s of statuses) {
     if (s.connected) console.error(ANSI.dim(`mcp: ${s.name} connected (${s.toolCount} tools)`));
-    else console.error(ANSI.yellow(`mcp: ${s.name} failed: ${s.error}`));
+    else console.error(ANSI.warn(`mcp: ${s.name} failed: ${s.error}`));
   }
   return manager;
 }
@@ -132,12 +138,14 @@ async function setupLsp(args: { noLsp: boolean }, cwd: string) {
 
 async function runPrint(args: ReturnType<typeof parseArgs>) {
   const session = await resolveSession(args);
+  const resolved = resolveTheme({ theme: args.theme, cwd: session.cwd });
+  ANSI = ansiHelpers(resolved.theme);
   const mcp = await setupMcp(args);
   await setupLsp(args, session.cwd);
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
   const ask = (q: string) => new Promise<string>((res) => rl.question(q, res));
   const permissions = new PermissionManager(async (desc: string, risk: Risk, preview?: string) => {
-    const tag = risk === "high" ? ANSI.red("[high]") : ANSI.yellow("[write]");
+    const tag = risk === "high" ? ANSI.error("[high]") : ANSI.warn("[write]");
     if (preview) console.log(ANSI.dim(preview.split("\n").map((l) => `  ${l}`).join("\n")));
     const answer = (await ask(`${tag} ${ANSI.bold(desc)}\n  allow? [y]es / [n]o / [a]lways / [d]eny-always > `))
       .trim()
@@ -162,13 +170,13 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
     onTextDelta: (d) => process.stdout.write(d),
     onToolStart: (_id, name, preview) => {
       process.stdout.write("\n");
-      console.log(ANSI.cyan(`⚡ ${name} ${ANSI.dim(preview)}`));
+      console.log(ANSI.accent(`⚡ ${name} ${ANSI.dim(preview)}`));
     },
     onToolEnd: (_id, name, ok, preview) => {
       const first = preview.split("\n")[0];
-      console.log(ok ? ANSI.dim(`  ✓ ${name}: ${first}`) : ANSI.red(`  ✗ ${name}: ${first}`));
+      console.log(ok ? ANSI.dim(`  ✓ ${name}: ${first}`) : ANSI.error(`  ✗ ${name}: ${first}`));
     },
-    onCompacting: () => console.log(ANSI.yellow("… compacting context …")),
+    onCompacting: () => console.log(ANSI.warn("… compacting context …")),
     onCompacted: (before, after) =>
       console.log(ANSI.dim(`  context: ${before.toLocaleString()} → ${after.toLocaleString()} tokens`)),
   };
@@ -188,8 +196,8 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
     console.log();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (msg !== "aborted") console.error(ANSI.red(`Error: ${msg}`));
-    else console.log(ANSI.yellow("\n(interrupted)"));
+    if (msg !== "aborted") console.error(ANSI.error(`Error: ${msg}`));
+    else console.log(ANSI.warn("\n(interrupted)"));
   } finally {
     const secs = ((Date.now() - started) / 1000).toFixed(1);
     const used = agent.tokenEstimate();
@@ -206,7 +214,7 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
 async function runExport(args: { exportId: string; exportFormat: "md" | "json" }) {
   const s = await loadSession(args.exportId);
   if (!s) {
-    console.error(ANSI.red(`Session "${args.exportId}" not found.`));
+    console.error(ANSI.error(`Session "${args.exportId}" not found.`));
     process.exitCode = 1;
     return;
   }
@@ -223,6 +231,10 @@ async function runExport(args: { exportId: string; exportFormat: "md" | "json" }
 
 async function runInteractive(args: ReturnType<typeof parseArgs>) {
   const session = await resolveSession(args);
+  // Ask the terminal for its background before Ink takes over stdin.
+  let resolved = await resolveThemeAsync({ theme: args.theme, cwd: session.cwd });
+  let themeName: ThemeName = resolved.name;
+  ANSI = ansiHelpers(resolved.theme);
   const mcp = await setupMcp(args);
   await setupLsp(args, session.cwd);
 
@@ -248,10 +260,37 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
       case "help": {
         const custom = [...customCommands.values()].map((c) => `/${c.name}`).join(" ");
         return [
-          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp · /lsp · /compact · /context · /review [base] [focus] · /permissions [clear] · /hooks · /sessions · /resume <id> · /todos · /undo [-y] · /cost [usd] · /clear · /quit",
+          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /theme [dark|light|auto] · /mcp · /lsp · /compact · /context · /review [base] [focus] · /permissions [clear] · /hooks · /sessions · /resume <id> · /todos · /undo [-y] · /cost [usd] · /clear · /quit",
           "file refs: @path/to/file inlines the file; Ctrl+V pastes a clipboard image",
           custom ? `custom commands: ${custom}` : "",
         ].filter(Boolean).join("\n");
+      }
+      case "theme": {
+        if (!rest[0]) {
+          const shown = themeName === "auto" ? `auto → ${resolved.theme.id}` : themeName;
+          return [
+            `theme: ${shown}  (from ${resolved.source})`,
+            `available: ${THEME_NAMES.join(" · ")}`,
+            `usage: /theme <${THEME_NAMES.join("|")}> — persists to ~/.node-agent/config.json`,
+            `one-off: agent --theme <name> · AGENT_THEME=<name> · AGENT_BACKGROUND=dark|light (auto only)`,
+          ].join("\n");
+        }
+        const next = parseThemeName(rest[0]);
+        if (!next) return ANSI.error(`unknown theme "${rest[0]}" — try ${THEME_NAMES.join(", ")}`);
+        resolved = await resolveThemeAsync({ theme: next, cwd: session.cwd });
+        themeName = next;
+        ANSI = ansiHelpers(resolved.theme);
+        bridge.setTheme?.(resolved.theme);
+        const label = `theme: ${next}${next === "auto" ? ` → ${resolved.theme.id}` : ""}`;
+        try {
+          const { file, shadowed } = await saveTheme(next, { cwd: session.cwd });
+          return (
+            `${label} — saved to ${file}` +
+            (shadowed ? "\nnote: this project pins a theme in .node-agent/config.json, which shadows the global setting" : "")
+          );
+        } catch (err) {
+          return `${label} — applied for this session (could not save: ${err instanceof Error ? err.message : String(err)})`;
+        }
       }
       case "hooks": {
         const list = hooks.list();
@@ -273,14 +312,14 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
               ? `endpoint models (${ids.length}):\n${ids.slice(0, 60).join("\n")}`
               : "endpoint returned no models";
           } catch (err) {
-            return ANSI.red(`endpoint does not support model listing: ${err instanceof Error ? err.message : String(err)}`);
+            return ANSI.error(`endpoint does not support model listing: ${err instanceof Error ? err.message : String(err)}`);
           }
         }
         try {
           const r = agent.switchModel(rest[0]);
           return `switched to ${r.provider}:${r.model} (applies to new turns and subagents)`;
         } catch (err) {
-          return ANSI.red(err instanceof Error ? err.message : String(err));
+          return ANSI.error(err instanceof Error ? err.message : String(err));
         }
       }
       case "mcp": {
@@ -301,7 +340,7 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
       case "compact": {
         const before = agent.tokenEstimate();
         const did = await agent.compactNow({
-          onCompacting: () => console.log(ANSI.yellow("… compacting context …")),
+          onCompacting: () => console.log(ANSI.warn("… compacting context …")),
         });
         return did
           ? `context compacted: ${before.toLocaleString()} → ${agent.tokenEstimate().toLocaleString()} tokens`
@@ -318,12 +357,12 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
         } else {
           focus = rest.join(" ") || undefined;
         }
-        console.log(ANSI.yellow(`… reviewing ${target ? `${target}...HEAD` : "uncommitted changes"} …`));
+        console.log(ANSI.warn(`… reviewing ${target ? `${target}...HEAD` : "uncommitted changes"} …`));
         try {
           const review = await agent.review(target, focus);
           return review;
         } catch (err) {
-          return ANSI.red(`review failed: ${err instanceof Error ? err.message : String(err)}`);
+          return ANSI.error(`review failed: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
       case "permissions": {
@@ -364,7 +403,7 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
       case "resume": {
         if (!rest[0]) return "usage: /resume <id>";
         const loaded = await loadSession(rest[0]);
-        if (!loaded) return ANSI.red("session not found");
+        if (!loaded) return ANSI.error("session not found");
         agent.resetSession(loaded.meta.id, loaded.messages, loaded.meta.model);
         if (loaded.meta.model) {
           try {
@@ -394,7 +433,7 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
         const used = agent.tokenEstimate();
         const window = agent.contextWindow;
         const pct = (used / window) * 100;
-        const bar = contextBar(pct);
+        const bar = contextBar(pct, resolved.theme);
         return (
           `context: ${used.toLocaleString()} / ${window.toLocaleString()} tokens (${pct.toFixed(1)}%) ${bar}\n` +
           `${agent.debugMessages().length} messages loaded\n` +
@@ -417,7 +456,7 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
           const r = await agent.undoLastCheckpoint();
           return r ? `undone: ${path.relative(session.cwd, r.file) || r.file} — ${r.action}` : "nothing to undo";
         } catch (err) {
-          return ANSI.red(`undo failed: ${err instanceof Error ? err.message : String(err)}`);
+          return ANSI.error(`undo failed: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
       case "clear": {
@@ -440,6 +479,7 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
       sessionId: session.id,
       onCommand: handleCommand,
       customCommands,
+      initialTheme: resolved.theme,
     }),
     { exitOnCtrlC: false },
   );
@@ -454,10 +494,10 @@ const VERSION = (require("../package.json") as { version: string }).version;
 const USAGE = `Usage: agent [options]
 
   Start interactive mode:
-    agent [--resume <id> | --continue] [--model <spec>] [--provider <name>] [--auto | --yolo]
+    agent [--resume <id> | --continue] [--model <spec>] [--provider <name>] [--theme <name>] [--auto | --yolo]
 
   Single-shot print mode:
-    agent -p "prompt" [--model <spec>]
+    agent -p "prompt" [--model <spec>] [--theme <name>]
 
   Export a saved session (to .md/.json):
     agent --export <session-id> [--format md|json]
@@ -470,6 +510,7 @@ const USAGE = `Usage: agent [options]
     --format md|json   Output format (default md)
     --model <spec>     Override model (e.g. anthropic:claude-sonnet-4-5 or just sonnet)
     --provider <name>  Override provider (anthropic|openai)
+    --theme <name>     UI theme: dark | light | auto (follow the terminal)
     --auto             Auto-approve non-high-risk writes without prompting
     --yolo             Auto-approve everything (unsafe)
     --plan             Start in plan mode (read-only exploration only)
@@ -484,6 +525,14 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.provider) process.env.AGENT_PROVIDER = args.provider;
   if (args.model) process.env.AGENT_MODEL = args.model;
+  if (args.theme) {
+    const parsed = parseThemeName(args.theme);
+    if (!parsed) {
+      console.error(ANSI.error(`Unknown theme "${args.theme}" — try ${THEME_NAMES.join(", ")}.`));
+      process.exit(1);
+    }
+    process.env.AGENT_THEME = parsed;
+  }
   if (args.help) {
     console.log(USAGE);
     process.exit(0);
@@ -500,7 +549,7 @@ async function main() {
   const settings = resolveSettings({ cwd: process.cwd() });
   if (!settings.apiKey) {
     console.error(
-      ANSI.red(
+      ANSI.error(
         `No API key for provider "${settings.provider}". Set ${settings.provider === "openai" ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY"} or ~/.node-agent/config.json (project override: .node-agent/config.json).`,
       ),
     );
