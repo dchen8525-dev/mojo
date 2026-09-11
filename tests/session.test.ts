@@ -91,6 +91,53 @@ describe("createSession / loadSession", () => {
   });
 });
 
+describe("renameSession / deleteSession", () => {
+  it("sets, replaces, and clears a title", async () => {
+    const { id } = await session.createSession("x");
+    expect(await session.renameSession(id, "重构计划")).toBe(true);
+    expect((await session.loadSession(id))?.meta.title).toBe("重构计划");
+    expect(await session.renameSession(id, "新名字")).toBe(true);
+    expect((await session.loadSession(id))?.meta.title).toBe("新名字");
+    expect(await session.renameSession(id, "   ")).toBe(true);
+    expect((await session.loadSession(id))?.meta.title).toBeUndefined();
+  });
+
+  it("keeps messages intact when renaming", async () => {
+    const { id } = await session.createSession("x");
+    await session.appendMessages(id, [{ role: "user", content: "keep me" }]);
+    await session.renameSession(id, "titled");
+    const loaded = await session.loadSession(id);
+    expect(loaded?.messages).toHaveLength(1);
+    expect(loaded?.meta.title).toBe("titled");
+  });
+
+  it("truncates long titles", async () => {
+    const { id } = await session.createSession("x");
+    await session.renameSession(id, "x".repeat(200));
+    expect((await session.loadSession(id))?.meta.title).toHaveLength(80);
+  });
+
+  it("returns false for unknown or path-like ids", async () => {
+    expect(await session.renameSession("deadbeef", "x")).toBe(false);
+    expect(await session.renameSession("../../etc/passwd", "x")).toBe(false);
+    expect(await session.deleteSession("../../etc/passwd")).toBe(false);
+  });
+
+  it("deletes a session and reports missing ones", async () => {
+    const { id } = await session.createSession("x");
+    expect(await session.deleteSession(id)).toBe(true);
+    expect(await session.loadSession(id)).toBeNull();
+    expect(await session.deleteSession(id)).toBe(false);
+  });
+
+  it("listSessions surfaces titles", async () => {
+    const { id } = await session.createSession("x");
+    await session.renameSession(id, "listed");
+    const found = (await session.listSessions()).find((s) => s.id === id);
+    expect(found?.title).toBe("listed");
+  });
+});
+
 describe("listSessions", () => {
   it("lists sessions sorted by updatedAt descending", async () => {
     const a = await session.createSession("a");

@@ -314,6 +314,25 @@ agent --mcp-server            # 作为 MCP 服务器在 stdio 上运行（供其
 agent --no-mcp                # 跳过 MCP 服务器
 ```
 
+### 图形界面（GUI）
+
+不想用命令行时，启动图形界面：
+
+```bash
+npm run gui          # Electron 桌面窗口（先自动 build）
+npm run gui:browser  # 浏览器版：agent --gui，自动打开默认浏览器
+```
+
+GUI 与终端 UI 共用同一套核心（智能体循环、权限、会话、命令），采用浅色 WorkBuddy 风格
+布局：左侧会话侧栏（新建任务 / 恢复 / 改名 / 删除，显示相对时间），新会话时主区中央显示
+欢迎语，输入框为卡片式——文本域在上，控制条集成在卡片底部（附件 ＋、默认/自动/YOLO 模式
+分段切换、PLAN 开关、上下文占用条、模型下拉与自定义输入、圆形发送按钮）。功能包括：流式
+聊天与 Markdown 渲染、思考过程与工具调用可展开卡片、权限确认弹窗（允许一次 / 总是允许 /
+总是拒绝 / 拒绝一次，支持 Y/A/D/N 快捷键，展示 diff 预览）、图片附件、`/` 命令面板。
+终端里可用 `/rename <名称>` 给当前会话命名。
+
+`agent --gui --port 3777` 可固定端口；服务只绑定 127.0.0.1，访问令牌在 URL 的 `#` 片段里。
+
 ### 交互快捷键
 
 | 按键 | 作用 |
@@ -331,7 +350,7 @@ agent --no-mcp                # 跳过 MCP 服务器
 
 `/help` · `/model [spec|list]` · `/auto [on|off]` · `/yolo` · `/plan [on|off]` ·
 `/theme [dark|light|auto]` · `/mcp` · `/lsp` · `/compact` · `/context` · `/review [base] [focus]` ·
-`/permissions [clear]` · `/hooks` · `/sessions` · `/resume <id>` · `/todos` · `/undo [-y]` ·
+`/permissions [clear]` · `/hooks` · `/sessions` · `/resume <id>` · `/rename <名称>` · `/todos` · `/undo [-y]` ·
 `/cost [usd]` · `/clear` · `/quit`
 
 ### Plan 模式（先计划，后执行）

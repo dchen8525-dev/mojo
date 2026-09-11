@@ -14,11 +14,16 @@ export interface SessionMeta {
   updatedAt: string;
   /** Last model used in this session, as "provider:model" (restored on resume). */
   model?: string;
+  /** Optional user-assigned name (shown in the GUI sidebar / /sessions). */
+  title?: string;
 }
 
 function fileFor(id: string) {
   return path.join(SESSION_DIR, `${id}.jsonl`);
 }
+
+/** Session ids are hex; public entry points reject anything path-like. */
+const ID_RE = /^[0-9a-f]{4,64}$/;
 
 export async function createSession(cwd: string): Promise<{ id: string; meta: SessionMeta }> {
   const id = crypto.randomBytes(4).toString("hex");
@@ -55,7 +60,50 @@ export async function rewriteMessages(id: string, messages: MessageParam[]) {
 
 /** Append a model marker; the last one in the file is the session's model. */
 export async function appendModel(id: string, model: string) {
-  await fs.appendFile(fileFor(id), JSON.stringify({ type: "model", model }) + "\n", "utf8");
+  await fs.appendFile(fileFor(id), JSON.stringify({ type: "model", model }) + "\n");
+}
+
+/**
+ * Set (or clear, with an empty title) a session's display name by rewriting
+ * its meta header line. Returns false when the session does not exist.
+ */
+export async function renameSession(id: string, title: string): Promise<boolean> {
+  if (!ID_RE.test(id)) return false;
+  const file = fileFor(id);
+  let raw: string;
+  try {
+    raw = await fs.readFile(file, "utf8");
+  } catch {
+    return false;
+  }
+  const lines = raw.split("\n");
+  const idx = lines.findIndex((l) => l.trim().startsWith('{"type":"meta"'));
+  if (idx === -1) return false;
+  let meta: SessionMeta;
+  try {
+    meta = JSON.parse(lines[idx]);
+  } catch {
+    return false;
+  }
+  const clean = title.trim().slice(0, 80);
+  if (clean) meta.title = clean;
+  else delete meta.title;
+  delete (meta as { updatedAt?: string }).updatedAt; // not part of the stored header
+  lines[idx] = JSON.stringify({ type: "meta", ...meta });
+  await fs.writeFile(file, lines.join("\n"), "utf8");
+  return true;
+}
+
+/** Delete a session file. Returns false when it did not exist. */
+export async function deleteSession(id: string): Promise<boolean> {
+  if (!ID_RE.test(id)) return false;
+  try {
+    await fs.unlink(fileFor(id));
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw err;
+  }
 }
 
 interface ParsedSession {
@@ -85,6 +133,7 @@ async function parseSessionFile(full: string): Promise<ParsedSession | null> {
           cwd: obj.cwd,
           startedAt: obj.startedAt,
           updatedAt: new Date(mtimeMs).toISOString(),
+          ...(typeof obj.title === "string" && obj.title ? { title: obj.title } : {}),
         };
       else if (obj.type === "model" && meta) meta.model = obj.model; // last marker wins
       else if (obj.type === "message" && meta) messages.push(obj.message);
@@ -96,6 +145,7 @@ async function parseSessionFile(full: string): Promise<ParsedSession | null> {
 }
 
 export async function loadSession(id: string): Promise<ParsedSession | null> {
+  if (!ID_RE.test(id)) return null;
   return parseSessionFile(fileFor(id));
 }
 

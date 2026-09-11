@@ -129,6 +129,10 @@ export class OpenAiBackend implements LLMBackend {
           text += delta.content;
           events?.onTextDelta?.(delta.content);
         }
+        // Reasoning models (deepseek-r1, glm-thinking, o-series) stream their
+        // chain of thought on a separate field; forward it so the UI can show it.
+        const reasoning = (delta as { reasoning_content?: string } | undefined)?.reasoning_content;
+        if (reasoning) events?.onThinkingDelta?.(reasoning);
         for (const tc of delta?.tool_calls ?? []) {
           const idx = tc.index;
           const cur = toolCalls.get(idx) ?? { id: "", name: "", args: "" };

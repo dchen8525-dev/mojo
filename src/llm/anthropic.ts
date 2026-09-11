@@ -56,6 +56,9 @@ export class AnthropicBackend implements LLMBackend {
           text += event.delta.text;
           events?.onTextDelta?.(event.delta.text);
         }
+        if (event.type === "content_block_delta" && event.delta.type === "thinking_delta") {
+          events?.onThinkingDelta?.((event.delta as { thinking?: string }).thinking ?? "");
+        }
         if (event.type === "message_start") {
           inputTokens = event.message.usage.input_tokens ?? 0;
           cacheReadTokens = event.message.usage.cache_read_input_tokens ?? 0;
