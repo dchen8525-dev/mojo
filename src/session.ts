@@ -197,6 +197,98 @@ export async function listSessions(): Promise<SessionMeta[]> {
   }
 }
 
+export interface SessionHit {
+  meta: SessionMeta;
+  /** Number of messages that matched. */
+  matches: number;
+  /** The first matching message's plain text, trimmed to a snippet. */
+  snippet: string;
+  /** true when the query also appears in the session title. */
+  titleMatch: boolean;
+}
+
+/**
+ * Full-text search across saved sessions for a case-insensitive substring (or
+ * regex, when `opts.regex`). Returns the most recently-updated sessions that
+ * contain the term, each with a snippet of the first match. Skips the current
+ * session when `excludeId` is set. Corrupt lines are tolerated like the loader.
+ */
+export async function searchSessions(
+  query: string,
+  opts: { limit?: number; excludeId?: string; regex?: boolean } = {},
+): Promise<SessionHit[]> {
+  const q = query.trim();
+  if (!q) return [];
+  const limit = opts.limit ?? 15;
+  let re: RegExp;
+  try {
+    re = opts.regex ? new RegExp(q, "i") : new RegExp(escapeRegExp(q), "i");
+  } catch {
+    return []; // invalid regex — treat as no results rather than crash
+  }
+  let files: string[];
+  try {
+    files = (await fs.readdir(SESSION_DIR)).filter((f) => f.endsWith(".jsonl"));
+  } catch {
+    return [];
+  }
+  const hits: SessionHit[] = [];
+  for (const f of files) {
+    const parsed = await parseSessionFile(path.join(SESSION_DIR, f));
+    if (!parsed) continue;
+    if (opts.excludeId && parsed.meta.id === opts.excludeId) continue;
+    const titleMatch = re.test(parsed.meta.title ?? "");
+    let matches = 0;
+    let snippet = "";
+    for (const m of parsed.messages) {
+      const text = messageToPlainText(m.content);
+      if (!re.test(text)) continue;
+      matches++;
+      if (!snippet) snippet = makeSnippet(text, re);
+    }
+    if (!matches && !titleMatch) continue;
+    hits.push({ meta: parsed.meta, matches, snippet, titleMatch });
+  }
+  hits.sort((a, b) => b.meta.updatedAt.localeCompare(a.meta.updatedAt));
+  return hits.slice(0, limit);
+}
+
+/** Flatten a message's content blocks into searchable plain text. */
+function messageToPlainText(content: MessageParam["content"]): string {
+  if (typeof content === "string") return content;
+  const parts: string[] = [];
+  for (const b of content as Array<{ type: string; text?: string; name?: string; input?: unknown; content?: unknown }>) {
+    if (b.type === "text" && b.text) parts.push(b.text);
+    else if (b.type === "tool_use") parts.push(`${b.name ?? ""} ${safeJson(b.input)}`);
+    else if (b.type === "tool_result") {
+      parts.push(typeof b.content === "string" ? b.content : safeJson(b.content));
+    }
+  }
+  return parts.join("\n");
+}
+
+function safeJson(v: unknown): string {
+  try {
+    return typeof v === "string" ? v : JSON.stringify(v);
+  } catch {
+    return "";
+  }
+}
+
+/** Grab ~120 chars of context around the first match, on a single line. */
+function makeSnippet(text: string, re: RegExp): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  const m = re.exec(flat);
+  if (!m) return flat.slice(0, 120);
+  const start = Math.max(0, m.index - 50);
+  const snip = flat.slice(start, start + 170).trim();
+  return (start > 0 ? "…" : "") + snip + (start + 170 < flat.length ? "…" : "");
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /** Plain-text serialization of a content block (for export / review). */
 function contentToMarkdown(content: MessageParam["content"]): string {
   const parts: string[] = [];

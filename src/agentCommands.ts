@@ -5,7 +5,7 @@ import type { HookManager } from "./hooks.js";
 import type { McpManager } from "./mcp.js";
 import type { SlashCommand } from "./commands.js";
 import { knownModelNames } from "./llm.js";
-import { createSession, listSessions, loadSession, renameSession } from "./session.js";
+import { createSession, listSessions, loadSession, renderSessionMarkdown, renameSession, searchSessions } from "./session.js";
 import { getLspManager } from "./lsp.js";
 
 /**
@@ -39,7 +39,7 @@ export interface CommandContext {
 /** Names of the built-in commands (for /help listings and the GUI palette). */
 export const BUILTIN_COMMANDS = [
   "help", "model", "auto", "yolo", "plan", "mcp", "lsp", "compact", "context", "review",
-  "permissions", "hooks", "sessions", "resume", "fork", "rename", "todos", "undo", "cost", "clear", "quit",
+  "permissions", "hooks", "sessions", "search", "resume", "fork", "rename", "export", "todos", "undo", "cost", "clear", "quit",
 ] as const;
 
 /**
@@ -60,7 +60,7 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       return {
         kind: "ok",
         text: [
-          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks · /sessions · /resume <id> · /fork [N] [名称] · /rename <名称> · /todos · /undo [-y] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
+          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks · /sessions · /search [-r] <term> · /resume <id> · /fork [N] [名称] · /rename <名称> · /export [md|json] [路径] · /todos · /undo [-y] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
           "file refs: @path/to/file inlines the file; Ctrl+V pastes a clipboard image",
           custom ? `custom commands: ${custom}` : "",
         ]
@@ -212,6 +212,46 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
           ? list.slice(0, 10).map((s) => `${s.id}  ${s.updatedAt.slice(0, 16)}  ${s.model ?? "?"}  ${s.cwd}`).join("\n")
           : "(no sessions)",
       };
+    }
+    case "search": {
+      if (!rest.length) return { kind: "error", text: "usage: /search [-r] <term>  (case-insensitive; -r enables regex)" };
+      let regex = false;
+      const words = [...rest];
+      if (words[0] === "-r" || words[0] === "--regex") {
+        regex = true;
+        words.shift();
+      }
+      const query = words.join(" ");
+      if (!query.trim()) return { kind: "error", text: "usage: /search [-r] <term>" };
+      const hits = await searchSessions(query, { excludeId: agent.sessionId, regex });
+      if (!hits.length) return { kind: "ok", text: `no sessions match "${query}" (searched message text, tool calls, and titles)` };
+      const lines = hits.map((h) => {
+        const label = h.meta.title ? `"${h.meta.title}"` : h.meta.cwd;
+        const where = h.matches ? `${h.matches} msg${h.matches > 1 ? "s" : ""}` : "title";
+        const snip = h.snippet ? `\n    ${h.snippet}` : "";
+        return `${h.meta.id}  ${h.meta.updatedAt.slice(0, 16)}  ${label}  (${where})${snip}`;
+      });
+      return { kind: "ok", text: [`${hits.length} session(s) match "${query}" — resume with /resume <id>`, ...lines].join("\n") };
+    }
+    case "export": {
+      const loaded = await loadSession(agent.sessionId);
+      if (!loaded || !loaded.messages.length) return { kind: "error", text: "nothing to export yet (the conversation is empty)" };
+      const format = (rest[0] ?? "md").toLowerCase();
+      if (format !== "md" && format !== "json") return { kind: "error", text: "usage: /export [md|json] [path]" };
+      const positional = rest.slice(1);
+      const body =
+        format === "json"
+          ? JSON.stringify({ meta: loaded.meta, messages: loaded.messages }, null, 2)
+          : renderSessionMarkdown(loaded.meta, loaded.messages);
+      const defaultName = `${agent.sessionId}.${format}`;
+      const out = path.resolve(cwd, positional[0] ?? defaultName);
+      try {
+        const { writeFile } = await import("node:fs/promises");
+        await writeFile(out, body, "utf8");
+      } catch (err) {
+        return { kind: "error", text: `export failed: ${err instanceof Error ? err.message : String(err)}` };
+      }
+      return { kind: "ok", text: `exported ${loaded.messages.length} messages → ${out} (${body.length.toLocaleString()} chars)` };
     }
     case "resume": {
       if (!rest[0]) return { kind: "error", text: "usage: /resume <id>" };

@@ -1,14 +1,23 @@
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { runAgentCommand, type CommandContext } from "../src/agentCommands.js";
 import type { Agent } from "../src/agent.js";
 import type { PermissionManager } from "../src/permissions.js";
 
 // Keep tests from touching real session files.
+const searchLedger: { hits: unknown[] } = { hits: [] };
 vi.mock("../src/session.js", () => ({
   createSession: async () => ({ id: "new1234", meta: { id: "new1234", cwd: "/tmp", startedAt: "", updatedAt: "" } }),
   listSessions: async () => [],
-  loadSession: async (id: string) => (id === "abc" ? { meta: { id, cwd: "/tmp", startedAt: "", updatedAt: "", model: "anthropic:fake" }, messages: [] } : null),
+  loadSession: async (id: string) =>
+    id === "abc"
+      ? { meta: { id, cwd: "/tmp", startedAt: "", updatedAt: "", model: "anthropic:fake" }, messages: [] }
+      : id === "sess1"
+        ? { meta: { id, cwd: "/tmp", startedAt: "", updatedAt: "" }, messages: [{ role: "user", content: "hello export" }] }
+        : null,
   renameSession: async (id: string, title: string) => id === "sess1" && !!title.trim(),
+  searchSessions: async () => searchLedger.hits as never,
+  renderSessionMarkdown: () => "# exported",
   forkSession: async (_cwd: string, messages: unknown[], opts: { title?: string; fromId?: string }) => ({
     id: "fork9999",
     meta: { id: "fork9999", cwd: _cwd, startedAt: "", updatedAt: "", title: opts.title, forkedFrom: opts.fromId, messages: messages.length },
@@ -174,6 +183,40 @@ describe("runAgentCommand", () => {
     usageLedger.entries = [];
     const r = await runAgentCommand("/cost by session", ctx());
     expect(r.text).toContain("no usage recorded");
+  });
+
+  it("/search lists matching sessions with snippets", async () => {
+    searchLedger.hits = [
+      { meta: { id: "abcd1234", cwd: "D:\\proj", startedAt: "", updatedAt: "2026-09-10T10:00:00.000Z", title: "ws bug" }, matches: 3, snippet: "…the WebSocket times out…", titleMatch: false },
+    ];
+    const r = await runAgentCommand("/search websocket", ctx());
+    expect(r.text).toContain("1 session(s) match");
+    expect(r.text).toContain("abcd1234");
+    expect(r.text).toContain('"ws bug"');
+    expect(r.text).toContain("3 msgs");
+    expect(r.text).toContain("/resume");
+    searchLedger.hits = [];
+    const none = await runAgentCommand("/search nothinghere", ctx());
+    expect(none.text).toContain("no sessions match");
+    const bad = await runAgentCommand("/search", ctx());
+    expect(bad.kind).toBe("error");
+  });
+
+  it("/export writes the transcript to disk", async () => {
+    const { mkdtemp, readFile, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const dir = await mkdtemp(path.join(tmpdir(), "mojo-export-"));
+    try {
+      const out = path.join(dir, "chat.md");
+      const r = await runAgentCommand(`/export md ${out}`, ctx());
+      expect(r.kind).toBe("ok");
+      expect(r.text).toContain("exported 1 messages");
+      expect(await readFile(out, "utf8")).toBe("# exported");
+      const bad = await runAgentCommand("/export html", ctx());
+      expect(bad.kind).toBe("error");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("/todos empty and filled", async () => {

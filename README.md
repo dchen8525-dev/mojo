@@ -58,7 +58,8 @@ Ink 的交互式 UI。
   （为未执行的 tool_use 回填错误结果，历史保持合法）。每轮用量落盘到
   `~/.node-agent/usage.jsonl` 账本，`/cost all` / `/cost by session|model|day` /
   `/cost export` 做跨会话花费分析与 CSV 导出
-- **会话持久化**：JSONL 格式存于 `~/.node-agent/sessions/`，`/sessions` + `--resume`
+- **会话持久化**：JSONL 格式存于 `~/.node-agent/sessions/`，`/sessions` + `--resume`；
+  `/search <词>` 跨会话全文检索历史对话（含工具调用与标题），`/export [md|json]` 导出当前会话
 - **三套主题**：`dark` / `light` / `auto`（跟随终端背景）——深色终端与浅色终端都不
   刺眼；`auto` 通过 OSC 11 询问终端背景色，`COLORFGBG` 兜底，拿不到再退回深色。
   `/theme [dark|light|auto]` 热切换并写回配置，`--theme <name>` / `AGENT_THEME` 单次覆盖
@@ -353,7 +354,7 @@ GUI 与终端 UI 共用同一套核心（智能体循环、权限、会话、命
 
 `/help` · `/model [spec|list]` · `/auto [on|off]` · `/yolo` · `/plan [on|off]` ·
 `/theme [dark|light|auto]` · `/mcp` · `/lsp` · `/compact` · `/context` · `/review [base] [focus]` ·
-`/permissions [clear]` · `/hooks` · `/sessions` · `/resume <id>` · `/fork [N] [名称]` · `/rename <名称>` · `/todos` · `/undo [-y]` ·
+`/permissions [clear]` · `/hooks` · `/sessions` · `/search [-r] <词>` · `/resume <id>` · `/fork [N] [名称]` · `/rename <名称>` · `/export [md|json] [路径]` · `/todos` · `/undo [-y]` ·
 `/cost [usd | all | by session|model|day | export [路径]]` · `/clear` · `/quit`
 
 ### 会话分叉（/fork）
@@ -369,6 +370,31 @@ GUI 与终端 UI 共用同一套核心（智能体循环、权限、会话、命
 新会话是独立文件，原会话保持不变（提示里会给出原 id，用 `/resume <id>` 随时回去）。
 保留的条数会自动回退到最近的"干净边界"——绝不把 `tool_use` 和它的 `tool_result` 拆到
 分叉两侧，也不会以未完成的工具轮结尾，因此分叉后的下一轮不会触发 API 报错。
+
+### 会话检索（/search）
+
+"上次那个 WebSocket 超时是怎么修的来着？"——记不住是哪个会话时，直接搜：
+
+```text
+/search websocket timeout    ← 不区分大小写的子串匹配，命中消息正文、工具调用与标题
+/search -r error code \d{4}  ← -r / --regex 开启正则模式
+```
+
+结果按会话更新时间倒序，每条给出会话 id、时间、标题（或工作目录）、命中消息数与首个命中的
+上下文片段（约 120 字符）。用提示里的 `/resume <id>` 一键回到那个会话。当前会话自动排除；
+正则写错时按"无结果"处理而不是报错，避免一个手滑把提示词打断。
+
+### 导出会话（/export）
+
+把当前会话落成文件，便于归档、贴进 issue 或喂给别的工具：
+
+```text
+/export              ← 默认导出 Markdown，文件名 <session-id>.md，写在工作目录
+/export json         ← 导出完整 JSON（meta + 原始消息数组），便于程序消费
+/export md D:\out\x.md   ← 指定路径（相对路径按工作目录解析）
+```
+
+CLI 侧同一能力也可离线使用：`agent --export <session-id> [--format md|json]`。
 
 ### Plan 模式（先计划，后执行）
 
