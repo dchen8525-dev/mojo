@@ -58,6 +58,8 @@ export class Agent {
   sessionId: string;
   private permissions: PermissionManager;
   private hooks?: HookManager;
+  /** stdout of SessionStart hooks; injected into the system prompt for the whole session. */
+  private sessionStartContext = "";
   /** Plan mode: only read-only tools + exit_plan are offered until the user approves a plan. */
   planMode = false;
 
@@ -107,6 +109,19 @@ export class Agent {
     this.hooks = hooks;
   }
 
+  /**
+   * Fire the SessionStart hook once (callers do this right after building the
+   * Agent). Its stdout is kept for the whole session and injected into the
+   * system prompt, so a hook can seed project context, env notes, or checklists.
+   * `source` is "startup" for a fresh session, "resume" when history was loaded.
+   */
+  async startSession(source: "startup" | "resume", events?: AgentEvents): Promise<void> {
+    if (!this.hooks) return;
+    const hr = await this.hooks.run("SessionStart", { cwd: this.cwd, session_id: this.sessionId, source }, undefined);
+    if (hr.context) this.sessionStartContext = hr.context.trim();
+    if (hr.reason) events?.onHook?.("SessionStart", hr.reason);
+  }
+
   private async systemPrompt(): Promise<string> {
     let gitStatus = "(not a git repo)";
     try {
@@ -131,6 +146,9 @@ export class Agent {
       }
     }
     const memory = await renderMemory(this.cwd);
+    const hookContext = this.sessionStartContext
+      ? `\n<hook_context event="SessionStart">\n${this.sessionStartContext}\n</hook_context>\n`
+      : "";
     const planRules = this.planMode
       ? `
 PLAN MODE is active. You may ONLY explore and plan - the user has NOT approved any changes yet.
@@ -146,7 +164,7 @@ Environment:
 - Platform: ${os.platform()} ${os.arch()}
 - Today: ${new Date().toISOString().slice(0, 10)}
 - Git status:\n${gitStatus}
-${projectInstructions}${memory}
+${projectInstructions}${memory}${hookContext}
 Rules:
 1. Use tools to do the work; never pretend to have run something. If a tool fails, read the error, adjust, and retry - do not give up after one failure.
 2. Before editing a file, read it. edit_file works best with EXACT text copied from read_file output (the "N\\t" prefixes are line numbers, not content); whitespace differences are tolerated as a fallback but indentation may shift, so verify with the diff it returns.
@@ -175,7 +193,7 @@ Rules:
   /** Force a compaction now (the /compact command). Returns false if history is too small. */
   async compactNow(events?: AgentEvents, signal?: AbortSignal): Promise<boolean> {
     if (this.messages.length < 6) return false;
-    await this.compact(events, signal);
+    await this.compact(events, signal, "manual");
     return true;
   }
 
@@ -218,9 +236,20 @@ Rules:
    *    handoff summary when this is a repeat compaction so nothing decays;
    * 3. restart history as [summary, ack] + recent tail. Falls back to
    *    exchange-group truncation if the summary call fails.
+   *
+   * `trigger` distinguishes automatic (context budget) from manual (/compact)
+   * for PreCompact hooks; a blocking hook cancels the compaction entirely.
    */
-  private async compact(events?: AgentEvents, signal?: AbortSignal) {
+  private async compact(events?: AgentEvents, signal?: AbortSignal, trigger: "auto" | "manual" = "auto") {
     if (this.messages.length < 6) return;
+    if (this.hooks) {
+      const hr = await this.hooks.run("PreCompact", { cwd: this.cwd, session_id: this.sessionId, trigger }, undefined);
+      if (hr.blocked) {
+        events?.onHook?.("PreCompact", `compaction cancelled by hook: ${hr.reason}`);
+        return;
+      }
+      if (hr.reason) events?.onHook?.("PreCompact", hr.reason);
+    }
     events?.onCompacting?.();
     const budget = Math.floor(this.llm.contextWindow * COMPACT_TARGET_RATIO);
 
@@ -494,13 +523,19 @@ Rules:
     return this.checkpoints.undoLast();
   }
 
-  resetSession(sessionId: string, history?: MessageParam[], modelSpec?: string) {
+  /**
+   * Re-point this agent at a (possibly different) session file. Used by
+   * /resume, /clear, /fork and the GUI session switcher; each of those is a
+   * session start from the model's point of view, so SessionStart fires here.
+   */
+  async resetSession(sessionId: string, history?: MessageParam[], modelSpec?: string) {
     this.sessionId = sessionId;
     this.checkpoints = new CheckpointStore(sessionId);
     this.messages = history ?? [];
     this.persisted = this.messages.length;
     this.lastPersistedModel = modelSpec ?? "";
     this.tokens.invalidate();
+    await this.startSession(this.messages.length ? "resume" : "startup");
   }
 
   /**
@@ -516,7 +551,7 @@ Rules:
     const { id } = await forkSession(this.cwd, prefix, { title, fromId: this.sessionId });
     // Re-point this agent at the new file: same in-memory history, but future
     // turns persist to (and can diverge in) the fork instead of the original.
-    this.resetSession(id, prefix, `${this.llm.provider}:${this.llm.model}`);
+    await this.resetSession(id, prefix, `${this.llm.provider}:${this.llm.model}`);
     return id;
   }
 }

@@ -91,6 +91,7 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
 
   // ---- agent ----
   const agent = new Agent(cwd, sessionId, permissions, initialMessages, initialModel, hooks);
+  await agent.startSession(initialMessages ? "resume" : "startup");
   if (opts.plan) agent.planMode = true;
   runtime.attach(agent, permissions);
   // A stuck permission prompt with no client to answer it would hang the turn
@@ -110,13 +111,13 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
       commandCtx: { mcp, hooks },
       newSession: async () => {
         const s = await createSession(cwd);
-        agent.resetSession(s.id);
+        await agent.resetSession(s.id);
         return s;
       },
       resumeSession: async (id) => {
         const loaded = await loadSession(id);
         if (!loaded) return "session not found";
-        agent.resetSession(loaded.meta.id, loaded.messages, loaded.meta.model);
+        await agent.resetSession(loaded.meta.id, loaded.messages, loaded.meta.model);
         if (loaded.meta.model) {
           try {
             agent.switchModel(loaded.meta.model);
@@ -137,7 +138,7 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
         if (!ok) return { ok: false, error: "session not found" };
         if (active) {
           const s = await createSession(cwd);
-          agent.resetSession(s.id);
+          await agent.resetSession(s.id);
           return { ok: true, activeReplaced: s.id };
         }
         return { ok: true };

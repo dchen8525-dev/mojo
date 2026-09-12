@@ -64,8 +64,8 @@ Ink 的交互式 UI。
   不支持视觉时（DeepSeek / GLM / Qwen 等）明确提示不挂载，而不是静默丢图或报错
 - **`@file` 引用**：把文件内容内联进你的提示词（`@src/foo.ts`、`@"my file.txt"`）
 - **自定义斜杠命令**：`.node-agent/commands/*.md` 中的 markdown 提示词模板
-- **钩子（Hooks）**：在 `PreToolUse` / `PostToolUse` / `UserPromptSubmit` / `Stop` 时机
-  执行 shell 命令
+- **钩子（Hooks）**：在 `SessionStart` / `UserPromptSubmit` / `PreToolUse` /
+  `PostToolUse` / `PreCompact` / `Stop` 时机执行 shell 命令，支持 `async` 旁路钩子
 - **MCP 客户端**：从 `~/.node-agent/mcp.json` 或 `.mcp.json` 连接 stdio 服务器
 - **MCP 服务器模式**：`agent --mcp-server` 把 mojo 自身暴露为 MCP server（只读工具 +
   `agent_chat` + 项目资源），供其他代理编排调用
@@ -487,7 +487,32 @@ Review @$1 for correctness issues. Focus on edge cases.
 
 每个钩子通过 stdin 收到一个 JSON payload。退出码 `2` 阻断该操作（stderr 作为原因），
 其他非零退出码以警告形式呈现，退出码 `0` 的 stdout 会作为额外上下文注入。`matcher`
-是以逗号分隔的工具列表或正则；省略则匹配所有工具。
+是以逗号分隔的工具列表或正则；省略则匹配所有工具（`matcher` 仅在工具事件上生效）。
+
+支持的事件：
+
+| 事件 | 时机 | stdout 上下文的去向 |
+|------|------|---------------------|
+| `SessionStart` | 会话启动 / `/resume` / `/clear` / `/fork` / GUI 切换会话（payload 带 `source`: `startup` 或 `resume`） | 注入系统提示词，整个会话可见 |
+| `UserPromptSubmit` | 每轮用户输入前 | 追加到该轮 prompt |
+| `PreToolUse` | 工具执行前（可按 `matcher` 阻断） | 追加到工具结果 |
+| `PostToolUse` | 工具执行后 | 追加到工具结果 |
+| `PreCompact` | 上下文压缩前（payload 带 `trigger`: `auto` 或 `manual`；退出 `2` 取消本次压缩） | 仅展示 |
+| `Stop` | 一轮回复结束时 | 仅展示 |
+
+任意钩子可加 `"async": true` 变为“发射后不管”：不等待执行，输出不能阻断也不能注入
+上下文——适合通知、日志、埋点这类旁路操作。
+
+```json
+{
+  "SessionStart": [
+    { "command": "node scripts/inject-project-notes.js" }
+  ],
+  "PreCompact": [
+    { "command": "node scripts/archive-transcript.js", "async": true }
+  ]
+}
+```
 
 ### LSP 诊断
 

@@ -19,7 +19,7 @@ afterAll(async () => {
   await fs.rm(dir, { recursive: true, force: true });
 });
 
-function manager(defs: Array<string | { matcher?: string; command: string; timeout?: number }>, event = "PreToolUse") {
+function manager(defs: Array<string | { matcher?: string; command: string; timeout?: number; async?: boolean }>, event = "PreToolUse") {
   const hm = new HookManager();
   // Inject directly: load() reads from homedir/cwd files we do not want to touch.
   (hm as unknown as { hooks: Record<string, unknown[]> }).hooks[event] = defs.map((d) => {
@@ -96,5 +96,28 @@ describe("HookManager.run", () => {
     const list = hm.list();
     expect(list).toHaveLength(1);
     expect(list[0]).toMatchObject({ event: "PreToolUse", matcher: "bash" });
+  });
+
+  it("async hooks are fire-and-forget: not awaited, no blocking, no context", async () => {
+    const hm = manager([{ command: script("blocker.js"), async: true }]);
+    const started = Date.now();
+    const r = await hm.run("PreToolUse", payload, "bash");
+    // Returned immediately even though the (sync) version of this hook blocks.
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(r.blocked).toBe(false);
+    expect(r.context).toBe("");
+  });
+
+  it("a sync blocker after an async hook still blocks", async () => {
+    const hm = manager([{ command: script("context.js"), async: true }, script("blocker.js")]);
+    const r = await hm.run("PreToolUse", payload, "bash");
+    expect(r.blocked).toBe(true);
+    expect(r.reason).toContain("blocked: bash");
+  });
+
+  it("matchers are ignored on non-tool events (SessionStart/PreCompact)", async () => {
+    const hm = manager([{ matcher: "bash", command: script("context.js") }], "SessionStart");
+    const r = await hm.run("SessionStart", payload);
+    expect(r.context).toContain("lint passed");
   });
 });

@@ -166,6 +166,7 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
   const agent = new Agent(session.cwd, session.id, permissions, session.messages, session.model, hooks);
   restoreSessionModel(agent, session.model, args);
   if (args.plan) agent.planMode = true;
+  await agent.startSession(session.messages?.length ? "resume" : "startup");
   const events: AgentEvents = {
     onTextDelta: (d) => process.stdout.write(d),
     onToolStart: (_id, name, preview) => {
@@ -253,6 +254,7 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
   const agent = new Agent(session.cwd, session.id, permissions, session.messages, session.model, hooks);
   restoreSessionModel(agent, session.model, args);
   if (args.plan) agent.planMode = true;
+  await agent.startSession(session.messages?.length ? "resume" : "startup");
 
   const cmdCtx: CommandContext = {
     agent,

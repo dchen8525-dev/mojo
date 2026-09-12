@@ -304,6 +304,29 @@ describe("Agent.chat hooks integration", () => {
     expect(result.content).toContain("P1");
     expect(result.content).toContain("extra context");
   });
+
+  it("SessionStart stdout is injected into the system prompt for the whole session", async () => {
+    const agent = makeAgent(hookManager("SessionStart", "ctx.js"));
+    await agent.startSession("startup");
+    h.turns = [textTurn("ok"), textTurn("ok2")];
+    await agent.chat("go");
+    await agent.chat("again");
+    // Both turns see the hook context, not just the first.
+    expect(h.sentSystems.at(-2)).toContain('<hook_context event="SessionStart">');
+    expect(h.sentSystems.at(-2)).toContain("extra context");
+    expect(h.sentSystems.at(-1)).toContain("extra context");
+  });
+
+  it("PreCompact block cancels the compaction and leaves history untouched", async () => {
+    const agent = makeAgent(hookManager("PreCompact", "block.js"), seedHistory(20));
+    h.turns = [textTurn("done")];
+    let compacting = false;
+    const out = await agent.chat("go", undefined, { onCompacting: () => (compacting = true) });
+    expect(out).toBe("done");
+    expect(compacting).toBe(false); // never entered the compaction pipeline
+    // 40 seeded + user + assistant: nothing was summarized away.
+    expect(agent.debugMessages().length).toBe(42);
+  });
 });
 
 describe("Agent.chat cost budget", () => {

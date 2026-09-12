@@ -217,7 +217,7 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       if (!rest[0]) return { kind: "error", text: "usage: /resume <id>" };
       const loaded = await loadSession(rest[0]);
       if (!loaded) return { kind: "error", text: "session not found" };
-      agent.resetSession(loaded.meta.id, loaded.messages, loaded.meta.model);
+      await agent.resetSession(loaded.meta.id, loaded.messages, loaded.meta.model);
       if (loaded.meta.model) {
         try {
           const r = agent.switchModel(loaded.meta.model);
@@ -304,7 +304,7 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
     }
     case "clear": {
       const s = await createSession(cwd);
-      agent.resetSession(s.id);
+      await agent.resetSession(s.id);
       return { kind: "ok", text: `new session ${s.id}` };
     }
     case "quit":
