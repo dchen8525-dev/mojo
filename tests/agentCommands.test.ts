@@ -9,6 +9,10 @@ vi.mock("../src/session.js", () => ({
   listSessions: async () => [],
   loadSession: async (id: string) => (id === "abc" ? { meta: { id, cwd: "/tmp", startedAt: "", updatedAt: "", model: "anthropic:fake" }, messages: [] } : null),
   renameSession: async (id: string, title: string) => id === "sess1" && !!title.trim(),
+  forkSession: async (_cwd: string, messages: unknown[], opts: { title?: string; fromId?: string }) => ({
+    id: "fork9999",
+    meta: { id: "fork9999", cwd: _cwd, startedAt: "", updatedAt: "", title: opts.title, forkedFrom: opts.fromId, messages: messages.length },
+  }),
 }));
 
 function fakeAgent(overrides: Partial<Agent> = {}): Agent {
@@ -29,6 +33,8 @@ function fakeAgent(overrides: Partial<Agent> = {}): Agent {
     checkpointList: async () => [],
     undoLastCheckpoint: async () => null,
     resetSession: () => {},
+    getMessages: () => [],
+    fork: async () => null,
     ...overrides,
   } as unknown as Agent;
 }
@@ -38,7 +44,7 @@ function fakePermissions(): PermissionManager {
     mode: "default",
     load: async () => {},
     getRules: () => [],
-    clearRules: async () => 0,
+    clearRules: async () => ({ global: 0, project: 0 }),
     check: async () => true,
   } as unknown as PermissionManager;
 }
@@ -179,5 +185,77 @@ describe("runAgentCommand", () => {
     const r = await runAgentCommand("/review main 安全", ctx({ notify: (m) => notes.push(m) }));
     expect(r.text).toContain("review output");
     expect(notes.some((n) => n.includes("main...HEAD"))).toBe(true);
+  });
+
+  it("/rename names the current session", async () => {
+    const agent = fakeAgent({ sessionId: "sess1" });
+    const r = await runAgentCommand("/rename my nice chat", ctx({ agent }));
+    expect(r.kind).toBe("ok");
+    expect(r.text).toContain('renamed session sess1 to "my nice chat"');
+  });
+
+  it("/rename without a title clears the name (false from renameSession is an error)", async () => {
+    const r = await runAgentCommand("/rename", ctx());
+    expect(r.kind).toBe("error");
+    expect(r.text).toContain("session not found");
+  });
+
+  it("/permissions clear reports global and project counts separately", async () => {
+    const permissions = {
+      mode: "default",
+      getRules: () => [],
+      clearRules: async () => ({ global: 2, project: 1 }),
+      check: async () => true,
+    } as unknown as PermissionManager;
+    const r = await runAgentCommand("/permissions clear", ctx({ permissions }));
+    expect(r.text).toContain("removed 2 global rule(s)");
+    expect(r.text).toContain("cleared 1 project rule(s)");
+  });
+
+  it("/fork on an empty conversation is an error", async () => {
+    const r = await runAgentCommand("/fork", ctx());
+    expect(r.kind).toBe("error");
+    expect(r.text).toContain("empty");
+  });
+
+  it("/fork branches and reports the kept count", async () => {
+    const agent = fakeAgent({
+      sessionId: "orig1",
+      getMessages: () => Array.from({ length: 6 }, () => ({ role: "user", content: "x" })) as never,
+      fork: async () => "fork9999",
+    } as never);
+    const r = await runAgentCommand("/fork", ctx({ agent }));
+    expect(r.kind).toBe("ok");
+    expect(r.text).toContain("forked into session fork9999");
+    expect(r.text).toContain("kept 6/6");
+    expect(r.text).toContain("/resume orig1");
+  });
+
+  it("/fork parses a leading count and a title", async () => {
+    let seenKeep = -1;
+    let seenTitle: string | undefined;
+    const agent = fakeAgent({
+      sessionId: "orig1",
+      getMessages: () => Array.from({ length: 6 }, () => ({ role: "user", content: "x" })) as never,
+      fork: async (keep: number, title?: string) => {
+        seenKeep = keep;
+        seenTitle = title;
+        return "fork9999";
+      },
+    } as never);
+    await runAgentCommand("/fork 4 try light theme", ctx({ agent }));
+    expect(seenKeep).toBe(4);
+    expect(seenTitle).toBe("try light theme");
+  });
+
+  it("/fork reports when nothing was kept", async () => {
+    const agent = fakeAgent({
+      sessionId: "orig1",
+      getMessages: () => Array.from({ length: 3 }, () => ({ role: "user", content: "x" })) as never,
+      fork: async () => null,
+    } as never);
+    const r = await runAgentCommand("/fork 1", ctx({ agent }));
+    expect(r.kind).toBe("error");
+    expect(r.text).toContain("would drop the whole history");
   });
 });

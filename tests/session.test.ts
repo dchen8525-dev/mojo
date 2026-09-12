@@ -138,6 +138,39 @@ describe("renameSession / deleteSession", () => {
   });
 });
 
+describe("forkSession", () => {
+  it("copies messages into a new session and records the parent", async () => {
+    const parent = await session.createSession("D:\\proj");
+    await session.appendMessages(parent.id, [
+      { role: "user", content: "q1" },
+      { role: "assistant", content: "a1" },
+    ]);
+    const fork = await session.forkSession("D:\\proj", [{ role: "user", content: "q1" }, { role: "assistant", content: "a1" }], { fromId: parent.id });
+    expect(fork.id).not.toBe(parent.id);
+
+    const loaded = await session.loadSession(fork.id);
+    expect(loaded?.messages.map((m) => m.content)).toEqual(["q1", "a1"]);
+    expect(loaded?.meta.forkedFrom).toBe(parent.id);
+
+    // The parent file is untouched.
+    expect((await session.loadSession(parent.id))?.messages).toHaveLength(2);
+  });
+
+  it("carries a title alongside forkedFrom", async () => {
+    const fork = await session.forkSession("D:\\proj", [{ role: "user", content: "hi" }], { title: "try light", fromId: "abc123" });
+    const loaded = await session.loadSession(fork.id);
+    expect(loaded?.meta.title).toBe("try light");
+    expect(loaded?.meta.forkedFrom).toBe("abc123");
+  });
+
+  it("creates an empty-titled fork when no title is given", async () => {
+    const fork = await session.forkSession("D:\\proj", [{ role: "user", content: "hi" }]);
+    const loaded = await session.loadSession(fork.id);
+    expect(loaded?.meta.title).toBeUndefined();
+    expect(loaded?.meta.forkedFrom).toBeUndefined();
+  });
+});
+
 describe("listSessions", () => {
   it("lists sessions sorted by updatedAt descending", async () => {
     const a = await session.createSession("a");
@@ -150,5 +183,44 @@ describe("listSessions", () => {
     const ids = list.map((s) => s.id);
     expect(ids.indexOf(c.id)).toBeLessThan(ids.indexOf(b.id));
     expect(ids.indexOf(b.id)).toBeLessThan(ids.indexOf(a.id));
+  });
+});
+
+describe("renderSessionMarkdown", () => {
+  const meta = { id: "abc123", cwd: "D:\\proj", startedAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:01:00.000Z", model: "anthropic:claude-sonnet-4-5" };
+
+  it("renders a header with meta and roles", () => {
+    const out = session.renderSessionMarkdown(meta, [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hey" },
+    ]);
+    expect(out).toContain("session `abc123`");
+    expect(out).toContain("D:\\proj");
+    expect(out).toContain("claude-sonnet-4-5");
+    expect(out).toContain("**messages**: 2");
+    expect(out).toContain("## 👤 User");
+    expect(out).toContain("## 🤖 Assistant");
+  });
+
+  it("expands tool calls and results", () => {
+    const out = session.renderSessionMarkdown(meta, [
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "t1", name: "read_file", input: { path: "a.ts" } },
+          { type: "text", text: "done" },
+        ],
+      },
+    ]);
+    expect(out).toContain("read_file");
+    expect(out).toContain('"path": "a.ts"');
+  });
+
+  it("marks tool results and errors", () => {
+    const out = session.renderSessionMarkdown(meta, [
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "42", is_error: true }] },
+    ]);
+    expect(out).toContain("(error)");
+    expect(out).toContain("42");
   });
 });

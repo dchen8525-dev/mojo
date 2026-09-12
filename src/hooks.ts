@@ -11,13 +11,24 @@ import { spawn } from "node:child_process";
  * exit 0 stdout may carry extra context.
  */
 
-export type HookEvent = "PreToolUse" | "PostToolUse" | "UserPromptSubmit" | "Stop";
+export type HookEvent =
+  | "PreToolUse"
+  | "PostToolUse"
+  | "UserPromptSubmit"
+  | "Stop"
+  | "SessionStart"
+  | "PreCompact";
 
 interface HookDef {
   /** Tool name pattern (Pre/PostToolUse only); omit or "*" for all. */
   matcher?: string;
   command: string;
   timeout?: number; // ms, default 30s
+  /**
+   * Fire-and-forget: the agent does not wait for the hook and its output can
+   * neither block nor inject context. Use for notifications/logging.
+   */
+  async?: boolean;
 }
 
 export interface HookPayload {
@@ -29,6 +40,10 @@ export interface HookPayload {
   tool_input?: Record<string, unknown>;
   tool_response?: string;
   prompt?: string;
+  /** SessionStart: "startup" for a fresh session, "resume" when history was loaded. */
+  source?: string;
+  /** PreCompact: "auto" (context budget) or "manual" (/compact). */
+  trigger?: string;
 }
 
 export interface HookResult {
@@ -63,6 +78,8 @@ export class HookManager {
     PostToolUse: [],
     UserPromptSubmit: [],
     Stop: [],
+    SessionStart: [],
+    PreCompact: [],
   };
 
   async load(cwd: string) {
@@ -138,9 +155,17 @@ export class HookManager {
 
   /** Run all hooks for an event; first blocker wins. Errors never crash the agent. */
   async run(event: HookEvent, payload: HookPayload, toolName?: string): Promise<HookResult> {
-    const defs = this.hooks[event].filter((d) => matches(d, toolName));
+    // Matchers only make sense for tool events; on SessionStart/PreCompact/etc.
+    // a matcher must not silently disable the hook.
+    const toolEvent = event === "PreToolUse" || event === "PostToolUse";
+    const defs = this.hooks[event].filter((d) => !toolEvent || matches(d, toolName));
     let result: HookResult = { ...OK };
     for (const def of defs) {
+      if (def.async) {
+        // Fire-and-forget: never awaited, output can't block or inject context.
+        void this.runOne(def, { ...payload, hook_event_name: event, tool_name: toolName });
+        continue;
+      }
       const r = await this.runOne(def, { ...payload, hook_event_name: event, tool_name: toolName });
       if (r.blocked) return r;
       if (r.reason) result.reason += r.reason + "\n";

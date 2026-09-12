@@ -1,13 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import TextInput from "ink-text-input";
-import type { Agent, AgentEvents } from "../agent.js";
+import { Agent, COMPACT_RATIO, type AgentEvents } from "../agent.js";
 import type { PermissionManager } from "../permissions.js";
 import type { ImageBlockParam, Risk } from "../types.js";
 import type { TodoItem } from "../tools/todo.js";
 import { bridge } from "./bridge.js";
 import { Markdown } from "./markdown.js";
+import { ThemeContext, useTheme, type Theme } from "./theme.js";
+import { clipCell, GUTTER, looksLikeDiff, splitColumnWidth, splitDiffRows } from "./splitDiff.js";
 import { captureClipboardImage } from "../clipboard.js";
+import { backgroundManager } from "../tools/background.js";
 import { expandFileReferences, renderCommand, type SlashCommand } from "../commands.js";
 
 interface ToolRow {
@@ -37,8 +40,9 @@ const COLLAPSE_HEAD_LINES = 10; // lines shown while folded
 const DIFF_WINDOW = 30; // diff lines visible per page in the permission prompt
 
 function ToolRowView({ row }: { row: ToolRow }) {
+  const theme = useTheme();
   const icon = row.status === "running" ? "⚡" : row.status === "ok" ? "✓" : "✗";
-  const color = row.status === "running" ? "cyan" : row.status === "ok" ? "green" : "red";
+  const color = row.status === "running" ? theme.toolRunning : row.status === "ok" ? theme.toolOk : theme.toolError;
   const resultLine = row.result ? row.result.split("\n")[0] : "";
   return (
     <Box>
@@ -51,14 +55,18 @@ function ToolRowView({ row }: { row: ToolRow }) {
 }
 
 function TodoPanel({ todos }: { todos: TodoItem[] }) {
+  const theme = useTheme();
   if (!todos.length) return null;
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1} marginBottom={1}>
+    <Box flexDirection="column" borderStyle="round" borderColor={theme.border} paddingX={1} marginBottom={1}>
       <Text bold dimColor>
         Tasks
       </Text>
       {todos.map((t) => (
-        <Text key={t.id} color={t.status === "completed" ? "green" : t.status === "in_progress" ? "yellow" : "gray"}>
+        <Text
+          key={t.id}
+          color={t.status === "completed" ? theme.todoDone : t.status === "in_progress" ? theme.todoActive : theme.todoPending}
+        >
           {t.status === "completed" ? "[x] " : t.status === "in_progress" ? "[>] " : "[ ] "}
           {t.content}
         </Text>
@@ -67,7 +75,50 @@ function TodoPanel({ todos }: { todos: TodoItem[] }) {
   );
 }
 
-function DiffPreview({ diff, page = 0 }: { diff: string; page?: number }) {
+function DiffPreview({ diff, page = 0, split, termCols }: { diff: string; page?: number; split: boolean; termCols: number }) {
+  const theme = useTheme();
+  const isDiff = looksLikeDiff(diff);
+  const showSplit = split && isDiff;
+  const tint = (l: string) =>
+    l.startsWith("+") ? theme.diffAdd : l.startsWith("-") ? theme.diffDel : l.startsWith("@@") ? theme.diffMeta : undefined;
+
+  if (showSplit) {
+    const rows = splitDiffRows(diff);
+    const start = page * DIFF_WINDOW;
+    const windowRows = rows.slice(start, start + DIFF_WINDOW);
+    const w = splitColumnWidth(termCols);
+    const side = GUTTER + w;
+    return (
+      <Box flexDirection="column" marginTop={1}>
+        {windowRows.map((r, i) =>
+          r.kind === "meta" ? (
+            <Text key={start + i} color={theme.diffMeta} wrap="truncate">
+              {r.text}
+            </Text>
+          ) : (
+            <Box key={start + i}>
+              <Box width={side}>
+                <Text dimColor>{r.left.num === null ? "   " : `${String(r.left.num).padStart(2)} `}</Text>
+                <Text color={r.changed ? theme.diffDel : undefined} dimColor={!r.changed} wrap="truncate">
+                  {clipCell(r.left.text, w)}
+                </Text>
+              </Box>
+              <Box width={side}>
+                <Text dimColor>{r.right.num === null ? "   " : `${String(r.right.num).padStart(2)} `}</Text>
+                <Text color={r.changed ? theme.diffAdd : undefined} dimColor={!r.changed} wrap="truncate">
+                  {clipCell(r.right.text, w)}
+                </Text>
+              </Box>
+            </Box>
+          ),
+        )}
+        <Text dimColor>
+          split · rows {start + 1}-{Math.min(start + DIFF_WINDOW, rows.length)} / {rows.length} · PageUp/PageDown scroll · t = unified
+        </Text>
+      </Box>
+    );
+  }
+
   const lines = diff.split("\n");
   const start = page * DIFF_WINDOW;
   const windowLines = lines.slice(start, start + DIFF_WINDOW);
@@ -76,42 +127,46 @@ function DiffPreview({ diff, page = 0 }: { diff: string; page?: number }) {
       {windowLines.map((l, i) => (
         <Text
           key={start + i}
-          color={l.startsWith("+") ? "green" : l.startsWith("-") ? "red" : l.startsWith("@@") ? "cyan" : undefined}
+          color={tint(l)}
           dimColor={!l.startsWith("+") && !l.startsWith("-") && !l.startsWith("@@")}
+          wrap="truncate"
         >
           {l}
         </Text>
       ))}
-      {lines.length > DIFF_WINDOW && (
-        <Text dimColor>
-          diff {start + 1}-{Math.min(start + DIFF_WINDOW, lines.length)} / {lines.length} lines · PageUp/PageDown to scroll
-        </Text>
-      )}
+      <Text dimColor>
+        {lines.length > DIFF_WINDOW ? `diff ${start + 1}-${Math.min(start + DIFF_WINDOW, lines.length)} / ${lines.length} lines · PageUp/PageDown to scroll` : ""}
+        {isDiff ? `${lines.length > DIFF_WINDOW ? " · " : ""}t = split` : ""}
+      </Text>
     </Box>
   );
 }
 
-function PermissionPrompt({ request, diffPage }: { request: PermissionRequest; diffPage: number }) {
+function PermissionPrompt({ request, diffPage, diffSplit, termCols }: { request: PermissionRequest; diffPage: number; diffSplit: boolean; termCols: number }) {
+  const theme = useTheme();
+  const danger = request.risk === "high";
+  const tone = danger ? theme.borderDanger : theme.borderWarn;
   return (
-    <Box flexDirection="column" borderStyle="double" borderColor={request.risk === "high" ? "red" : "yellow"} paddingX={1}>
-      <Text bold color={request.risk === "high" ? "red" : "yellow"}>
-        Permission required {request.risk === "high" ? "(high risk)" : "(write)"}
+    <Box flexDirection="column" borderStyle="double" borderColor={tone} paddingX={1}>
+      <Text bold color={tone}>
+        Permission required {danger ? "(high risk)" : "(write)"}
       </Text>
       <Text>{request.description}</Text>
-      {request.preview && <DiffPreview diff={request.preview} page={diffPage} />}
-      <Text dimColor>y = allow once · a = always allow · d = always deny · n / Esc = deny once</Text>
+      {request.preview && <DiffPreview diff={request.preview} page={diffPage} split={diffSplit} termCols={termCols} />}
+      <Text dimColor>y = allow once · a = always allow · d = always deny · n / Esc = deny once · t = toggle split diff</Text>
     </Box>
   );
 }
 
 function TranscriptView({ items, expandedAll }: { items: TranscriptItem[]; expandedAll: boolean }) {
+  const theme = useTheme();
   return (
     <Box flexDirection="column">
       {items.map((item, i) => {
         if (item.kind === "user")
           return (
             <Box key={i} marginBottom={1}>
-              <Text color="green" bold>
+              <Text color={theme.user} bold>
                 {"❯ "}
               </Text>
               <Text>{item.text}</Text>
@@ -149,10 +204,11 @@ function TranscriptView({ items, expandedAll }: { items: TranscriptItem[]; expan
 }
 
 function HistoryPicker({ items, sel }: { items: string[]; sel: number }) {
+  const theme = useTheme();
   const shown = items.slice(-8);
   const offset = items.length - shown.length;
   return (
-    <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1} marginBottom={1}>
+    <Box flexDirection="column" borderStyle="single" borderColor={theme.border} paddingX={1} marginBottom={1}>
       <Text bold dimColor>
         Prompt history (↑/↓ select · Enter fill · Esc close)
       </Text>
@@ -161,7 +217,7 @@ function HistoryPicker({ items, sel }: { items: string[]; sel: number }) {
         const active = idx === sel;
         const one = t.split("\n")[0].slice(0, 100);
         return (
-          <Text key={idx} color={active ? "cyan" : undefined} dimColor={!active}>
+          <Text key={idx} color={active ? theme.accent : undefined} dimColor={!active}>
             {active ? "❯ " : "  "}
             {one}
           </Text>
@@ -177,27 +233,31 @@ export function AgentApp({
   sessionId,
   onCommand,
   customCommands,
+  initialTheme,
 }: {
   agent: Agent;
   permissions: PermissionManager;
   sessionId: string;
   onCommand: (line: string) => Promise<string | null | "quit">;
   customCommands: Map<string, SlashCommand>;
+  initialTheme: Theme;
 }) {
   const { exit } = useApp();
   const { stdout } = useStdout();
+  const [theme, setTheme] = useState<Theme>(initialTheme);
   const [items, setItems] = useState<TranscriptItem[]>([]);
   const [streamText, setStreamText] = useState("");
   const [busy, setBusy] = useState(false);
   const [input, setInput] = useState("");
   const [permission, setPermission] = useState<PermissionRequest | null>(null);
   const [todos, setTodos] = useState<TodoItem[]>([]);
-  const [usage, setUsage] = useState({ input: 0, output: 0 });
   const [error, setError] = useState("");
   const [pendingImages, setPendingImages] = useState<ImageBlockParam[]>([]);
   const [planMode, setPlanMode] = useState(agent.planMode);
   const [expandedAll, setExpandedAll] = useState(false);
   const [diffPage, setDiffPage] = useState(0);
+  const [diffSplit, setDiffSplit] = useState(true);
+  const [termCols, setTermCols] = useState(() => stdout.columns ?? 80);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historySel, setHistorySel] = useState(0);
   const historyRef = useRef<string[]>([]); // user prompts this session, newest last
@@ -213,11 +273,35 @@ export function AgentApp({
   const imagesRef = useRef<ImageBlockParam[]>([]);
   imagesRef.current = pendingImages;
   const pastingRef = useRef(false);
+  const themeRef = useRef(theme);
+  themeRef.current = theme;
+
+  // Let /theme (CLI side, outside React) swap the palette in place.
+  useEffect(() => {
+    bridge.setTheme = (next) => setTheme(next);
+    bridge.getTheme = () => themeRef.current;
+    return () => {
+      delete bridge.setTheme;
+      delete bridge.getTheme;
+    };
+  }, []);
+
+  // Keep split-diff column widths in sync with terminal resizes.
+  useEffect(() => {
+    const onResize = () => setTermCols(stdout.columns ?? 80);
+    stdout.on("resize", onResize);
+    return () => {
+      stdout.off("resize", onResize);
+    };
+  }, [stdout]);
 
   // Register the permission handler for the UI.
   useEffect(() => {
     bridge.askPermission = (description: string, risk: Risk, preview?: string) =>
-      new Promise<"yes" | "no" | "always" | "always_deny">((resolve) => setPermission({ description, risk, preview, resolve }));
+      new Promise<"yes" | "no" | "always" | "always_deny">((resolve) => {
+        setDiffPage(0);
+        setPermission({ description, risk, preview, resolve });
+      });
     return () => {
       delete bridge.askPermission;
     };
@@ -238,6 +322,11 @@ export function AgentApp({
             return;
           }
           const a = ch.toLowerCase();
+          if (a === "t" && permissionRef.current?.preview) {
+            setDiffSplit((v) => !v);
+            setDiffPage(0);
+            return;
+          }
           if (a === "y") {
             perm.resolve("yes");
             setPermission(null);
@@ -295,8 +384,13 @@ export function AgentApp({
           pastingRef.current = true;
           captureClipboardImage()
             .then((img) => {
-              if (img) setPendingImages((prev) => [...prev, img]);
-              else setItems((prev) => [...prev, { kind: "system", text: "(clipboard has no image)" }]);
+              if (img && !agent.supportsVision()) {
+                setItems((prev) => [...prev, { kind: "system", text: "(current model does not support vision — image not attached; switch with /model)" }]);
+              } else if (img) {
+                setPendingImages((prev) => [...prev, img]);
+              } else {
+                setItems((prev) => [...prev, { kind: "system", text: "(clipboard has no image)" }]);
+              }
             })
             .finally(() => {
               pastingRef.current = false;
@@ -361,7 +455,6 @@ export function AgentApp({
             ),
           );
         },
-        onUsage: (inp, out) => setUsage({ input: inp, output: out }),
         onCostWarning: (message) => setItems((prev) => [...prev, { kind: "system", text: `[cost] ${message}` }]),
         onCompacting: () => setItems((prev) => [...prev, { kind: "system", text: "… compacting context …" }]),
         onCompacted: (before, after) =>
@@ -458,48 +551,77 @@ export function AgentApp({
   }, [items]);
 
   return (
-    <Box flexDirection="column">
-      <TranscriptView items={visibleItems} expandedAll={expandedAll} />
+    <ThemeContext.Provider value={theme}>
+      <Box flexDirection="column">
+        <TranscriptView items={visibleItems} expandedAll={expandedAll} />
 
-      {busy && streamText && (
-        <Box marginBottom={1}>
-          <Markdown text={streamText} />
+        {busy && streamText && (
+          <Box marginBottom={1}>
+            <Markdown text={streamText} />
+          </Box>
+        )}
+
+        {busy && !streamText && (
+          <Text dimColor>
+            ⏺ thinking… <Text color={theme.border}>(Esc to interrupt)</Text>
+          </Text>
+        )}
+
+        {permission && <PermissionPrompt request={permission} diffPage={diffPage} diffSplit={diffSplit} termCols={termCols} />}
+
+        {error && <Text color={theme.error}>Error: {error}</Text>}
+
+        <TodoPanel todos={todos} />
+
+        {historyOpen && <HistoryPicker items={historyRef.current} sel={historySel} />}
+
+        <Box>
+          <Text color={theme.user} bold>
+            {"❯ "}
+          </Text>
+          <TextInput
+            value={input}
+            onChange={setInput}
+            onSubmit={onSubmit}
+            focus={!permission && !historyOpen}
+            placeholder={busy ? "waiting for agent…" : "ask the agent… (/help · Esc history · Ctrl+O expand)"}
+          />
         </Box>
-      )}
 
-      {busy && !streamText && (
-        <Text dimColor>
-          ⏺ thinking… <Text color="gray">(Esc to interrupt)</Text>
-        </Text>
-      )}
-
-      {permission && <PermissionPrompt request={permission} diffPage={diffPage} />}
-
-      {error && <Text color="red">Error: {error}</Text>}
-
-      <TodoPanel todos={todos} />
-
-      {historyOpen && <HistoryPicker items={historyRef.current} sel={historySel} />}
-
-      <Box>
-        <Text color="green" bold>
-          {"❯ "}
-        </Text>
-        <TextInput
-          value={input}
-          onChange={setInput}
-          onSubmit={onSubmit}
-          focus={!permission && !historyOpen}
-          placeholder={busy ? "waiting for agent…" : "ask the agent… (/help · Esc history · Ctrl+O expand)"}
-        />
+        <StatusBar agent={agent} planMode={planMode} expandedAll={expandedAll} permissions={permissions} sessionId={sessionId} />
       </Box>
+    </ThemeContext.Provider>
+  );
+}
 
-      <Text dimColor>
-        {planMode && <Text color="magenta" bold>{"PLAN "}</Text>}
-        {agent.provider}:{agent.model} · session {sessionId} · ctx in {usage.input} / out {usage.output} · mode{" "}
-        {permissions.mode}
-        {expandedAll ? " · all expanded (Ctrl+O)" : ""}
-      </Text>
-    </Box>
+/** Bottom status line: model, session, live context usage, spend, bg tasks. */
+function StatusBar({
+  agent,
+  planMode,
+  expandedAll,
+  permissions,
+  sessionId,
+}: {
+  agent: Agent;
+  planMode: boolean;
+  expandedAll: boolean;
+  permissions: PermissionManager;
+  sessionId: string;
+}) {
+  const est = agent.tokenEstimate();
+  const win = agent.contextWindow;
+  const pct = win > 0 ? Math.round((est / win) * 100) : 0;
+  const bgRunning = backgroundManager.list().filter((t) => !t.done).length;
+  const theme = useTheme();
+  const tight = pct >= Math.round(COMPACT_RATIO * 100);
+  return (
+    <Text dimColor>
+      {planMode && <Text color={theme.plan} bold>{"PLAN "}</Text>}
+      {agent.provider}:{agent.model} · session {agent.sessionId} · ctx {est.toLocaleString()}/{win.toLocaleString()} ({pct}%)
+      {tight ? <Text color={theme.warn}>{" ⚠"}</Text> : ""} · ${agent.costs.totalUsd().toFixed(2)}
+      {bgRunning ? ` · bg ${bgRunning}` : ""} · mode {permissions.mode}
+      {expandedAll ? " · all expanded (Ctrl+O)" : ""}
+      <Text color={theme.border}>{` · ${theme.id}`}</Text>
+    </Text>
   );
 }

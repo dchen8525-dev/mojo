@@ -15,9 +15,13 @@ Ink 的交互式 UI。
   替换：glob 选文件 + 字面/正则搜索，合并 diff 一次确认，逐文件快照可 `/undo`）、
   `bash`（含 `run_in_background` 后台任务 + `bash_output` / `bash_kill`）、`glob_files`、
   `grep`、`todo_write`、`task`（研究 / 编码双子智能体）、`get_diagnostics`、
-  `web_search` / `web_fetch`（查文档、跟报错）、`git_status` / `git_commit` / `git_pr`
+  `web_search` / `web_fetch`（查文档、跟报错）、`git_status` / `git_diff` / `git_commit` / `git_pr`
 - **Web 工具**：`web_search`（DuckDuckGo）+ `web_fetch`（HTML 转纯文本，超时与体积
   上限、拒绝非 http(s)），让智能体能查文档、跟陌生报错的解法
+- **工具输入校验 + 二进制检测**：模型参数不符 schema（漏必填项 / 类型错）立刻返回
+  明确错误；`read_file` 识别二进制（NUL 或密集控制字符）不往上下文里倒字节汤
+- **底部状态栏**：常驻显示模型、会话、实时上下文占用（用量/窗口 + 百分比，接近自动
+  压缩阈值时标 ⚠）、累计成本、运行中的后台任务数
 - **上下文压缩三段式**：先免费预剪枝陈旧的 `tool_result` 输出（常足以回到预算内），
   再 LLM 摘要（多次压缩时把上一份交接笔记折叠进新摘要，信息不衰减），摘要调用接入
   `ctx.signal` 可被 Esc 取消；失败回退按交换分组截断
@@ -29,7 +33,10 @@ Ink 的交互式 UI。
   文件），交给模型按严重级别输出可执行的审查意见
 - **Git 工作流护栏**：专用 git 工具比裸 `bash git` 更安全——拒绝在 `main`/`master`
   直接提交、拦截 `.env`/私钥等敏感文件、提交前展示 staged diff、用户拒绝时还原索引、
-  PR 拒绝脏工作区且永不 force push
+  PR 拒绝脏工作区且永不 force push；`git_diff` 以只读方式查看工作区 / staged / 提交区间
+  的改动
+- **Web 工具容灾**：`web_search` 先试 DuckDuckGo，拿不到结果自动降级到 Bing（可用
+  `AGENT_SEARCH_ENGINE=bing` 固定引擎），陌生报错的解法更稳
 - **文件快照与撤销**：`write_file`/`edit_file` 修改前自动快照到
   `~/.node-agent/checkpoints/`，`/undo` 逐步回滚（含删除代理新建的文件），无需依赖 git
 - **宽容的 `edit_file`**：先尝试精确匹配，失败后退回到忽略空白的匹配，并把替换文本重新
@@ -37,7 +44,9 @@ Ink 的交互式 UI。
   统一的 `<diff>`（权限确认提示中同样展示），让你在批准前确切看到改了什么
 - **并行工具执行**：只读 / 子智能体工具并发运行；有副作用的工具保持串行
 - **权限系统**：读操作自动放行，写操作和危险命令需要确认；`y` / `a`（总是允许）/
-  `d`（总是拒绝）/ `n`，规则可持久化，另有 `--auto` 与 `--yolo` 模式
+  `d`（总是拒绝）/ `n`，规则可持久化，另有 `--auto` 与 `--yolo` 模式；也可在项目根
+  `.node-agent/permissions.json` 里预置 `[{ "match": "git status", "decision": "allow" }]`
+  规则（`match` 支持 `*` 通配如 `"bash: npm run *"`），项目规则优先于全局、可提前自动放行/拒绝
 - **多模型**：Anthropic 与 OpenAI（Chat Completions）后端，`/model` 热切换，支持别名
   （`sonnet` / `opus` / `haiku` / `gpt`），按模型区分上下文窗口
 - **流式输出 + 断点恢复**：被中断的流从已产出的部分继续，而不是重发整个请求；瞬时 API
@@ -48,11 +57,15 @@ Ink 的交互式 UI。
   `/cost <usd>` 或 `AGENT_BUDGET_USD` 设预算；用到 80% 告警、耗尽时干净终止当前轮次
   （为未执行的 tool_use 回填错误结果，历史保持合法）
 - **会话持久化**：JSONL 格式存于 `~/.node-agent/sessions/`，`/sessions` + `--resume`
-- **图片输入**：`Ctrl+V` 直接粘贴剪贴板截图（Windows / macOS / Linux）
+- **三套主题**：`dark` / `light` / `auto`（跟随终端背景）——深色终端与浅色终端都不
+  刺眼；`auto` 通过 OSC 11 询问终端背景色，`COLORFGBG` 兜底，拿不到再退回深色。
+  `/theme [dark|light|auto]` 热切换并写回配置，`--theme <name>` / `AGENT_THEME` 单次覆盖
+- **图片输入**：`Ctrl+V` 直接粘贴剪贴板截图（Windows / macOS / Linux）；当前模型
+  不支持视觉时（DeepSeek / GLM / Qwen 等）明确提示不挂载，而不是静默丢图或报错
 - **`@file` 引用**：把文件内容内联进你的提示词（`@src/foo.ts`、`@"my file.txt"`）
 - **自定义斜杠命令**：`.node-agent/commands/*.md` 中的 markdown 提示词模板
-- **钩子（Hooks）**：在 `PreToolUse` / `PostToolUse` / `UserPromptSubmit` / `Stop` 时机
-  执行 shell 命令
+- **钩子（Hooks）**：在 `SessionStart` / `UserPromptSubmit` / `PreToolUse` /
+  `PostToolUse` / `PreCompact` / `Stop` 时机执行 shell 命令，支持 `async` 旁路钩子
 - **MCP 客户端**：从 `~/.node-agent/mcp.json` 或 `.mcp.json` 连接 stdio 服务器
 - **MCP 服务器模式**：`agent --mcp-server` 把 mojo 自身暴露为 MCP server（只读工具 +
   `agent_chat` + 项目资源），供其他代理编排调用
@@ -140,6 +153,37 @@ $env:AGENT_BASE_URL = "https://mirror.example/v1"; agent -p "hello"
 
 启动后输入 `/model`（无参数）会显示当前 `provider:model` 与上下文窗口；
 缺 key 报错时的提示语会指明该去哪个文件补配置。
+
+### 主题（dark / light / auto）
+
+UI 不再硬编码颜色：所有组件只认语义色（"工具成功"、`diffAdd`、`accent` …），主题负责
+把这些语义映射到具体色值。三套主题：
+
+| 主题 | 说明 |
+| --- | --- |
+| `dark` | 深色终端（默认兜底） |
+| `light` | 浅色终端——压暗前景、降低饱和度，避免在白底上发灰 |
+| `auto` | 跟随终端背景：先发 OSC 11 查询背景色（300ms 超时），拿不到再看 `COLORFGBG`，都没有才退回深色 |
+
+解析优先级（高 → 低）：`--theme <name>` → `/theme <name>` 的运行时选择 → `AGENT_THEME`
+→ 项目 `.node-agent/config.json` → 全局 `~/.node-agent/config.json` → `auto`。
+
+```bash
+agent --theme light                 # 单次生效
+AGENT_THEME=dark agent              # 环境变量，同样单次生效
+AGENT_BACKGROUND=light agent        # 只给 auto 一个明确提示（跳过终端探测）
+```
+
+```json
+{ "provider": "anthropic", "apiKey": "sk-...", "theme": "auto" }
+```
+
+交互中输入 `/theme` 查看当前主题及其来源，`/theme light` 立即换色并写入全局配置
+（`apiKey`、`model` 等原有键值保留）。若项目级配置里也写了 `theme`，它会遮蔽全局设置，
+此时命令会明确提示你。
+
+主题同时作用于：Ink 交互 UI、diff 预览、任务面板、状态栏，以及 Markdown 渲染
+（`marked-terminal` 的代码块 / 标题 / 链接配色），`-p` 纯文本模式同样按主题取色。
 
 ### Windows 兼容
 
@@ -256,9 +300,13 @@ node-agent-output\bash-1757...txt - read it with read_file offset/limit.]
 
 ```bash
 agent                         # 交互式 UI
-agent -p "explain this repo"  # 单轮 print 模式
+agent -p "explain this repo"  # 单轮 print 模式（跑完附一行 token/耗时/成本统计）
 agent --resume <id>           # 继续一个已保存的会话
+agent --continue              # 直接回到最近一次更新的会话（免记 id）
+agent --export <id> [--format md|json]  # 把会话导出为 markdown/json 纪要
 agent --model openai:gpt-4o   # 启动时指定模型
+agent --theme light           # 启动时指定主题（dark | light | auto）
+agent --help                  # 用法帮助 · agent --version 打印版本号
 agent --auto                  # 自动批准非高危写操作
 agent --yolo                  # 批准一切（谨慎使用）
 agent --plan                  # 以 Plan 模式启动（先只读探索 + 出计划待批准）
@@ -296,14 +344,29 @@ GUI 与终端 UI 共用同一套核心（智能体循环、权限、会话、命
 | `Ctrl+O` | 展开 / 折叠所有长回复（超过 14 行的助手消息默认折叠） |
 | `↑` / `↓` / `Enter` | 历史选择器中：移动 / 把选中提示词填入输入框 |
 | `PageUp` / `PageDown` | 权限确认弹窗中翻页 diff 预览 |
+| `t` | 权限确认弹窗中切换 diff 视图：左右分栏（默认，含行号）/ 单栏 unified |
 | `y` / `a` / `d` / `n` | 允许一次 / 总是允许 / 总是拒绝 / 拒绝一次（权限确认时） |
 
 ### 斜杠命令
 
 `/help` · `/model [spec|list]` · `/auto [on|off]` · `/yolo` · `/plan [on|off]` ·
-`/mcp` · `/lsp` · `/compact` · `/review [base] [focus]` ·
-`/permissions [clear]` · `/hooks` · `/sessions` · `/resume <id>` · `/rename <名称>` · `/todos` · `/undo [-y]` ·
+`/theme [dark|light|auto]` · `/mcp` · `/lsp` · `/compact` · `/context` · `/review [base] [focus]` ·
+`/permissions [clear]` · `/hooks` · `/sessions` · `/resume <id>` · `/fork [N] [名称]` · `/rename <名称>` · `/todos` · `/undo [-y]` ·
 `/cost [usd]` · `/clear` · `/quit`
+
+### 会话分叉（/fork）
+
+想在某个历史点"另起一条线"继续，而不动原会话时用 `/fork`：
+
+```text
+/fork                  ← 复制当前全部历史到新会话，从这里继续
+/fork 12               ← 只保留前 12 条消息
+/fork 12 试试浅色主题     ← 保留前 12 条并给新会话命名
+```
+
+新会话是独立文件，原会话保持不变（提示里会给出原 id，用 `/resume <id>` 随时回去）。
+保留的条数会自动回退到最近的"干净边界"——绝不把 `tool_use` 和它的 `tool_result` 拆到
+分叉两侧，也不会以未完成的工具轮结尾，因此分叉后的下一轮不会触发 API 报错。
 
 ### Plan 模式（先计划，后执行）
 
@@ -315,6 +378,15 @@ Plan 模式下智能体只拿到只读工具加一个 `exit_plan`：它先用探
 `exit_plan` 把完整计划（目标、按文件列出的步骤、风险、验证方式）作为确认预览展示给你。
 批准 → 切回普通模式立即开工；拒绝 → 留在 Plan 模式继续修订。`runTool` 层还有硬防线：
 即使模型幻觉出写工具调用也会被拒绝。worker 子智能体在 Plan 模式下同样被禁止。
+
+### 上下文使用量（/context）
+
+```text
+/context     ← 查看上下文占用：当前用量 / 模型窗口（百分比 + 进度条）、已加载消息数
+```
+
+以 API 返回的精确 input token 为锚点，叠加对未计费部分的 CJK 感知估算；进度条接近
+`COMPACT_RATIO`（75%）时变红，提示该考虑 `/compact` 或精简提示。
 
 ### 代码审查（/review）
 
@@ -415,7 +487,32 @@ Review @$1 for correctness issues. Focus on edge cases.
 
 每个钩子通过 stdin 收到一个 JSON payload。退出码 `2` 阻断该操作（stderr 作为原因），
 其他非零退出码以警告形式呈现，退出码 `0` 的 stdout 会作为额外上下文注入。`matcher`
-是以逗号分隔的工具列表或正则；省略则匹配所有工具。
+是以逗号分隔的工具列表或正则；省略则匹配所有工具（`matcher` 仅在工具事件上生效）。
+
+支持的事件：
+
+| 事件 | 时机 | stdout 上下文的去向 |
+|------|------|---------------------|
+| `SessionStart` | 会话启动 / `/resume` / `/clear` / `/fork` / GUI 切换会话（payload 带 `source`: `startup` 或 `resume`） | 注入系统提示词，整个会话可见 |
+| `UserPromptSubmit` | 每轮用户输入前 | 追加到该轮 prompt |
+| `PreToolUse` | 工具执行前（可按 `matcher` 阻断） | 追加到工具结果 |
+| `PostToolUse` | 工具执行后 | 追加到工具结果 |
+| `PreCompact` | 上下文压缩前（payload 带 `trigger`: `auto` 或 `manual`；退出 `2` 取消本次压缩） | 仅展示 |
+| `Stop` | 一轮回复结束时 | 仅展示 |
+
+任意钩子可加 `"async": true` 变为“发射后不管”：不等待执行，输出不能阻断也不能注入
+上下文——适合通知、日志、埋点这类旁路操作。
+
+```json
+{
+  "SessionStart": [
+    { "command": "node scripts/inject-project-notes.js" }
+  ],
+  "PreCompact": [
+    { "command": "node scripts/archive-transcript.js", "async": true }
+  ]
+}
+```
 
 ### LSP 诊断
 
@@ -482,6 +579,15 @@ Review @$1 for correctness issues. Focus on edge cases.
   支撑并行改多个模块。启动前向用户确认一次，其后的每次写/命令仍逐条走正常审批；
   Plan 模式下不可用
 
+**并行编排**：主代理在同一条回复里发出多个 `task` 调用即并发执行（进程内最多 4 个
+同时运行，超出的排队等待）。并发安全由三层保证：
+
+1. 权限弹窗全局串行——多个 worker 同时请求审批时逐个弹出，互不覆盖（否则第一个
+   请求永远等不到回答）；排队期间若前一个"总是允许"的规则已落盘，则直接命中不再重复弹
+2. 只对工作文件互不相交的任务并行——两个 worker 改同一文件会互相覆盖，工具描述里
+   已明确要求模型只并行 DISJOINT 的改动
+3. 并发上限信号量防止 API 限流与成本失控；`Esc` 中断会传播到所有在飞的子代理
+
 ## 开发
 
 ```bash
@@ -495,5 +601,6 @@ npm run test:watch
 增量摘要合并）、自动记忆注入、`/review` diff 收集与提示词、跨文件批量编辑、Web 工具
 HTML 解析、钩子运行器、斜杠命令渲染、`@file` 展开、会话持久化、宽容的 `edit_file`
 匹配与 diff 生成、文件快照与撤销、Git 工作流护栏、Windows shell 选择与跨 shell 危险
-模式、后台任务、分层配置合并、成本核算、输出截断、MCP server（内存传输端到端），以及
+模式、后台任务、分层配置合并、成本核算、输出截断、MCP server（内存传输端到端）、
+并发原语与权限弹窗串行化、会话分叉（/fork），以及
 LSP 客户端（针对一个假的 language server）。

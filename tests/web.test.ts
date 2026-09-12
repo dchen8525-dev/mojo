@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { htmlToText, parseDuckDuckGo, webFetchTool, webSearchTool } from "../src/tools/web.js";
+import { htmlToText, parseBing, parseDuckDuckGo, webFetchTool, webSearchTool } from "../src/tools/web.js";
 import type { ToolContext } from "../src/types.js";
 
 const ctx: ToolContext = { cwd: process.cwd(), askPermission: async () => true };
@@ -52,6 +52,35 @@ describe("parseDuckDuckGo", () => {
   });
 });
 
+describe("parseBing", () => {
+  const sample = `
+    <ol id="b_results">
+      <li class="b_algo">
+        <h2><a href="https://docs.example.com/guide">Bing Guide</a></h2>
+        <div><a>…</a></div>
+        <p>Some snippet <strong>text</strong>.</p>
+      </li>
+      <li class="b_algo">
+        <h2><a href="https://www.example.com/foo">Foo</a></h2>
+        <p>Another snippet.</p>
+      </li>
+      <li class="b_pag">…</li>
+    </ol>`;
+
+  it("extracts b_algo results only", () => {
+    const rs = parseBing(sample);
+    expect(rs).toHaveLength(2);
+    expect(rs[0].title).toBe("Bing Guide");
+    expect(rs[0].url).toBe("https://docs.example.com/guide");
+    expect(rs[0].snippet).toBe("Some snippet text.");
+    expect(rs[1].url).toBe("https://www.example.com/foo");
+  });
+
+  it("skips non-http links and returns empty when none match", () => {
+    expect(parseBing(`<li class="b_algo"><h2><a href="javascript:void(0)">x</a></h2></li>`)).toEqual([]);
+  });
+});
+
 describe("web tool guards", () => {
   it("web_fetch refuses non-http(s) schemes", async () => {
     for (const url of ["file:///etc/passwd", "javascript:alert(1)", "ftp://host/x"]) {
@@ -68,7 +97,28 @@ describe("web tool guards", () => {
     try {
       const r = await webSearchTool.execute({ query: "anything" }, ctx);
       expect(r.isError).toBe(true);
-      expect(r.content).toContain("Search error");
+      expect(r.content).toContain("Search failed");
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+
+  it("falls back to Bing when DuckDuckGo returns no results", async () => {
+    const orig = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (_input: RequestInfo | URL) => {
+      const url = String(_input);
+      if (url.includes("duckduckgo"))
+        return new Response("<html><body>no results</body></html>", { status: 200 });
+      return new Response(
+        `<ol id="b_results"><li class="b_algo"><h2><a href="https://docs.example.com/x">Fallback Result</a></h2><p>snippet</p></li></ol>`,
+        { status: 200 },
+      );
+    }) as never;
+    try {
+      const r = await webSearchTool.execute({ query: "fallback", max_results: 5 }, ctx);
+      expect(r.isError).toBeFalsy();
+      expect(r.content).toContain("Fallback Result");
+      expect(r.content).toContain("engine: bing");
     } finally {
       globalThis.fetch = orig;
     }

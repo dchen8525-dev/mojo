@@ -92,10 +92,59 @@ export function parseDuckDuckGo(html: string): Array<{ title: string; url: strin
   return out;
 }
 
+/** Extract the Bing SERP's organic results. */
+export function parseBing(html: string): Array<{ title: string; url: string; snippet: string }> {
+  const out: Array<{ title: string; url: string; snippet: string }> = [];
+  const blockRe = /<li class="b_algo"[\s\S]*?<\/li>/gi;
+  for (const m of html.matchAll(blockRe)) {
+    const block = m[0];
+    const a = /<h2><a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a><\/h2>/i.exec(block);
+    if (!a) continue;
+    const url = decodeEntities(a[1]);
+    const title = htmlToText(a[2]).trim();
+    const sn = /<p[^>]*>([\s\S]*?)<\/p>/i.exec(block);
+    const snippet = sn ? htmlToText(sn[1]).trim() : "";
+    if (!title || !/^https?:\/\//.test(url)) continue;
+    out.push({ title, url, snippet });
+  }
+  return out;
+}
+
+async function ddgSearch(query: string, max: number, signal?: AbortSignal): Promise<Array<{ title: string; url: string; snippet: string }>> {
+  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+  const { status, body } = await httpGet(url, signal);
+  if (status >= 400) throw new Error(`DuckDuckGo returned HTTP ${status}`);
+  return parseDuckDuckGo(body).slice(0, max);
+}
+
+async function bingSearch(query: string, max: number, signal?: AbortSignal): Promise<Array<{ title: string; url: string; snippet: string }>> {
+  const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${max}`;
+  const { status, body } = await httpGet(url, signal);
+  if (status >= 400) throw new Error(`Bing returned HTTP ${status}`);
+  return parseBing(body).slice(0, max);
+}
+
+/**
+ * Ordered search engines, tried in sequence until one yields results.
+ * `AGENT_SEARCH_ENGINE=bing` (or `duckduckgo`) pins a single engine.
+ */
+function engineOrder(): string[] {
+  const pin = (process.env.AGENT_SEARCH_ENGINE ?? "").trim().toLowerCase();
+  if (pin === "bing") return ["bing"];
+  if (pin === "duckduckgo" || pin === "ddg") return ["duckduckgo"];
+  return ["duckduckgo", "bing"]; // default: try duckduckgo, fall back to bing
+}
+
+const ENGINES: Record<string, (q: string, max: number, signal?: AbortSignal) => Promise<Array<{ title: string; url: string; snippet: string }>>> = {
+  duckduckgo: ddgSearch,
+  bing: bingSearch,
+};
+
 export const webSearchTool: Tool = {
   name: "web_search",
   description:
-    "Search the web (DuckDuckGo) and return the top results as title / URL / snippet. " +
+    "Search the web for the top results as title / URL / snippet. Tries DuckDuckGo first and " +
+    "falls back to Bing if that yields nothing; set AGENT_SEARCH_ENGINE=bing to pin the engine. " +
     "Use it to find documentation or when you are stuck on an error you have not seen before. " +
     "Follow up promising links with web_fetch to read the actual page.",
   isReadOnly: true,
@@ -111,19 +160,23 @@ export const webSearchTool: Tool = {
   async execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const query = str(input, "query");
     const max = Math.min(10, Math.max(1, num(input, "max_results") ?? 5));
-    try {
-      const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-      const { status, body } = await httpGet(url, ctx.signal);
-      if (status >= 400) return { content: `Search failed: HTTP ${status}. Try a different query.`, isError: true };
-      const results = parseDuckDuckGo(body).slice(0, max);
-      if (!results.length) {
-        return { content: `No results parsed for "${query}" (the search page may have changed).`, isError: true };
+    const engines = engineOrder();
+    const errors: string[] = [];
+    for (const name of engines) {
+      try {
+        const results = await ENGINES[name](query, max, ctx.signal);
+        if (!results.length) {
+          errors.push(`${name}: no results parsed`);
+          continue;
+        }
+        const lines = results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`);
+        const note = engines.length > 1 ? `\n(engine: ${name})` : "";
+        return { content: truncate(`Results for "${query}":\n\n${lines.join("\n\n")}${note}`, 8_000) };
+      } catch (err) {
+        errors.push(`${name}: ${describeError(err)}`);
       }
-      const lines = results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`);
-      return { content: truncate(`Results for "${query}":\n\n${lines.join("\n\n")}`, 8_000) };
-    } catch (err) {
-      return { content: `Search error: ${describeError(err)}`, isError: true };
     }
+    return { content: `Search failed. ${errors.join("; ")}`, isError: true };
   },
 };
 

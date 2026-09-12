@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { Agent } from "./agent.js";
+import { COMPACT_RATIO, type Agent } from "./agent.js";
 import type { PermissionManager } from "./permissions.js";
 import type { HookManager } from "./hooks.js";
 import type { McpManager } from "./mcp.js";
@@ -38,9 +38,16 @@ export interface CommandContext {
 
 /** Names of the built-in commands (for /help listings and the GUI palette). */
 export const BUILTIN_COMMANDS = [
-  "help", "model", "auto", "yolo", "plan", "mcp", "lsp", "compact", "review",
-  "permissions", "hooks", "sessions", "resume", "rename", "todos", "undo", "cost", "clear", "quit",
+  "help", "model", "auto", "yolo", "plan", "mcp", "lsp", "compact", "context", "review",
+  "permissions", "hooks", "sessions", "resume", "fork", "rename", "todos", "undo", "cost", "clear", "quit",
 ] as const;
+
+/**
+ * Commands whose behavior depends on the ANSI palette / terminal theme state.
+ * They stay in cli.ts and must be intercepted before delegating here; the GUI
+ * implements its own equivalents against its theme.
+ */
+export const TERMINAL_ONLY_COMMANDS = ["theme"] as const;
 
 export async function runAgentCommand(line: string, ctx: CommandContext): Promise<CommandResult> {
   const { agent, permissions, mcp, hooks, customCommands, cwd } = ctx;
@@ -53,7 +60,7 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       return {
         kind: "ok",
         text: [
-          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks · /sessions · /resume <id> · /rename <名称> · /todos · /undo [-y] · /cost [usd] · /clear · /quit",
+          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks · /sessions · /resume <id> · /fork [N] [名称] · /rename <名称> · /todos · /undo [-y] · /cost [usd] · /clear · /quit",
           "file refs: @path/to/file inlines the file; Ctrl+V pastes a clipboard image",
           custom ? `custom commands: ${custom}` : "",
         ]
@@ -148,10 +155,25 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
         return { kind: "error", text: `review failed: ${err instanceof Error ? err.message : String(err)}` };
       }
     }
+    case "context": {
+      const used = agent.tokenEstimate();
+      const window = agent.contextWindow;
+      const pct = (used / window) * 100;
+      return {
+        kind: "ok",
+        text:
+          `context: ${used.toLocaleString()} / ${window.toLocaleString()} tokens (${pct.toFixed(1)}%)\n` +
+          `${agent.debugMessages().length} messages loaded\n` +
+          `— tokens include the API's exact input count as an anchor plus a CJK-aware estimate of anything not yet billed\n` +
+          `— at ~${(COMPACT_RATIO * 100).toFixed(0)}% of the window the agent auto-compacts; /compact forces it early`,
+      };
+    }
     case "permissions": {
       if (rest[0] === "clear") {
-        const n = await permissions.clearRules();
-        return { kind: "ok", text: `removed ${n} rule(s)` };
+        const { global, project } = await permissions.clearRules();
+        const parts = [`removed ${global} global rule(s)`];
+        if (project) parts.push(`cleared ${project} project rule(s) from memory (they reload from .node-agent/permissions.json)`);
+        return { kind: "ok", text: parts.join("; ") };
       }
       const rules = permissions.getRules();
       if (!rules.length) return { kind: "ok", text: "no saved rules (press 'a' or 'd' at a permission prompt to add one)" };
@@ -195,7 +217,7 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       if (!rest[0]) return { kind: "error", text: "usage: /resume <id>" };
       const loaded = await loadSession(rest[0]);
       if (!loaded) return { kind: "error", text: "session not found" };
-      agent.resetSession(loaded.meta.id, loaded.messages, loaded.meta.model);
+      await agent.resetSession(loaded.meta.id, loaded.messages, loaded.meta.model);
       if (loaded.meta.model) {
         try {
           const r = agent.switchModel(loaded.meta.model);
@@ -205,6 +227,17 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
         }
       }
       return { kind: "ok", text: `resumed ${rest[0]}` };
+    }
+    case "rename": {
+      // /rename <title> — name the *current* session (shown in /sessions and
+      // the GUI sidebar). An empty title clears the name.
+      const title = rest.join(" ").trim();
+      const ok = await renameSession(agent.sessionId, title);
+      if (!ok) return { kind: "error", text: "session not found (nothing renamed yet)" };
+      return {
+        kind: "ok",
+        text: title ? `renamed session ${agent.sessionId} to "${title}"` : `cleared the name on session ${agent.sessionId}`,
+      };
     }
     case "todos": {
       const items = agent.currentTodos();
@@ -243,9 +276,35 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
         return { kind: "error", text: `undo failed: ${err instanceof Error ? err.message : String(err)}` };
       }
     }
+    case "fork": {
+      // /fork [N] [title] — branch into a new session keeping the first N
+      // messages (default: all). A leading integer is the count, the rest is an
+      // optional title. The original session file is left untouched.
+      const total = agent.getMessages().length;
+      if (!total) return { kind: "error", text: "nothing to fork yet (the conversation is empty)" };
+      const fromId = agent.sessionId;
+      let keep = total;
+      const titleParts = [...rest];
+      if (rest[0] && /^\d+$/.test(rest[0])) {
+        keep = parseInt(rest[0], 10);
+        titleParts.shift();
+      }
+      const title = titleParts.join(" ").trim() || undefined;
+      const newId = await agent.fork(keep, title);
+      if (!newId) return { kind: "error", text: `nothing kept: /fork ${keep} would drop the whole history — try a larger N` };
+      const kept = agent.getMessages().length;
+      return {
+        kind: "ok",
+        text:
+          `forked into session ${newId}` +
+          (title ? ` "${title}"` : "") +
+          ` (kept ${kept}/${total} messages${kept < keep ? ", rounded back to a clean boundary" : ""})\n` +
+          `now continuing in the fork; ${fromId} is unchanged — get back with /resume ${fromId}`,
+      };
+    }
     case "clear": {
       const s = await createSession(cwd);
-      agent.resetSession(s.id);
+      await agent.resetSession(s.id);
       return { kind: "ok", text: `new session ${s.id}` };
     }
     case "quit":

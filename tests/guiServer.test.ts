@@ -28,7 +28,7 @@ function fakeAgent(overrides: Partial<Agent> = {}): Agent {
 }
 
 function fakePermissions(): PermissionManager {
-  return { mode: "default", getRules: () => [], clearRules: async () => 0, check: async () => true } as unknown as PermissionManager;
+  return { mode: "default", getRules: () => [], clearRules: async () => ({ global: 0, project: 0 }), check: async () => true } as unknown as PermissionManager;
 }
 
 async function withServer(

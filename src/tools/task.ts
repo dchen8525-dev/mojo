@@ -1,5 +1,6 @@
 import type { Tool, ToolContext, ToolResult, MessageParam } from "../types.js";
 import { LLM } from "../llm.js";
+import { Semaphore } from "../sync.js";
 import { readFileTool } from "./read.js";
 import { globTool } from "./glob.js";
 import { grepTool } from "./grep.js";
@@ -10,6 +11,15 @@ import { bashTool } from "./bash.js";
 import { describeError, truncate } from "./utils.js";
 
 const SUB_MAX_ITERATIONS = 25;
+
+/**
+ * Bounds how many subagents run at once across the whole process. A single
+ * parent turn can fire many `task` calls and Promise.all would launch them all
+ * concurrently; this keeps that to a sane ceiling so we don't stampede the API
+ * (rate limits) or the cost budget. Extra calls queue and start as slots free.
+ */
+const SUB_MAX_CONCURRENCY = 4;
+const subSlots = new Semaphore(SUB_MAX_CONCURRENCY);
 
 // Read-only toolset: the research sub-agent explores, it never modifies. Web
 // tools are read-only too, so a research task can also consult docs.
@@ -65,6 +75,11 @@ export const taskTool: Tool = {
     "conversation history: pass a fully self-contained prompt (files, constraints, " +
     "definition of done). Worker mode asks the user's consent once before starting, and " +
     "every write/shell it performs still needs per-operation approval. " +
+    "PARALLELISM: emit several task calls in ONE response to run them concurrently " +
+    "(up to 4 at once; the rest queue). Only do that for genuinely independent pieces " +
+    "that touch DISJOINT files - two workers editing the same file will conflict, since " +
+    "each reads the file before the other's writes land. When tasks depend on each " +
+    "other's output, issue them in separate turns. " +
     "Do NOT use research mode for edits (it cannot write), and do NOT use a subagent for " +
     "a single known file read.",
   // Research mode never modifies anything; worker mode gates itself with an
@@ -125,6 +140,9 @@ export const taskTool: Tool = {
     const subSystem = forceResearch ? RESEARCH_SYSTEM_PROMPT : system;
     const kind = forceResearch ? "research" : worker ? "worker" : "research";
 
+    // Take a concurrency slot only after consent, so a prompt the user has not
+    // answered yet never occupies a running slot.
+    const release = await subSlots.acquire();
     try {
       while (iterations < SUB_MAX_ITERATIONS) {
         if (ctx.signal?.aborted) return { content: "Subagent was interrupted.", isError: true };
@@ -192,6 +210,8 @@ export const taskTool: Tool = {
       const msg = describeError(err);
       if (msg === "aborted") return { content: "Subagent was interrupted.", isError: true };
       return { content: `Subagent failed: ${msg}`, isError: true };
+    } finally {
+      release();
     }
   },
 };

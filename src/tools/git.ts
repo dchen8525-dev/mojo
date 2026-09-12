@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { Tool, ToolContext, ToolResult } from "../types.js";
-import { str, truncate, describeError } from "./utils.js";
+import { str, num, truncate, describeError } from "./utils.js";
 
 /**
  * Dedicated git tools. Compared to shelling out through `bash`:
@@ -120,6 +120,74 @@ export const gitStatusTool: Tool = {
     }
   },
 };
+
+/* ---------------- git_diff ---------------- */
+
+/**
+ * Read-only diff view. Shows the working-tree (unstaged), staged, or a commit
+ * range (<base>..HEAD) diff, optionally restricted to one path. Cap the output
+ * so a large diff doesn't blow the context; tell the model to pass `path` or a
+ * `base` for narrower ranges.
+ */
+export const gitDiffTool: Tool = {
+  name: "git_diff",
+  description:
+    "Show the unified diff of unstaged changes (default), staged changes (staged: true), " +
+    "or a committed range (base: e.g. 'main' or a SHA, shown as base...HEAD). Optionally " +
+    "restrict to one file with path. Read-only. Use this to understand what changed before " +
+    "editing, reviewing, or committing.",
+  isReadOnly: true,
+  parallelSafe: true,
+  inputSchema: {
+    type: "object",
+    properties: {
+      base: { type: "string", description: "Base ref to compare HEAD against (e.g. 'main', 'origin/main', or a SHA). When set, shows the committed range diff." },
+      staged: { type: "boolean", description: "Show the staged (index) diff instead of the working-tree diff." },
+      path: { type: "string", description: "Restrict the diff to a single file (relative to the working directory)." },
+      max_chars: { type: "number", description: "Cap the returned diff (default 30000)." },
+    },
+  },
+  async execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const maxChars = Math.min(100_000, Math.max(1_000, num(input, "max_chars") ?? 30_000));
+    const base = optStr(input, "base");
+    const pathFilter = optStr(input, "path");
+    // Scope selectors shared by both the stat summary and the diff body, so the
+    // header never describes a different range than what's shown below it.
+    const scope: string[] = [];
+    if (base) scope.push(`${trimRef(base)}...HEAD`);
+    else if (input.staged === true) scope.push("--cached");
+    if (pathFilter) scope.push("--", pathFilter);
+    const args = ["diff", "--no-color", "--unified=3", ...scope];
+    try {
+      const err = await ensureRepo(ctx.cwd, ctx.signal);
+      if (err) return { content: err, isError: true };
+      const res = await runGit(ctx.cwd, ["diff", "--no-color", "--stat", ...scope], ctx.signal);
+      const res2 = await runGit(ctx.cwd, args, ctx.signal);
+      if (res2.code !== 0) return { content: `git diff failed: ${res2.out || `exit ${res2.code}`}`, isError: true };
+      if (!res2.out) {
+        const label = base ? `${base}...HEAD` : input.staged === true ? "staged" : "working tree";
+        return { content: `No changes in the ${label} diff${pathFilter ? ` for ${pathFilter}` : ""}.` };
+      }
+      const scopeLabel = base ? `${trimRef(base)}...HEAD` : input.staged === true ? "staged changes" : "unstaged changes";
+      const header = `scope: ${scopeLabel}${pathFilter ? ` · path: ${pathFilter}` : ""}\n${res.out}`;
+      return { content: truncate(`${header}\n\n${res2.out}`, maxChars) };
+    } catch (e) {
+      return { content: `Error: ${describeError(e)}`, isError: true };
+    }
+  },
+};
+
+/** Strip refs/ prefixes and guard against empty refs (belt-and-braces). */
+function trimRef(s: string): string {
+  const t = s.replace(/^refs\/(heads|tags)\//, "").trim();
+  return t || "HEAD";
+}
+
+/** Optional string read (missing/empty => ""), unlike strict `str`. */
+function optStr(input: Record<string, unknown>, key: string): string {
+  const v = input[key];
+  return typeof v === "string" ? v : "";
+}
 
 /* ---------------- git_commit ---------------- */
 

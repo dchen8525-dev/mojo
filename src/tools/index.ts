@@ -7,7 +7,7 @@ import { grepTool } from "./grep.js";
 import { todoWriteTool } from "./todo.js";
 import { taskTool } from "./task.js";
 import { getDiagnosticsTool } from "../lsp.js";
-import { gitStatusTool, gitCommitTool, gitPrTool } from "./git.js";
+import { gitStatusTool, gitCommitTool, gitPrTool, gitDiffTool } from "./git.js";
 import { webSearchTool, webFetchTool } from "./web.js";
 import { multiEditTool } from "./multiEdit.js";
 
@@ -25,6 +25,7 @@ export const tools: Tool[] = [
   multiEditTool,
   getDiagnosticsTool,
   gitStatusTool,
+  gitDiffTool,
   gitCommitTool,
   gitPrTool,
   webSearchTool,

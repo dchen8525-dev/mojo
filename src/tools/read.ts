@@ -4,6 +4,22 @@ import { relPath, resolvePath, str, num, truncate, describeError } from "./utils
 
 const MAX_LINES = 2000;
 
+/**
+ * Best-effort binary detection for read_file. A NUL byte is a strong signal,
+ * but some binaries / encodings (e.g. UTF-16 without NUL alignment artifacts)
+ * slip through, so we also flag a high ratio of non-printing control bytes in
+ * a sample. Serves to keep byte soup out of the model's context.
+ */
+export function looksBinary(buf: Buffer): boolean {
+  if (buf.includes(0)) return true;
+  const sample = buf.subarray(0, 8192);
+  let control = 0;
+  for (const b of sample) {
+    if (b < 0x20 && b !== 0x09 && b !== 0x0a && b !== 0x0d) control++;
+  }
+  return sample.length > 0 && control / sample.length > 0.3;
+}
+
 export const readFileTool: Tool = {
   name: "read_file",
   description:
@@ -30,7 +46,7 @@ export const readFileTool: Tool = {
         return { content: `Error: "${abs}" is a directory. Use glob_files instead.`, isError: true };
       }
       const buf = await fs.readFile(abs);
-      if (buf.includes(0)) {
+      if (looksBinary(buf)) {
         return { content: `Error: "${abs}" appears to be a binary file.`, isError: true };
       }
 
