@@ -45,11 +45,32 @@ function priceFor(spec: string): { model: string; priced: boolean; in_: number; 
   };
 }
 
+/** Best-effort USD for one usage delta; `priced: false` when the model has no price entry. */
+export function computeUsd(modelSpec: string, usage: UsageDelta): { usd: number; priced: boolean } {
+  const p = priceFor(modelSpec);
+  if (!p.priced) return { usd: 0, priced: false };
+  return {
+    usd:
+      (usage.input * p.in_ +
+        usage.output * p.out +
+        (usage.cacheRead ?? 0) * p.cr +
+        (usage.cacheWrite ?? 0) * p.cw) /
+      1_000_000,
+    priced: true,
+  };
+}
+
 export class CostTracker {
   private spend = new Map<string, ModelSpend>();
   private _budgetUsd: number | null;
   private warned80 = false;
   private warned100 = false;
+  /**
+   * Fired after every recorded turn with the per-turn USD, so a host can stream
+   * usage to a persistent log (see usage.ts). Best-effort: the callback must
+   * not throw, and it is intentionally synchronous to keep ordering.
+   */
+  onRecord?: (modelSpec: string, usage: UsageDelta, usd: number, priced: boolean) => void;
 
   constructor(budgetUsd?: number | null) {
     this._budgetUsd = budgetUsd && budgetUsd > 0 ? budgetUsd : null;
@@ -67,30 +88,25 @@ export class CostTracker {
   }
 
   record(modelSpec: string, usage: UsageDelta): void {
-    const p = priceFor(modelSpec);
     const s = this.spend.get(modelSpec) ?? {
       input: 0,
       output: 0,
       cacheRead: 0,
       cacheWrite: 0,
       usd: 0,
-      priced: p.priced,
+      priced: priceFor(modelSpec).priced,
       requests: 0,
     };
+    const { usd, priced } = computeUsd(modelSpec, usage);
     s.input += usage.input;
     s.output += usage.output;
     s.cacheRead += usage.cacheRead ?? 0;
     s.cacheWrite += usage.cacheWrite ?? 0;
     s.requests += 1;
-    if (p.priced) {
-      s.usd +=
-        (usage.input * p.in_ +
-          usage.output * p.out +
-          (usage.cacheRead ?? 0) * p.cr +
-          (usage.cacheWrite ?? 0) * p.cw) /
-        1_000_000;
-    }
+    s.usd += usd;
+    s.priced = s.priced || priced;
     this.spend.set(modelSpec, s);
+    this.onRecord?.(modelSpec, usage, usd, priced);
   }
 
   totalUsd(): number {

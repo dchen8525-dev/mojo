@@ -13,6 +13,7 @@ import type { HookManager } from "./hooks.js";
 import { TokenCounter } from "./tokens.js";
 import { CheckpointStore } from "./checkpoint.js";
 import { CostTracker } from "./cost.js";
+import { logUsage } from "./usage.js";
 import { appendMemoryNote, renderMemory } from "./memory.js";
 import { buildReviewPrompt, collectReview, REVIEW_SYSTEM } from "./review.js";
 import { truncate } from "./tools/utils.js";
@@ -96,6 +97,21 @@ export class Agent {
     this.checkpoints = new CheckpointStore(sessionId);
     const budget = Number(process.env.AGENT_BUDGET_USD);
     this.costs = new CostTracker(Number.isFinite(budget) && budget > 0 ? budget : null);
+    // Stream every turn to the cross-session usage ledger (best-effort). Reads
+    // this.sessionId live so /resume and /fork attribute spend correctly.
+    this.costs.onRecord = (modelSpec, usage, usd, priced) => {
+      void logUsage({
+        t: new Date().toISOString(),
+        s: this.sessionId,
+        m: modelSpec,
+        u: usd,
+        p: priced,
+        i: usage.input,
+        o: usage.output,
+        cr: usage.cacheRead ?? 0,
+        cw: usage.cacheWrite ?? 0,
+      });
+    };
     this.permissions = permissions;
     this.hooks = hooks;
     this.lastPersistedModel = initialModelSpec ?? "";

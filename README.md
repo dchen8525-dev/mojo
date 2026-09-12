@@ -55,7 +55,9 @@ Ink 的交互式 UI。
   基于真实数字触发，而不是简单的字符数/3.5
 - **成本统计与预算护栏**：按模型（含 prompt 缓存读写）聚合会话美元成本，`/cost` 查看、
   `/cost <usd>` 或 `AGENT_BUDGET_USD` 设预算；用到 80% 告警、耗尽时干净终止当前轮次
-  （为未执行的 tool_use 回填错误结果，历史保持合法）
+  （为未执行的 tool_use 回填错误结果，历史保持合法）。每轮用量落盘到
+  `~/.node-agent/usage.jsonl` 账本，`/cost all` / `/cost by session|model|day` /
+  `/cost export` 做跨会话花费分析与 CSV 导出
 - **会话持久化**：JSONL 格式存于 `~/.node-agent/sessions/`，`/sessions` + `--resume`
 - **三套主题**：`dark` / `light` / `auto`（跟随终端背景）——深色终端与浅色终端都不
   刺眼；`auto` 通过 OSC 11 询问终端背景色，`COLORFGBG` 兜底，拿不到再退回深色。
@@ -352,7 +354,7 @@ GUI 与终端 UI 共用同一套核心（智能体循环、权限、会话、命
 `/help` · `/model [spec|list]` · `/auto [on|off]` · `/yolo` · `/plan [on|off]` ·
 `/theme [dark|light|auto]` · `/mcp` · `/lsp` · `/compact` · `/context` · `/review [base] [focus]` ·
 `/permissions [clear]` · `/hooks` · `/sessions` · `/resume <id>` · `/fork [N] [名称]` · `/rename <名称>` · `/todos` · `/undo [-y]` ·
-`/cost [usd]` · `/clear` · `/quit`
+`/cost [usd | all | by session|model|day | export [路径]]` · `/clear` · `/quit`
 
 ### 会话分叉（/fork）
 
@@ -441,9 +443,16 @@ dev server、watch 构建等长驻命令不该阻塞工具调用或撞超时：
 ### 成本与预算（/cost）
 
 ```text
-/cost          ← 会话累计：总额、token 数、按模型明细（含缓存读写命中）
-/cost 5        ← 把本会话预算设为 $5（80% 时告警，耗尽时停止当轮）
+/cost              ← 会话累计：总额、token 数、按模型明细（含缓存读写命中）
+/cost 5            ← 把本会话预算设为 $5（80% 时告警，耗尽时停止当轮）
+/cost all          ← 跨会话累计（读 ~/.node-agent/usage.jsonl 用量账本）
+/cost by model     ← 按 session / model / day 维度聚合历史花费，定位钱花在哪
+/cost export [路径] ← 把用量账本导出为 CSV（默认 ./usage.csv），方便表格透视
 ```
+
+每个 API 轮次（含子智能体与压缩调用）都会追加一行到 `~/.node-agent/usage.jsonl`
+账本，`/cost all` / `by` / `export` 都基于它做跨会话分析；账本写入是尽力而为的
+异步串行操作，不会阻塞或打断对话。
 
 启动时设 `AGENT_BUDGET_USD=5` 同样生效。价格表覆盖 Claude / GPT / DeepSeek 常见
 模型；未知模型只统计 token、不猜美元数。预算耗尽时智能体干净收尾（给未执行的
