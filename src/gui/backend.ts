@@ -80,6 +80,7 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
   const runtime = new GuiRuntime(hub);
   const permissions = new PermissionManager((desc, risk, preview) => runtime.askPermission(desc, risk, preview));
   await permissions.load();
+  await permissions.loadProject(cwd);
   if (opts.yolo) permissions.mode = "yolo";
   else if (opts.auto) permissions.mode = "auto";
 

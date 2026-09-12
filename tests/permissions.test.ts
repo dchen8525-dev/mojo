@@ -1,9 +1,21 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { PermissionManager, loadRulesFrom, ruleMatches } from "../src/permissions.js";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Risk } from "../src/types.js";
+
+// Redirect the rules store into a temp "home" so clearRules()/save() in these
+// tests never touch the real ~/.node-agent/permissions.json. The mock must be
+// installed before permissions.js computes RULES_FILE at import time.
+const fakeHome = path.join(os.tmpdir(), "node-agent-perm-test-home");
+
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  const patched = { ...actual, homedir: () => fakeHome };
+  return { ...patched, default: patched };
+});
+
+const { PermissionManager, loadRulesFrom, ruleMatches } = await import("../src/permissions.js");
 
 describe("ruleMatches", () => {
   it("matches substrings without a wildcard", () => {
@@ -106,6 +118,20 @@ describe("PermissionManager project rules", () => {
     const pm = new PermissionManager(askUser);
     expect(await pm.check("read_file a.ts", "low", true)).toBe(true);
     expect(askCalls).toBe(0);
+  });
+
+  it("clearRules reports global and project counts separately", async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "agent-proj4-"));
+    await fs.mkdir(path.join(tmp, ".node-agent"), { recursive: true });
+    await fs.writeFile(path.join(tmp, ".node-agent", "permissions.json"), JSON.stringify([{ match: "git push", decision: "deny" }]), "utf8");
+
+    const pm = new PermissionManager(askUser);
+    await pm.loadProject(tmp);
+    const counts = await pm.clearRules();
+    expect(counts).toEqual({ global: 0, project: 1 });
+    // After clearing, the project rule no longer blocks within this session.
+    expect(await pm.check("Run git push origin main", "high", false)).toBe(true);
+    expect(askCalls).toBe(1);
   });
 });
 

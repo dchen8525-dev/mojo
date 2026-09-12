@@ -214,6 +214,18 @@ describe("saveTheme", () => {
     expect(file).toBe(path.join(project, ".node-agent", "config.json"));
     expect(loadConfigFiles(project, home).theme).toBe("auto");
   });
+
+  it("refuses to overwrite an existing config that is not valid JSON", async () => {
+    const home = await tmpdir("th-home-");
+    await fs.mkdir(path.join(home, ".node-agent"), { recursive: true });
+    const file = path.join(home, ".node-agent", "config.json");
+    const corrupt = '{ "apiKey": "sk-secret", }'; // trailing comma → unparseable
+    await fs.writeFile(file, corrupt, "utf8");
+
+    await expect(saveTheme("light", { home, cwd: home })).rejects.toThrow(/not valid JSON/);
+    // The original bytes survive — we never clobber a hand-corrupted config.
+    expect(await fs.readFile(file, "utf8")).toBe(corrupt);
+  });
 });
 
 describe("print-mode helpers", () => {

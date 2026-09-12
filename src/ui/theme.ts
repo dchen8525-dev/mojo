@@ -308,7 +308,9 @@ export async function resolveThemeAsync(opts: ResolveThemeOptions = {}, timeoutM
 /**
  * Persist a theme choice so the next session starts with it. Writes to the
  * global config by default (a theme is a personal preference); merges into the
- * existing file so apiKey/model survive.
+ * existing file so apiKey/model survive. Throws instead of overwriting when the
+ * file exists but is not valid JSON — otherwise a hand-corrupted config would
+ * be replaced by `{theme}` alone and silently lose apiKey/model.
  */
 export async function saveTheme(
   name: ThemeName,
@@ -327,23 +329,32 @@ export async function saveTheme(
   let shadowed = false;
   if (scope === "global") {
     const projectCfg = readJsonSync(path.join(cwd, ".node-agent", "config.json"));
-    shadowed = Boolean(parseThemeName(projectCfg?.theme));
+    shadowed = typeof projectCfg === "object" && projectCfg !== null && Boolean(parseThemeName(projectCfg.theme));
   }
 
-  const existing = readJsonSync(file) ?? {};
-  const next = { ...existing, theme: name };
+  const existing = readJsonSync(file);
+  if (existing === "corrupt") {
+    throw new Error(`${file} exists but is not valid JSON — fix it before saving the theme (refused to overwrite)`);
+  }
+  const next = { ...(existing ?? {}), theme: name };
   await fs.mkdir(path.dirname(file), { recursive: true });
   await fs.writeFile(file, `${JSON.stringify(next, null, 2)}\n`, "utf8");
   return { file, shadowed };
 }
 
-function readJsonSync(file: string): (Config & Record<string, unknown>) | null {
+/** Parsed config; `null` when the file is absent, `"corrupt"` when it exists but won't parse. */
+function readJsonSync(file: string): (Config & Record<string, unknown>) | null | "corrupt" {
+  let raw: string;
+  try {
+    raw = readFileSync(file, "utf8");
+  } catch {
+    return null; // no file yet
+  }
   try {
     // Strip a leading UTF-8 BOM so Windows-edited configs still parse.
-    const raw = readFileSync(file, "utf8");
-    return JSON.parse(raw.replace(/^﻿/, "")) as Config & Record<string, unknown>;
+    return JSON.parse(raw.replace(/^\uFEFF/, "")) as Config & Record<string, unknown>;
   } catch {
-    return null;
+    return "corrupt";
   }
 }
 

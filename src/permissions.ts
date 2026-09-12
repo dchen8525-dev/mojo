@@ -82,12 +82,19 @@ export class PermissionManager {
     return this.rules;
   }
 
-  async clearRules(): Promise<number> {
-    const n = this.rules.length;
+  /**
+   * Drop the persisted global rules and the in-memory project rules. Project
+   * rules live in `<cwd>/.node-agent/permissions.json` and are *not* deleted
+   * from disk, so they return on the next `loadProject` — the counts are split
+   * so callers can report that honestly.
+   */
+  async clearRules(): Promise<{ global: number; project: number }> {
+    const global = this.rules.length;
+    const project = this.projectRules.length;
     this.rules = [];
     this.projectRules = [];
     await this.save();
-    return n;
+    return { global, project };
   }
 
   /** First matching rule (project before global) decides the outcome, or null. */

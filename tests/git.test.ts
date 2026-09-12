@@ -227,6 +227,24 @@ describe("git_diff", () => {
     await fs.rm(path.join(dir, "bbb.txt"));
   });
 
+  it("scopes the --stat header to the same range as the diff body", async () => {
+    workBranch("diff-scope");
+    await fs.writeFile(path.join(dir, "inscope.ts"), "export default 1;\n", "utf8");
+    git(dir, "add", "inscope.ts");
+    git(dir, "commit", "-m", "add inscope");
+    // A dirty *unstaged* change to a tracked file must not leak into the stat
+    // of a base...HEAD diff (the old code always stat'ed the working tree).
+    await fs.writeFile(path.join(dir, "readme.md"), "# project dirty\n", "utf8");
+    const base = git(dir, "rev-parse", "main");
+    const r = await gitDiffTool.execute({ base }, ctx());
+    const header = r.content.split("\n\n")[0];
+    expect(header).toContain("inscope.ts");
+    expect(header).not.toContain("readme.md");
+    git(dir, "checkout", "--", "readme.md");
+    backToMain();
+    git(dir, "branch", "-D", "diff-scope");
+  });
+
   it("reports no changes when the tree is clean", async () => {
     const r = await gitDiffTool.execute({}, ctx());
     expect(r.isError).toBeUndefined();

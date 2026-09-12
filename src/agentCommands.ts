@@ -170,8 +170,10 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
     }
     case "permissions": {
       if (rest[0] === "clear") {
-        const n = await permissions.clearRules();
-        return { kind: "ok", text: `removed ${n} rule(s)` };
+        const { global, project } = await permissions.clearRules();
+        const parts = [`removed ${global} global rule(s)`];
+        if (project) parts.push(`cleared ${project} project rule(s) from memory (they reload from .node-agent/permissions.json)`);
+        return { kind: "ok", text: parts.join("; ") };
       }
       const rules = permissions.getRules();
       if (!rules.length) return { kind: "ok", text: "no saved rules (press 'a' or 'd' at a permission prompt to add one)" };
@@ -225,6 +227,17 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
         }
       }
       return { kind: "ok", text: `resumed ${rest[0]}` };
+    }
+    case "rename": {
+      // /rename <title> — name the *current* session (shown in /sessions and
+      // the GUI sidebar). An empty title clears the name.
+      const title = rest.join(" ").trim();
+      const ok = await renameSession(agent.sessionId, title);
+      if (!ok) return { kind: "error", text: "session not found (nothing renamed yet)" };
+      return {
+        kind: "ok",
+        text: title ? `renamed session ${agent.sessionId} to "${title}"` : `cleared the name on session ${agent.sessionId}`,
+      };
     }
     case "todos": {
       const items = agent.currentTodos();

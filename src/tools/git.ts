@@ -149,24 +149,27 @@ export const gitDiffTool: Tool = {
   },
   async execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const maxChars = Math.min(100_000, Math.max(1_000, num(input, "max_chars") ?? 30_000));
-    const args: string[] = ["diff", "--no-color", "--unified=3"];
     const base = optStr(input, "base");
     const pathFilter = optStr(input, "path");
-    if (base) args.push(`${trimRef(base)}...HEAD`);
-    else if (input.staged === true) args.push("--cached");
-    if (pathFilter) args.push("--", pathFilter);
+    // Scope selectors shared by both the stat summary and the diff body, so the
+    // header never describes a different range than what's shown below it.
+    const scope: string[] = [];
+    if (base) scope.push(`${trimRef(base)}...HEAD`);
+    else if (input.staged === true) scope.push("--cached");
+    if (pathFilter) scope.push("--", pathFilter);
+    const args = ["diff", "--no-color", "--unified=3", ...scope];
     try {
       const err = await ensureRepo(ctx.cwd, ctx.signal);
       if (err) return { content: err, isError: true };
-      const res = await runGit(ctx.cwd, ["diff", "--no-color", "--unified=0", "--stat"], ctx.signal);
+      const res = await runGit(ctx.cwd, ["diff", "--no-color", "--stat", ...scope], ctx.signal);
       const res2 = await runGit(ctx.cwd, args, ctx.signal);
       if (res2.code !== 0) return { content: `git diff failed: ${res2.out || `exit ${res2.code}`}`, isError: true };
       if (!res2.out) {
         const label = base ? `${base}...HEAD` : input.staged === true ? "staged" : "working tree";
         return { content: `No changes in the ${label} diff${pathFilter ? ` for ${pathFilter}` : ""}.` };
       }
-      const scope = base ? `${trimRef(base)}...HEAD` : input.staged === true ? "staged changes" : "unstaged changes";
-      const header = `scope: ${scope}${pathFilter ? ` · path: ${pathFilter}` : ""}\n${res.out}`;
+      const scopeLabel = base ? `${trimRef(base)}...HEAD` : input.staged === true ? "staged changes" : "unstaged changes";
+      const header = `scope: ${scopeLabel}${pathFilter ? ` · path: ${pathFilter}` : ""}\n${res.out}`;
       return { content: truncate(`${header}\n\n${res2.out}`, maxChars) };
     } catch (e) {
       return { content: `Error: ${describeError(e)}`, isError: true };

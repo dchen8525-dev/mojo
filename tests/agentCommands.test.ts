@@ -44,7 +44,7 @@ function fakePermissions(): PermissionManager {
     mode: "default",
     load: async () => {},
     getRules: () => [],
-    clearRules: async () => 0,
+    clearRules: async () => ({ global: 0, project: 0 }),
     check: async () => true,
   } as unknown as PermissionManager;
 }
@@ -185,6 +185,31 @@ describe("runAgentCommand", () => {
     const r = await runAgentCommand("/review main 安全", ctx({ notify: (m) => notes.push(m) }));
     expect(r.text).toContain("review output");
     expect(notes.some((n) => n.includes("main...HEAD"))).toBe(true);
+  });
+
+  it("/rename names the current session", async () => {
+    const agent = fakeAgent({ sessionId: "sess1" });
+    const r = await runAgentCommand("/rename my nice chat", ctx({ agent }));
+    expect(r.kind).toBe("ok");
+    expect(r.text).toContain('renamed session sess1 to "my nice chat"');
+  });
+
+  it("/rename without a title clears the name (false from renameSession is an error)", async () => {
+    const r = await runAgentCommand("/rename", ctx());
+    expect(r.kind).toBe("error");
+    expect(r.text).toContain("session not found");
+  });
+
+  it("/permissions clear reports global and project counts separately", async () => {
+    const permissions = {
+      mode: "default",
+      getRules: () => [],
+      clearRules: async () => ({ global: 2, project: 1 }),
+      check: async () => true,
+    } as unknown as PermissionManager;
+    const r = await runAgentCommand("/permissions clear", ctx({ permissions }));
+    expect(r.text).toContain("removed 2 global rule(s)");
+    expect(r.text).toContain("cleared 1 project rule(s)");
   });
 
   it("/fork on an empty conversation is an error", async () => {
