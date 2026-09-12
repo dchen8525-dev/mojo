@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { Risk } from "./types.js";
+import { Mutex } from "./sync.js";
 
 export type Mode = "default" | "auto" | "yolo"; // auto = accept edits, still asks for high risk; yolo = accept everything
 
@@ -49,6 +50,13 @@ export class PermissionManager {
   mode: Mode = "default";
   private rules: Rule[] = [];
   private projectRules: Rule[] = [];
+  /**
+   * Serializes interactive prompts. Parallel subagents can call check() at the
+   * same instant; without this, the TUI's single prompt slot (and print mode's
+   * readline) would be clobbered by the second request, leaving the first
+   * worker's Promise unresolved and the whole turn deadlocked.
+   */
+  private readonly promptLock = new Mutex();
   /** Provided by the CLI: prompt the user. `preview` is optional multi-line detail (e.g. a diff). */
   askUser: (description: string, risk: Risk, preview?: string) => Promise<"yes" | "no" | "always" | "always_deny">;
 
@@ -82,6 +90,13 @@ export class PermissionManager {
     return n;
   }
 
+  /** First matching rule (project before global) decides the outcome, or null. */
+  private ruleDecision(description: string): boolean | null {
+    for (const r of this.projectRules) if (ruleMatches(r.match, description)) return r.decision === "allow";
+    for (const r of this.rules) if (ruleMatches(r.match, description)) return r.decision === "allow";
+    return null;
+  }
+
   async check(description: string, risk: Risk, readOnly: boolean, preview?: string): Promise<boolean> {
     if (readOnly) return true;
 
@@ -89,18 +104,27 @@ export class PermissionManager {
     // global "allow"), then persisted global rules. "always deny" survives
     // auto mode; only yolo bypasses everything.
     if (this.mode !== "yolo") {
-      for (const r of this.projectRules) {
-        if (ruleMatches(r.match, description)) return r.decision === "allow";
-      }
-      for (const r of this.rules) {
-        if (ruleMatches(r.match, description)) return r.decision === "allow";
-      }
+      const decided = this.ruleDecision(description);
+      if (decided !== null) return decided;
     }
     if (this.mode === "yolo") return true;
 
     // In auto mode, non-high-risk operations are accepted silently.
     if (this.mode === "auto" && risk !== "high") return true;
 
+    return this.promptLock.runExclusive(() => this.askAndPersist(description, risk, preview));
+  }
+
+  /**
+   * Ask the user with the prompt lock held. Re-checks rules first: a request
+   * that queued behind another may now be covered by an "always" answer that
+   * landed while it waited, so it resolves without a second prompt.
+   */
+  private async askAndPersist(description: string, risk: Risk, preview?: string): Promise<boolean> {
+    if (this.mode !== "yolo") {
+      const decided = this.ruleDecision(description);
+      if (decided !== null) return decided;
+    }
     const answer = await this.askUser(description, risk, preview);
     if (answer === "always" || answer === "always_deny") {
       // Persist a rule keyed on the leading verb + target of the description.

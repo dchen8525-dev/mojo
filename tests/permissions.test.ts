@@ -108,3 +108,37 @@ describe("PermissionManager project rules", () => {
     expect(askCalls).toBe(0);
   });
 });
+
+describe("PermissionManager concurrent prompts", () => {
+  it("serializes interactive asks so parallel subagents cannot clobber one prompt slot", async () => {
+    let live = 0;
+    let peak = 0;
+    const pm = new PermissionManager(async () => {
+      live++;
+      peak = Math.max(peak, live);
+      await new Promise((r) => setTimeout(r, 10));
+      live--;
+      return "yes";
+    });
+    // Two parallel workers asking at the same instant: without the lock the
+    // second call would overwrite the first prompt and the first would hang.
+    const answers = await Promise.all([
+      pm.check("Edit src/a.ts", "high", false),
+      pm.check("Edit src/b.ts", "high", false),
+      pm.check("Edit src/c.ts", "high", false),
+    ]);
+    expect(answers).toEqual([true, true, true]);
+    expect(peak).toBe(1);
+  });
+
+  it("auto mode still skips the lock for non-high-risk operations", async () => {
+    let asks = 0;
+    const pm = new PermissionManager(async () => {
+      asks++;
+      return "yes";
+    });
+    pm.mode = "auto";
+    expect(await Promise.all([pm.check("Edit a", "medium", false), pm.check("Edit b", "medium", false)])).toEqual([true, true]);
+    expect(asks).toBe(0);
+  });
+});
