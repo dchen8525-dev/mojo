@@ -351,8 +351,22 @@ GUI 与终端 UI 共用同一套核心（智能体循环、权限、会话、命
 
 `/help` · `/model [spec|list]` · `/auto [on|off]` · `/yolo` · `/plan [on|off]` ·
 `/theme [dark|light|auto]` · `/mcp` · `/lsp` · `/compact` · `/context` · `/review [base] [focus]` ·
-`/permissions [clear]` · `/hooks` · `/sessions` · `/resume <id>` · `/rename <名称>` · `/todos` · `/undo [-y]` ·
+`/permissions [clear]` · `/hooks` · `/sessions` · `/resume <id>` · `/fork [N] [名称]` · `/rename <名称>` · `/todos` · `/undo [-y]` ·
 `/cost [usd]` · `/clear` · `/quit`
+
+### 会话分叉（/fork）
+
+想在某个历史点"另起一条线"继续，而不动原会话时用 `/fork`：
+
+```text
+/fork                  ← 复制当前全部历史到新会话，从这里继续
+/fork 12               ← 只保留前 12 条消息
+/fork 12 试试浅色主题     ← 保留前 12 条并给新会话命名
+```
+
+新会话是独立文件，原会话保持不变（提示里会给出原 id，用 `/resume <id>` 随时回去）。
+保留的条数会自动回退到最近的"干净边界"——绝不把 `tool_use` 和它的 `tool_result` 拆到
+分叉两侧，也不会以未完成的工具轮结尾，因此分叉后的下一轮不会触发 API 报错。
 
 ### Plan 模式（先计划，后执行）
 

@@ -617,7 +617,7 @@ function StatusBar({
   return (
     <Text dimColor>
       {planMode && <Text color={theme.plan} bold>{"PLAN "}</Text>}
-      {agent.provider}:{agent.model} · session {sessionId} · ctx {est.toLocaleString()}/{win.toLocaleString()} ({pct}%)
+      {agent.provider}:{agent.model} · session {agent.sessionId} · ctx {est.toLocaleString()}/{win.toLocaleString()} ({pct}%)
       {tight ? <Text color={theme.warn}>{" ⚠"}</Text> : ""} · ${agent.costs.totalUsd().toFixed(2)}
       {bgRunning ? ` · bg ${bgRunning}` : ""} · mode {permissions.mode}
       {expandedAll ? " · all expanded (Ctrl+O)" : ""}

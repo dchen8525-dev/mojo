@@ -138,6 +138,39 @@ describe("renameSession / deleteSession", () => {
   });
 });
 
+describe("forkSession", () => {
+  it("copies messages into a new session and records the parent", async () => {
+    const parent = await session.createSession("D:\\proj");
+    await session.appendMessages(parent.id, [
+      { role: "user", content: "q1" },
+      { role: "assistant", content: "a1" },
+    ]);
+    const fork = await session.forkSession("D:\\proj", [{ role: "user", content: "q1" }, { role: "assistant", content: "a1" }], { fromId: parent.id });
+    expect(fork.id).not.toBe(parent.id);
+
+    const loaded = await session.loadSession(fork.id);
+    expect(loaded?.messages.map((m) => m.content)).toEqual(["q1", "a1"]);
+    expect(loaded?.meta.forkedFrom).toBe(parent.id);
+
+    // The parent file is untouched.
+    expect((await session.loadSession(parent.id))?.messages).toHaveLength(2);
+  });
+
+  it("carries a title alongside forkedFrom", async () => {
+    const fork = await session.forkSession("D:\\proj", [{ role: "user", content: "hi" }], { title: "try light", fromId: "abc123" });
+    const loaded = await session.loadSession(fork.id);
+    expect(loaded?.meta.title).toBe("try light");
+    expect(loaded?.meta.forkedFrom).toBe("abc123");
+  });
+
+  it("creates an empty-titled fork when no title is given", async () => {
+    const fork = await session.forkSession("D:\\proj", [{ role: "user", content: "hi" }]);
+    const loaded = await session.loadSession(fork.id);
+    expect(loaded?.meta.title).toBeUndefined();
+    expect(loaded?.meta.forkedFrom).toBeUndefined();
+  });
+});
+
 describe("listSessions", () => {
   it("lists sessions sorted by updatedAt descending", async () => {
     const a = await session.createSession("a");

@@ -63,6 +63,7 @@ vi.mock("../src/session.js", () => ({
   appendMessages: async () => {},
   appendModel: async () => {},
   rewriteMessages: async () => {},
+  forkSession: async () => ({ id: "fork0000", meta: { id: "fork0000", cwd: "", startedAt: "", updatedAt: "" } }),
 }));
 
 // Keep tests from reading/writing the real repo's memory.md.
@@ -415,5 +416,48 @@ describe("Agent plan mode", () => {
     await agent.chat("go");
     expect(agent.planMode).toBe(false);
     expect(toolEvents).toContain("s-run 7");
+  });
+});
+
+describe("Agent.fork", () => {
+  it("branches the history into a new session and keeps working there", async () => {
+    const history: MessageParam[] = [
+      { role: "user", content: "q1" },
+      { role: "assistant", content: "a1" },
+      { role: "user", content: "q2" },
+      { role: "assistant", content: "a2" },
+    ];
+    const agent = makeAgent(undefined, history);
+    const id = await agent.fork(4);
+    expect(id).toBe("fork0000");
+    expect(agent.sessionId).toBe("fork0000");
+    expect(agent.getMessages()).toHaveLength(4);
+    // The next turn persists to the fork, not the original.
+    h.turns = [textTurn("next")];
+    h.calls = 0;
+    await agent.chat("continue");
+    expect(agent.getMessages()).toHaveLength(6);
+  });
+
+  it("rounds a mid-loop keep back to a clean assistant boundary", async () => {
+    const history: MessageParam[] = [
+      { role: "user", content: "q1" },
+      { role: "assistant", content: "a1" }, // index 1 - the last clean assistant turn
+      { role: "user", content: "q2" },
+      { role: "assistant", content: [{ type: "tool_use", id: "t2", name: "x", input: {} } as ContentBlock] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t2", content: "r" } as ContentBlock] },
+    ];
+    const agent = makeAgent(undefined, history);
+    // keep 5 would end on a dangling tool_use; walk back over it and the
+    // preceding user turn to index 1, so only the first exchange is kept.
+    const id = await agent.fork(5);
+    expect(id).toBe("fork0000");
+    expect(agent.getMessages()).toHaveLength(2);
+  });
+
+  it("returns null when no clean boundary exists", async () => {
+    const agent = makeAgent(undefined, [{ role: "user", content: "q1" }]);
+    expect(await agent.fork(1)).toBeNull();
+    expect(agent.sessionId).toBe("test-session"); // unchanged
   });
 });

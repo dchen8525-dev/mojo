@@ -16,13 +16,14 @@ import { CostTracker } from "./cost.js";
 import { appendMemoryNote, renderMemory } from "./memory.js";
 import { buildReviewPrompt, collectReview, REVIEW_SYSTEM } from "./review.js";
 import { truncate } from "./tools/utils.js";
-import { appendMessages, appendModel, rewriteMessages } from "./session.js";
+import { appendMessages, appendModel, forkSession, rewriteMessages } from "./session.js";
 import {
   buildAckMessage,
   buildSummarizerInput,
   buildSummaryMessage,
   extractPriorSummary,
   pickCompactBoundary,
+  pickForkBoundary,
   pruneOldToolResults,
   renderTranscript,
   SUMMARIZER_SYSTEM,
@@ -500,5 +501,22 @@ Rules:
     this.persisted = this.messages.length;
     this.lastPersistedModel = modelSpec ?? "";
     this.tokens.invalidate();
+  }
+
+  /**
+   * Branch the current conversation into a fresh session file, keeping the first
+   * `keep` messages (rounded back to a clean boundary so no tool_use is orphaned)
+   * and switching this agent to continue there. The original session file is left
+   * untouched. Returns the new id, or null when there is nothing to fork.
+   */
+  async fork(keep: number, title?: string): Promise<string | null> {
+    const cut = pickForkBoundary(this.messages, keep);
+    const prefix = this.messages.slice(0, cut);
+    if (!prefix.length) return null;
+    const { id } = await forkSession(this.cwd, prefix, { title, fromId: this.sessionId });
+    // Re-point this agent at the new file: same in-memory history, but future
+    // turns persist to (and can diverge in) the fork instead of the original.
+    this.resetSession(id, prefix, `${this.llm.provider}:${this.llm.model}`);
+    return id;
   }
 }

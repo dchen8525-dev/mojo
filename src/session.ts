@@ -16,6 +16,8 @@ export interface SessionMeta {
   model?: string;
   /** Optional user-assigned name (shown in the GUI sidebar / /sessions). */
   title?: string;
+  /** Session id this one was branched from (set by /fork). */
+  forkedFrom?: string;
 }
 
 function fileFor(id: string) {
@@ -94,6 +96,37 @@ export async function renameSession(id: string, title: string): Promise<boolean>
   return true;
 }
 
+/**
+ * Create a new session that starts as a copy of `messages`, optionally titled and
+ * recorded as branched from `fromId`. Used by /fork to continue from a point in
+ * history without disturbing the original session file.
+ */
+export async function forkSession(
+  cwd: string,
+  messages: MessageParam[],
+  opts: { title?: string; fromId?: string } = {},
+): Promise<{ id: string; meta: SessionMeta }> {
+  const { id } = await createSession(cwd);
+  const clean = opts.title?.trim().slice(0, 80);
+  if (clean || opts.fromId) {
+    // Rewrite the meta header once, carrying both fields, before any appends.
+    const file = fileFor(id);
+    const raw = await fs.readFile(file, "utf8");
+    const lines = raw.split("\n");
+    const idx = lines.findIndex((l) => l.trim().startsWith('{"type":"meta"'));
+    if (idx !== -1) {
+      const meta = JSON.parse(lines[idx]) as SessionMeta;
+      if (clean) meta.title = clean;
+      if (opts.fromId) meta.forkedFrom = opts.fromId;
+      lines[idx] = JSON.stringify({ type: "meta", ...meta });
+      await fs.writeFile(file, lines.join("\n"), "utf8");
+    }
+  }
+  if (messages.length) await appendMessages(id, messages);
+  const now = new Date().toISOString();
+  return { id, meta: { id, cwd, startedAt: now, updatedAt: now, ...(clean ? { title: clean } : {}), ...(opts.fromId ? { forkedFrom: opts.fromId } : {}) } };
+}
+
 /** Delete a session file. Returns false when it did not exist. */
 export async function deleteSession(id: string): Promise<boolean> {
   if (!ID_RE.test(id)) return false;
@@ -134,6 +167,7 @@ async function parseSessionFile(full: string): Promise<ParsedSession | null> {
           startedAt: obj.startedAt,
           updatedAt: new Date(mtimeMs).toISOString(),
           ...(typeof obj.title === "string" && obj.title ? { title: obj.title } : {}),
+          ...(typeof obj.forkedFrom === "string" && obj.forkedFrom ? { forkedFrom: obj.forkedFrom } : {}),
         };
       else if (obj.type === "model" && meta) meta.model = obj.model; // last marker wins
       else if (obj.type === "message" && meta) messages.push(obj.message);

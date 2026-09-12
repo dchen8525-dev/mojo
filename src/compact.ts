@@ -133,7 +133,7 @@ export function extractPriorSummary(messages: MessageParam[]): { summary: string
   return { summary: null, rest: messages };
 }
 
-function isPlainUser(m: MessageParam | undefined): boolean {
+export function isPlainUser(m: MessageParam | undefined): boolean {
   if (!m || m.role !== "user") return false;
   const c = m.content;
   return !(Array.isArray(c) && c.some((b) => b.type === "tool_result"));
@@ -151,6 +151,30 @@ export function pickCompactBoundary(messages: MessageParam[], keepMin = 6): numb
   let cut = Math.max(0, messages.length - keepMin);
   while (cut > 0 && !isPlainUser(messages[cut])) cut--;
   return isPlainUser(messages[cut]) ? cut : 0;
+}
+
+/**
+ * A kept fork prefix is safe to continue from only if it ends on a completed
+ * assistant turn: an assistant message that carries no tool_use (whose result
+ * would live in the discarded tail, orphaning it) and, by ending on the
+ * assistant side, keeps role alternation intact when the user sends the next
+ * message. A prefix ending on a user message would collide with that next turn.
+ */
+function endsOnCleanAssistantTurn(m: MessageParam | undefined): boolean {
+  if (!m || m.role !== "assistant") return false;
+  const c = m.content;
+  return !(Array.isArray(c) && c.some((b) => b.type === "tool_use"));
+}
+
+/**
+ * Choose how many messages to keep when forking at `keep`: walk the cut back to
+ * the nearest completed assistant turn. Returns 0..messages.length; 0 means no
+ * safe boundary exists (there is nothing meaningful to fork).
+ */
+export function pickForkBoundary(messages: MessageParam[], keep: number): number {
+  let cut = Math.max(0, Math.min(keep, messages.length));
+  while (cut > 0 && !endsOnCleanAssistantTurn(messages[cut - 1])) cut--;
+  return cut;
 }
 
 export const SUMMARIZER_SYSTEM =

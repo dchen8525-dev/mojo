@@ -6,6 +6,7 @@ import {
   buildSummaryMessage,
   extractPriorSummary,
   pickCompactBoundary,
+  pickForkBoundary,
   pruneOldToolResults,
   renderTranscript,
   SUMMARIZER_PROMPT,
@@ -66,6 +67,43 @@ describe("pickCompactBoundary", () => {
 
   it("returns 0 for tiny histories", () => {
     expect(pickCompactBoundary([user("a"), assistant("b")])).toBe(0);
+  });
+});
+
+describe("pickForkBoundary", () => {
+  const msgs = [
+    user("q1"),
+    assistantToolUse("t1", "x", {}),
+    userToolResult("t1", "r"),
+    assistant("a1"),
+    user("q2"),
+    assistant("a2"),
+  ];
+
+  it("keeps everything when the history already ends on a clean assistant turn", () => {
+    expect(pickForkBoundary(msgs, 6)).toBe(6);
+  });
+
+  it("walks back over a dangling tool_use so no tool_result is orphaned", () => {
+    // keep 3 -> prefix ends on assistantToolUse("t1"): its result is message 2
+    // (in the prefix) - actually index 2 is the tool_result, so cutting at 3
+    // keeps the pair; cutting mid-loop still lands on a clean boundary.
+    expect(pickForkBoundary(msgs, 3)).toBe(0); // [user, tool_use] - no clean assistant end
+    expect(pickForkBoundary(msgs, 4)).toBe(4); // ends on assistant("a1")
+  });
+
+  it("walks back over a trailing user message (role alternation)", () => {
+    const withTrailingUser = [...msgs, user("q3")];
+    expect(pickForkBoundary(withTrailingUser, 7)).toBe(6);
+  });
+
+  it("clamps keeps beyond the history length", () => {
+    expect(pickForkBoundary(msgs, 99)).toBe(6);
+  });
+
+  it("returns 0 when no clean assistant turn exists", () => {
+    expect(pickForkBoundary([user("only")], 1)).toBe(0);
+    expect(pickForkBoundary([], 0)).toBe(0);
   });
 });
 
