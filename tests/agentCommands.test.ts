@@ -15,6 +15,17 @@ vi.mock("../src/session.js", () => ({
   }),
 }));
 
+// /cost subcommands read the usage ledger; fake it so tests never touch ~/.node-agent.
+const usageLedger: { entries: unknown[] } = { entries: [] };
+vi.mock("../src/usage.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/usage.js")>("../src/usage.js");
+  return {
+    ...actual,
+    flushUsage: async () => {},
+    readUsageLog: async () => usageLedger.entries as never,
+  };
+});
+
 function fakeAgent(overrides: Partial<Agent> = {}): Agent {
   const costs = { budgetUsd: null as number | null, format: () => "$0.00 total" };
   return {
@@ -128,6 +139,41 @@ describe("runAgentCommand", () => {
     expect((agent.costs as unknown as { budgetUsd: number }).budgetUsd).toBe(5);
     const bad = await runAgentCommand("/cost abc", ctx({ agent }));
     expect(bad.kind).toBe("error");
+  });
+
+  it("/cost all aggregates the cross-session ledger", async () => {
+    usageLedger.entries = [
+      { t: "2026-09-11T10:00:00.000Z", s: "aaa1", m: "anthropic:claude-sonnet-4-5", u: 0.02, p: true, i: 1000, o: 200, cr: 0, cw: 0 },
+      { t: "2026-09-12T10:00:00.000Z", s: "bbb2", m: "anthropic:claude-sonnet-4-5", u: 0.03, p: true, i: 1500, o: 300, cr: 0, cw: 0 },
+    ];
+    const r = await runAgentCommand("/cost all", ctx());
+    expect(r.kind).toBe("ok");
+    expect(r.text).toContain("$0.0500");
+    expect(r.text).toContain("2 requests");
+    expect(r.text).toContain("2 sessions");
+    expect(r.text).toContain("2 days");
+    usageLedger.entries = [];
+  });
+
+  it("/cost by groups the ledger by dimension", async () => {
+    usageLedger.entries = [
+      { t: "2026-09-12T10:00:00.000Z", s: "aaa1", m: "anthropic:claude-haiku-4-5", u: 0.01, p: true, i: 500, o: 100, cr: 0, cw: 0 },
+      { t: "2026-09-12T11:00:00.000Z", s: "bbb2", m: "anthropic:claude-haiku-4-5", u: 0.02, p: true, i: 700, o: 150, cr: 0, cw: 0 },
+    ];
+    const byModel = await runAgentCommand("/cost by model", ctx());
+    expect(byModel.text).toContain("anthropic:claude-haiku-4-5");
+    expect(byModel.text).toContain("1 model group");
+    const byDay = await runAgentCommand("/cost by day", ctx());
+    expect(byDay.text).toContain("2026-09-12");
+    const badDim = await runAgentCommand("/cost by nonsense", ctx());
+    expect(badDim.kind).toBe("error");
+    usageLedger.entries = [];
+  });
+
+  it("/cost by reports an empty ledger", async () => {
+    usageLedger.entries = [];
+    const r = await runAgentCommand("/cost by session", ctx());
+    expect(r.text).toContain("no usage recorded");
   });
 
   it("/todos empty and filled", async () => {

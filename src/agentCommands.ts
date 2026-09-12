@@ -60,7 +60,7 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       return {
         kind: "ok",
         text: [
-          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks · /sessions · /resume <id> · /fork [N] [名称] · /rename <名称> · /todos · /undo [-y] · /cost [usd] · /clear · /quit",
+          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks · /sessions · /resume <id> · /fork [N] [名称] · /rename <名称> · /todos · /undo [-y] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
           "file refs: @path/to/file inlines the file; Ctrl+V pastes a clipboard image",
           custom ? `custom commands: ${custom}` : "",
         ]
@@ -248,9 +248,38 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       };
     }
     case "cost": {
+      const sub = rest[0]?.toLowerCase();
+      if (sub === "all" || sub === "by" || sub === "export") {
+        const { aggregateUsage, flushUsage, formatAggregates, readUsageLog, usageToCsv } = await import("./usage.js");
+        await flushUsage(); // make this session's in-flight turns visible to the ledger read
+        if (sub === "export") {
+          const entries = await readUsageLog();
+          if (!entries.length) return { kind: "ok", text: "nothing to export (the usage ledger is empty)" };
+          const out = rest[1] ? path.resolve(cwd, rest[1]) : path.join(cwd, "usage.csv");
+          const { writeFile } = await import("node:fs/promises");
+          await writeFile(out, usageToCsv(entries), "utf8");
+          return { kind: "ok", text: `exported ${entries.length} usage rows to ${out}` };
+        }
+        if (sub === "all") {
+          const entries = await readUsageLog();
+          if (!entries.length) return { kind: "ok", text: "no usage recorded yet (the ledger opens at ~/.node-agent/usage.jsonl)" };
+          const usd = entries.reduce((t, e) => t + (e.u ?? 0), 0);
+          const req = entries.length;
+          const sessions = new Set(entries.map((e) => e.s)).size;
+          const days = new Set(entries.map((e) => e.t.slice(0, 10))).size;
+          const inTok = entries.reduce((t, e) => t + e.i + (e.cr ?? 0) + (e.cw ?? 0), 0);
+          const outTok = entries.reduce((t, e) => t + e.o, 0);
+          return { kind: "ok", text: `all time: $${usd.toFixed(4)} · ${req} requests · ${sessions} sessions · ${days} days\nin ${fmtK(inTok)} / out ${fmtK(outTok)} tokens` };
+        }
+        const dim = (rest[1] ?? "model").toLowerCase();
+        if (dim !== "session" && dim !== "model" && dim !== "day") {
+          return { kind: "error", text: "usage: /cost by [session|model|day]" };
+        }
+        return { kind: "ok", text: formatAggregates(aggregateUsage(await readUsageLog(), dim), dim) };
+      }
       if (rest[0]) {
         const v = Number(rest[0].replace(/^\$/, ""));
-        if (!Number.isFinite(v) || v <= 0) return { kind: "error", text: "usage: /cost [usd]  (bare /cost shows this session's spend)" };
+        if (!Number.isFinite(v) || v <= 0) return { kind: "error", text: "usage: /cost [usd | all | by session|model|day | export [path]]" };
         agent.costs.budgetUsd = v;
         return { kind: "ok", text: `session budget set to $${v.toFixed(2)} (warns at 80%, stops the turn when exhausted)` };
       }
@@ -313,4 +342,10 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
     default:
       return { kind: "error", text: `unknown command /${cmd} — try /help` };
   }
+}
+
+function fmtK(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + "k";
+  return String(n);
 }

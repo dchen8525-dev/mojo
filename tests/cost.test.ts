@@ -72,12 +72,27 @@ describe("CostTracker", () => {
     expect(new CostTracker().format()).toContain("no API calls yet");
   });
 
-  it("budget can be set at runtime (via /cost 5)", () => {
+  it("budget can be set at runtime (via /cost 5)", async () => {
     const t = new CostTracker();
     t.budgetUsd = 0.5;
     t.record("anthropic:claude-sonnet-4-5", { input: 0, output: 40_000 }); // $0.60 > budget
     const r = t.checkBudget();
     expect(r!.stop).toBe(true);
+  });
+
+  it("onRecord fires with the per-turn USD and priced flag", () => {
+    const t = new CostTracker();
+    const seen: Array<{ spec: string; usd: number; priced: boolean }> = [];
+    t.onRecord = (spec, _usage, usd, priced) => seen.push({ spec, usd, priced });
+    t.record("anthropic:claude-haiku-4-5", { input: 1_000_000, output: 0 }); // $1/M in
+    t.record("openai:mystery-llm-v9", { input: 10, output: 5 });
+    expect(seen).toHaveLength(2);
+    expect(seen[0].usd).toBeCloseTo(1, 6);
+    expect(seen[0].priced).toBe(true);
+    expect(seen[1].usd).toBe(0);
+    expect(seen[1].priced).toBe(false);
+    // The tracker's own total still matches what it handed the callback.
+    expect(t.totalUsd()).toBeCloseTo(1, 6);
   });
 });
 

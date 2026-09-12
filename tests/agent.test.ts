@@ -72,6 +72,12 @@ vi.mock("../src/memory.js", () => ({
   appendMemoryNote: async () => null,
 }));
 
+// Keep tests from appending to the real ~/.node-agent/usage.jsonl ledger.
+vi.mock("../src/usage.js", () => ({
+  logUsage: async () => {},
+  flushUsage: async () => {},
+}));
+
 const { Agent } = await import("../src/agent.js");
 const { registerTool } = await import("../src/tools/index.js");
 const { HookManager } = await import("../src/hooks.js");
