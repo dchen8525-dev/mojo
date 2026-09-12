@@ -22,6 +22,12 @@ export interface CommandResult {
   kind: CommandKind;
   /** Set by /quit — the host UI should shut down. */
   quit?: boolean;
+  /**
+   * Term the surface should emphasize inside `text` (e.g. the /search query).
+   * The text itself stays plain so every UI can style it its own way —
+   * the terminal paints bold/inverse, the GUI wraps it in <mark>.
+   */
+  highlight?: string;
 }
 
 export interface CommandContext {
@@ -60,7 +66,7 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       return {
         kind: "ok",
         text: [
-          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks · /sessions · /search [-r] <term> · /resume <id> · /fork [N] [名称] · /rename <名称> · /export [md|json] [路径] · /todos · /undo [-y] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
+          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks · /sessions [--cwd <dir>] [--title <词>] [N] · /search [-r] <term> · /resume <id> · /fork [N] [名称] · /rename <名称> · /export [md|json] [路径] · /todos · /undo [-y] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
           "file refs: @path/to/file inlines the file; Ctrl+V pastes a clipboard image",
           custom ? `custom commands: ${custom}` : "",
         ]
@@ -205,12 +211,39 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       };
     }
     case "sessions": {
-      const list = await listSessions();
+      // /sessions [--cwd <dir>] [--title <kw>] [N]  — N caps the listed rows (default 10)
+      const words = [...rest];
+      let cwdFilter = "";
+      let titleFilter = "";
+      let limit = 10;
+      for (let i = 0; i < words.length; i++) {
+        if ((words[i] === "--cwd" || words[i] === "--title") && words[i + 1] !== undefined) {
+          if (words[i] === "--cwd") cwdFilter = words[++i].toLowerCase();
+          else titleFilter = words[++i].toLowerCase();
+        } else if (/^\d+$/.test(words[i])) {
+          limit = Math.max(1, Number(words[i]));
+        }
+      }
+      const all = await listSessions();
+      let list = all;
+      if (cwdFilter) list = list.filter((s) => s.cwd.toLowerCase().includes(cwdFilter));
+      if (titleFilter)
+        list = list.filter((s) => (s.title ?? "").toLowerCase().includes(titleFilter) || s.id.includes(titleFilter));
+      const desc = [cwdFilter && `cwd~"${cwdFilter}"`, titleFilter && `title~"${titleFilter}"`]
+        .filter(Boolean)
+        .join(" & ");
+      if (!list.length) return { kind: "ok", text: desc ? `(no sessions match ${desc})` : "(no sessions)" };
+      const shown = list.slice(0, limit);
+      const head = desc
+        ? `${list.length} match${desc ? ` (${desc})` : ""}`
+        : `${shown.length} shown / ${all.length} total`;
       return {
         kind: "ok",
-        text: list.length
-          ? list.slice(0, 10).map((s) => `${s.id}  ${s.updatedAt.slice(0, 16)}  ${s.model ?? "?"}  ${s.cwd}`).join("\n")
-          : "(no sessions)",
+        text:
+          `${head} — resume with /resume <id>\n` +
+          shown
+            .map((s) => `${s.id}  ${s.updatedAt.slice(0, 16)}  ${s.model ?? "?"}  ${s.title ? `"${s.title}" ` : ""}${s.cwd}`)
+            .join("\n"),
       };
     }
     case "search": {
@@ -231,7 +264,13 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
         const snip = h.snippet ? `\n    ${h.snippet}` : "";
         return `${h.meta.id}  ${h.meta.updatedAt.slice(0, 16)}  ${label}  (${where})${snip}`;
       });
-      return { kind: "ok", text: [`${hits.length} session(s) match "${query}" — resume with /resume <id>`, ...lines].join("\n") };
+      return {
+        kind: "ok",
+        text: [`${hits.length} session(s) match "${query}" — resume with /resume <id>`, ...lines].join("\n"),
+        // Surfaces emphasize the raw query (substring match); regex syntax is
+        // not re-applied here — close enough for visual emphasis.
+        highlight: query,
+      };
     }
     case "export": {
       const loaded = await loadSession(agent.sessionId);

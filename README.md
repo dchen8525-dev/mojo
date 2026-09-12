@@ -354,7 +354,7 @@ GUI 与终端 UI 共用同一套核心（智能体循环、权限、会话、命
 
 `/help` · `/model [spec|list]` · `/auto [on|off]` · `/yolo` · `/plan [on|off]` ·
 `/theme [dark|light|auto]` · `/mcp` · `/lsp` · `/compact` · `/context` · `/review [base] [focus]` ·
-`/permissions [clear]` · `/hooks` · `/sessions` · `/search [-r] <词>` · `/resume <id>` · `/fork [N] [名称]` · `/rename <名称>` · `/export [md|json] [路径]` · `/todos` · `/undo [-y]` ·
+`/permissions [clear]` · `/hooks` · `/sessions [--cwd <dir>] [--title <词>] [N]` · `/search [-r] <词>` · `/resume <id>` · `/fork [N] [名称]` · `/rename <名称>` · `/export [md|json] [路径]` · `/todos` · `/undo [-y]` ·
 `/cost [usd | all | by session|model|day | export [路径]]` · `/clear` · `/quit`
 
 ### 会话分叉（/fork）
@@ -381,8 +381,13 @@ GUI 与终端 UI 共用同一套核心（智能体循环、权限、会话、命
 ```
 
 结果按会话更新时间倒序，每条给出会话 id、时间、标题（或工作目录）、命中消息数与首个命中的
-上下文片段（约 120 字符）。用提示里的 `/resume <id>` 一键回到那个会话。当前会话自动排除；
-正则写错时按"无结果"处理而不是报错，避免一个手滑把提示词打断。
+上下文片段（约 120 字符），命中词在终端以反色加粗、在 GUI 中以高亮标记呈现。用提示里的
+`/resume <id>` 一键回到那个会话。当前会话自动排除；正则写错时按"无结果"处理而不是报错，
+避免一个手滑把提示词打断。
+
+GUI 侧栏也内置了同一个搜索引擎：顶部搜索框输入即搜（250ms 防抖），结果直接列出命中片段，
+点击即恢复该会话。`/sessions` 也支持过滤：`/sessions --cwd D:\web --title bug 5`
+按工作目录/标题筛选取前 5 条。
 
 ### 导出会话（/export）
 

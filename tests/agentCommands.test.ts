@@ -6,9 +6,10 @@ import type { PermissionManager } from "../src/permissions.js";
 
 // Keep tests from touching real session files.
 const searchLedger: { hits: unknown[] } = { hits: [] };
+const sessionLedger: { metas: Array<Record<string, unknown>> } = { metas: [] };
 vi.mock("../src/session.js", () => ({
   createSession: async () => ({ id: "new1234", meta: { id: "new1234", cwd: "/tmp", startedAt: "", updatedAt: "" } }),
-  listSessions: async () => [],
+  listSessions: async () => sessionLedger.metas,
   loadSession: async (id: string) =>
     id === "abc"
       ? { meta: { id, cwd: "/tmp", startedAt: "", updatedAt: "", model: "anthropic:fake" }, messages: [] }
@@ -230,6 +231,41 @@ describe("runAgentCommand", () => {
   it("/sessions with none", async () => {
     const r = await runAgentCommand("/sessions", ctx());
     expect(r.text).toBe("(no sessions)");
+  });
+
+  it("/sessions filters by --cwd / --title and caps with a limit", async () => {
+    sessionLedger.metas = [
+      { id: "aaaa1111", cwd: "D:\\web", updatedAt: "2026-09-10T10:00:00.000Z", model: "anthropic:x", title: "ws bug" },
+      { id: "bbbb2222", cwd: "D:\\web", updatedAt: "2026-09-11T10:00:00.000Z", model: "openai:y" },
+      { id: "cccc3333", cwd: "D:\\cli", updatedAt: "2026-09-12T10:00:00.000Z", model: "anthropic:x" },
+    ];
+    const byCwd = await runAgentCommand("/sessions --cwd web", ctx());
+    expect(byCwd.text).toContain("2 match");
+    expect(byCwd.text).not.toContain("cccc3333");
+
+    const byTitle = await runAgentCommand("/sessions --title WS", ctx()); // case-insensitive
+    expect(byTitle.text).toContain("aaaa1111");
+    expect(byTitle.text).toContain('title~"ws"');
+
+    const limited = await runAgentCommand("/sessions 1", ctx());
+    expect(limited.text).toContain("1 shown / 3 total");
+    expect(limited.text).toContain("aaaa1111"); // first row of the (mocked) list
+    expect(limited.text).not.toContain("cccc3333");
+
+    const none = await runAgentCommand("/sessions --title zzz", ctx());
+    expect(none.text).toBe('(no sessions match title~"zzz")');
+    sessionLedger.metas = [];
+  });
+
+  it("/search flags the query for highlighting", async () => {
+    searchLedger.hits = [
+      { meta: { id: "abcd1234", cwd: "D:\\proj", startedAt: "", updatedAt: "2026-09-10T10:00:00.000Z" }, matches: 2, snippet: "the WebSocket times out", titleMatch: false },
+    ];
+    const r = await runAgentCommand("/search websocket", ctx());
+    expect(r.highlight).toBe("websocket");
+    searchLedger.hits = [];
+    const none = await runAgentCommand("/search nothing", ctx());
+    expect(none.highlight).toBeUndefined();
   });
 
   it("/resume loads a session and restores its model", async () => {

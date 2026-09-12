@@ -118,8 +118,27 @@ function makeAssistantItem(text) {
   return wrap;
 }
 
-function makeSystemItem(text, kind) {
-  return el("div", `msg system${kind === "error" ? " error" : ""}`, text);
+function makeSystemItem(text, kind, highlight) {
+  const div = el("div", `msg system${kind === "error" ? " error" : ""}`);
+  if (highlight && text) {
+    // Emphasize case-insensitive occurrences of the highlight term (e.g. the
+    // /search query) with <mark>; everything else stays a plain text node.
+    const re = new RegExp(highlight.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+    let last = 0;
+    let m;
+    while ((m = re.exec(text))) {
+      if (m.index > last) div.appendChild(document.createTextNode(text.slice(last, m.index)));
+      const mark = document.createElement("mark");
+      mark.textContent = m[0];
+      div.appendChild(mark);
+      last = m.index + m[0].length;
+      if (!m[0].length) re.lastIndex++; // zero-length guard
+    }
+    div.appendChild(document.createTextNode(text.slice(last)));
+  } else {
+    div.textContent = text;
+  }
+  return div;
 }
 
 function makeToolCard(tool) {
@@ -445,7 +464,7 @@ function connectSSE() {
     $("#plan-toggle").checked = false;
     appendItem(makeSystemItem("计划已批准 — 进入执行模式"));
   });
-  on("system", (d) => appendItem(makeSystemItem(d.text, d.kind)));
+  on("system", (d) => appendItem(makeSystemItem(d.text, d.kind, d.highlight)));
 
   on("permission_request", (d) => {
     state.perms.push(d);
@@ -797,6 +816,46 @@ async function loadSessions() {
       if (state.busy) return toast("请先停止当前回合", true);
       const r = await api("/api/resume", { id: s.id });
       if (r.error) return toast("恢复失败: " + r.error, true);
+      await refreshState();
+      loadSessions();
+    };
+    box.appendChild(item);
+  }
+}
+
+/* sidebar quick search — same engine as /search, debounced keystrokes */
+const sessionSearch = $("#session-search");
+let searchTimer = null;
+sessionSearch.addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(runSessionSearch, 250);
+});
+
+async function runSessionSearch() {
+  const q = sessionSearch.value.trim();
+  if (!q) return loadSessions();
+  const hits = await api("/api/search?q=" + encodeURIComponent(q));
+  if (sessionSearch.value.trim() !== q) return; // a newer keystroke won the race
+  const box = $("#session-list");
+  box.replaceChildren();
+  if (!Array.isArray(hits) || !hits.length) {
+    box.appendChild(el("div", "s-empty", `无匹配 “${q}”`));
+    return;
+  }
+  for (const h of hits) {
+    const s = h.meta;
+    const item = el("div", "session-item" + (s.id === state.sessionId ? " active" : ""));
+    item.appendChild(el("div", "s-title", (h.titleMatch ? "标题 · " : "") + (s.title || s.id)));
+    if (h.snippet) item.appendChild(el("div", "s-snippet", h.snippet));
+    const meta = el("div", "s-meta");
+    meta.appendChild(el("span", "s-sub", h.matches ? `${h.matches} 条命中` : "标题命中"));
+    meta.appendChild(el("span", "s-time", relTime(s.updatedAt)));
+    item.appendChild(meta);
+    item.onclick = async () => {
+      if (state.busy) return toast("请先停止当前回合", true);
+      const r = await api("/api/resume", { id: s.id });
+      if (r.error) return toast("恢复失败: " + r.error, true);
+      sessionSearch.value = "";
       await refreshState();
       loadSessions();
     };
