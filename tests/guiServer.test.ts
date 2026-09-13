@@ -36,6 +36,7 @@ async function withServer(
   agentOverrides: Partial<Agent> = {},
   serverOverrides: Partial<{
     renameSession: (id: string, title: string) => Promise<boolean>;
+    tagSession: (id: string, tags: string[]) => Promise<string[] | null>;
     deleteSession: (id: string) => Promise<{ ok: boolean; error?: string; activeReplaced?: string }>;
     searchSessions: (q: string, o?: { regex?: boolean }) => Promise<unknown[]>;
   }> = {},
@@ -58,6 +59,7 @@ async function withServer(
       resumeSession: async () => null,
       listSessions: async () => [],
       searchSessions: serverOverrides.searchSessions ?? (async () => []),
+      tagSession: serverOverrides.tagSession ?? (async () => null),
       renameSession: serverOverrides.renameSession ?? (async () => true),
       deleteSession: serverOverrides.deleteSession ?? (async () => ({ ok: true })),
       onQuit: () => {},
@@ -225,6 +227,25 @@ describe("gui server", () => {
       },
       {},
       { deleteSession: async () => ({ ok: false, error: "session not found" }) },
+    );
+  });
+
+  it("/api/session/tags saves and clears tags", async () => {
+    await withServer(
+      async (gui) => {
+        const saved = await req(gui.port, "/api/session/tags", { method: "POST", token: TOKEN, body: { id: "abcd", tags: [" bug ", "perf", ""] } });
+        expect(saved.status).toBe(200);
+        expect(saved.json).toEqual({ ok: true, tags: ["bug", "perf"] });
+        const missing = await req(gui.port, "/api/session/tags", { method: "POST", token: TOKEN, body: { id: "nope", tags: [] } });
+        expect(missing.status).toBe(404);
+      },
+      {},
+      {
+        tagSession: async (_id, tags) => {
+          const clean = [...new Set(tags.map((t) => t.trim().slice(0, 24)).filter(Boolean))];
+          return clean.length ? clean : null; // mirrors session.ts normalization
+        },
+      },
     );
   });
 

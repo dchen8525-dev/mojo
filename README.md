@@ -354,7 +354,7 @@ GUI 与终端 UI 共用同一套核心（智能体循环、权限、会话、命
 
 `/help` · `/model [spec|list]` · `/auto [on|off]` · `/yolo` · `/plan [on|off]` ·
 `/theme [dark|light|auto]` · `/mcp` · `/lsp` · `/compact` · `/context` · `/review [base] [focus]` ·
-`/permissions [clear]` · `/hooks` · `/sessions [--cwd <dir>] [--title <词>] [N]` · `/search [-r] <词>` · `/resume <id>` · `/fork [N] [名称]` · `/rename <名称>` · `/export [md|json] [路径]` · `/todos` · `/undo [-y]` ·
+`/permissions [clear]` · `/hooks` · `/sessions [--cwd <dir>] [--title <词>] [--tag <tag>] [N]` · `/search [-r] <词>` · `/resume <id>` · `/fork [N] [名称]` · `/rename <名称>` · `/tag [+<tag> | -<tag> | clear]` · `/export [md|json] [路径]` · `/todos` · `/undo [-y]` ·
 `/cost [usd | all | by session|model|day | export [路径]]` · `/clear` · `/quit`
 
 ### 会话分叉（/fork）
@@ -388,6 +388,21 @@ GUI 与终端 UI 共用同一套核心（智能体循环、权限、会话、命
 GUI 侧栏也内置了同一个搜索引擎：顶部搜索框输入即搜（250ms 防抖），结果直接列出命中片段，
 点击即恢复该会话。`/sessions` 也支持过滤：`/sessions --cwd D:\web --title bug 5`
 按工作目录/标题筛选取前 5 条。
+
+### 会话标签（/tag）
+
+给会话打标签，方便日后按主题归类和检索：
+
+```text
+/tag                 ← 查看当前会话的标签
+/tag +bug +perf      ← 添加标签（裸写也行：/tag bug）
+/tag -bug            ← 移除标签（不区分大小写）
+/tag clear           ← 清空
+```
+
+标签上限 8 个、单个最长 24 字符，存在会话元信息里。`/search` 会连标签一起搜——
+搜 "bug" 能找到打了 #bug 标签的会话，即使正文里没有这个词；`/sessions --tag bug`
+按标签过滤列表；GUI 侧栏每条会话下方直接显示标签，🏷 按钮编辑。
 
 ### 导出会话（/export）
 

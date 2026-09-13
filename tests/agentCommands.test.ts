@@ -14,9 +14,10 @@ vi.mock("../src/session.js", () => ({
     id === "abc"
       ? { meta: { id, cwd: "/tmp", startedAt: "", updatedAt: "", model: "anthropic:fake" }, messages: [] }
       : id === "sess1"
-        ? { meta: { id, cwd: "/tmp", startedAt: "", updatedAt: "" }, messages: [{ role: "user", content: "hello export" }] }
+        ? { meta: { id, cwd: "/tmp", startedAt: "", updatedAt: "", tags: ["old"] }, messages: [{ role: "user", content: "hello export" }] }
         : null,
   renameSession: async (id: string, title: string) => id === "sess1" && !!title.trim(),
+  tagSession: async (_id: string, tags: string[]) => [...new Set(tags.map((t) => t.trim().slice(0, 24)).filter(Boolean))].slice(0, 8),
   searchSessions: async () => searchLedger.hits as never,
   renderSessionMarkdown: () => "# exported",
   forkSession: async (_cwd: string, messages: unknown[], opts: { title?: string; fromId?: string }) => ({
@@ -218,6 +219,38 @@ describe("runAgentCommand", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it("/tag add/remove/clear flows through tagSession", async () => {
+    const ctx0 = ctx();
+    const shown = await runAgentCommand("/tag", ctx0);
+    expect(shown.text).toBe("tags: old");
+
+    const add = await runAgentCommand("/tag +bug perf", ctx0);
+    expect(add.text).toBe("tags: old, bug, perf");
+
+    // the loadSession mock is stateless (always tags:["old"]), so this call
+    // re-derives from ["old"]: -old -perf removes, +new adds.
+    const swap = await runAgentCommand("/tag +new -old -perf", ctx0);
+    expect(swap.text).toBe("tags: new");
+
+    const drain = await runAgentCommand("/tag -old", ctx0); // removing the only tag
+    expect(drain.text).toBe("(no tags)");
+
+    const clear = await runAgentCommand("/tag clear", ctx0);
+    expect(clear.text).toBe("cleared tags on session sess1");
+  });
+
+  it("/sessions --tag filters by tag", async () => {
+    sessionLedger.metas = [
+      { id: "aaaa1111", cwd: "D:\\web", updatedAt: "2026-09-10T10:00:00.000Z", tags: ["bug", "perf"] },
+      { id: "bbbb2222", cwd: "D:\\web", updatedAt: "2026-09-11T10:00:00.000Z" },
+    ];
+    const tagged = await runAgentCommand("/sessions --tag bug", ctx());
+    expect(tagged.text).toContain("aaaa1111");
+    expect(tagged.text).toContain("[bug,perf]");
+    expect(tagged.text).not.toContain("bbbb2222");
+    sessionLedger.metas = [];
   });
 
   it("/todos empty and filled", async () => {

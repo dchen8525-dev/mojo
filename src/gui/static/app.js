@@ -780,6 +780,7 @@ async function loadSessions() {
   for (const s of list.slice(0, 50)) {
     const item = el("div", "session-item" + (s.id === state.sessionId ? " active" : ""));
     item.appendChild(el("div", "s-title", s.title || s.id));
+    if (s.tags?.length) item.appendChild(el("div", "s-tags", s.tags.map((t) => "#" + t).join(" ")));
     const meta = el("div", "s-meta");
     meta.appendChild(el("span", "s-sub", s.model ? s.model.split(":").pop() : ""));
     meta.appendChild(el("span", "s-time", relTime(s.updatedAt)));
@@ -793,6 +794,17 @@ async function loadSessions() {
       if (title === null) return;
       const r = await api("/api/session/rename", { id: s.id, title });
       if (r.error) return toast("改名失败: " + r.error, true);
+      loadSessions();
+    };
+    const tagBtn = el("button", "", "🏷");
+    tagBtn.title = "标签";
+    tagBtn.onclick = async (e) => {
+      e.stopPropagation();
+      const raw = await promptText("标签（空格分隔，留空清除全部）", (s.tags ?? []).join(" "));
+      if (raw === null) return;
+      const tags = raw.trim().split(/\s+/).filter(Boolean);
+      const r = await api("/api/session/tags", { id: s.id, tags });
+      if (r.error) return toast("标签保存失败: " + r.error, true);
       loadSessions();
     };
     const delBtn = el("button", "del", "🗑");
@@ -810,6 +822,7 @@ async function loadSessions() {
       loadSessions();
     };
     actions.appendChild(renameBtn);
+    actions.appendChild(tagBtn);
     actions.appendChild(delBtn);
     item.appendChild(actions);
     item.onclick = async () => {
@@ -845,7 +858,7 @@ async function runSessionSearch() {
   for (const h of hits) {
     const s = h.meta;
     const item = el("div", "session-item" + (s.id === state.sessionId ? " active" : ""));
-    item.appendChild(el("div", "s-title", (h.titleMatch ? "标题 · " : "") + (s.title || s.id)));
+    item.appendChild(el("div", "s-title", (h.titleMatch ? "标题 · " : "") + (s.title || s.id) + (s.tags?.length ? "  " + s.tags.map((t) => "#" + t).join(" ") : "")));
     if (h.snippet) item.appendChild(el("div", "s-snippet", h.snippet));
     const meta = el("div", "s-meta");
     meta.appendChild(el("span", "s-sub", h.matches ? `${h.matches} 条命中` : "标题命中"));

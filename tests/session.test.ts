@@ -232,6 +232,27 @@ describe("searchSessions", () => {
     expect(await session.searchSessions("kw-never-written-7z")).toEqual([]);
     expect(await session.searchSessions("   ")).toEqual([]);
   });
+
+  it("tagSession persists tags, and search matches them", async () => {
+    const { id } = await session.createSession("x");
+    await session.appendMessages(id, [{ role: "user", content: "nothing searchable here" }]);
+    expect(await session.tagSession(id, ["  bug ", "perf", "bug", "x".repeat(30)])).toEqual(["bug", "perf", "x".repeat(24)]);
+    // tags survive a reload
+    expect((await session.listSessions()).find((m) => m.id === id)?.tags).toEqual(["bug", "perf", "x".repeat(24)]);
+
+    // a query that only hits a tag finds the session with zero message matches
+    const hits = await session.searchSessions("BUG");
+    const h = hits.find((x) => x.meta.id === id);
+    expect(h?.tagMatch).toBe(true);
+    expect(h?.matches).toBe(0);
+
+    // more than 8 tags get capped; clearing removes the field
+    const many = Array.from({ length: 10 }, (_, i) => "t" + i);
+    expect(await session.tagSession(id, many)).toHaveLength(8);
+    expect(await session.tagSession(id, [])).toEqual([]);
+    expect((await session.listSessions()).find((m) => m.id === id)?.tags).toBeUndefined();
+    expect(await session.tagSession("zzzzzzzz", ["a"])).toBeNull(); // unknown id
+  });
 });
 
 describe("renderSessionMarkdown", () => {

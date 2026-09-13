@@ -163,6 +163,13 @@ button {
   color: var(--fg-faint);
 }
 
+.session-item .s-tags {
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--accent, #4a7dff);
+  opacity: 0.85;
+}
+
 .session-item .s-snippet {
   margin-top: 3px;
   font-size: 12px;

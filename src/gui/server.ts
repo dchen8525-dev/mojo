@@ -45,6 +45,8 @@ export interface GuiServerOptions {
   >;
   /** Rename a stored session. Returns false when it does not exist. */
   renameSession: (id: string, title: string) => Promise<boolean>;
+  /** Replace a stored session's tags. Returns the stored tags or null. */
+  tagSession: (id: string, tags: string[]) => Promise<string[] | null>;
   /** Delete a stored session; replaces the agent's session when it was active. */
   deleteSession: (id: string) => Promise<{ ok: boolean; error?: string; activeReplaced?: string }>;
   /** Called after /quit or the shutdown button. */
@@ -372,6 +374,13 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
         const title = typeof body.title === "string" ? body.title : "";
         const ok = await opts.renameSession(id, title);
         return sendJson(res, ok ? 200 : 404, ok ? { ok: true } : { error: "session not found" });
+      }
+
+      if (p === "/api/session/tags") {
+        const id = typeof body.id === "string" ? body.id : "";
+        const tags = Array.isArray(body.tags) ? body.tags.filter((t): t is string => typeof t === "string") : [];
+        const saved = await opts.tagSession(id, tags);
+        return sendJson(res, saved ? 200 : 404, saved ? { ok: true, tags: saved } : { error: "session not found" });
       }
 
       if (p === "/api/session/delete") {

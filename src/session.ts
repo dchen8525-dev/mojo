@@ -16,6 +16,8 @@ export interface SessionMeta {
   model?: string;
   /** Optional user-assigned name (shown in the GUI sidebar / /sessions). */
   title?: string;
+  /** Optional user-assigned labels (set via /tag or the GUI sidebar). */
+  tags?: string[];
   /** Session id this one was branched from (set by /fork). */
   forkedFrom?: string;
 }
@@ -97,6 +99,38 @@ export async function renameSession(id: string, title: string): Promise<boolean>
 }
 
 /**
+ * Replace a session's tags. Tags are trimmed, deduped, capped at 24 chars and
+ * 8 per session; an empty list removes the field. Returns the stored tags, or
+ * null when the session does not exist / its meta line is corrupt.
+ */
+export async function tagSession(id: string, tags: string[]): Promise<string[] | null> {
+  if (!ID_RE.test(id)) return null;
+  const file = fileFor(id);
+  let raw: string;
+  try {
+    raw = await fs.readFile(file, "utf8");
+  } catch {
+    return null;
+  }
+  const lines = raw.split("\n");
+  const idx = lines.findIndex((l) => l.trim().startsWith('{"type":"meta"'));
+  if (idx === -1) return null;
+  let meta: SessionMeta;
+  try {
+    meta = JSON.parse(lines[idx]);
+  } catch {
+    return null;
+  }
+  const clean = [...new Set(tags.map((t) => t.trim().slice(0, 24)).filter(Boolean))].slice(0, 8);
+  if (clean.length) meta.tags = clean;
+  else delete meta.tags;
+  delete (meta as { updatedAt?: string }).updatedAt; // not part of the stored header
+  lines[idx] = JSON.stringify({ type: "meta", ...meta });
+  await fs.writeFile(file, lines.join("\n"), "utf8");
+  return clean;
+}
+
+/**
  * Create a new session that starts as a copy of `messages`, optionally titled and
  * recorded as branched from `fromId`. Used by /fork to continue from a point in
  * history without disturbing the original session file.
@@ -167,6 +201,7 @@ async function parseSessionFile(full: string): Promise<ParsedSession | null> {
           startedAt: obj.startedAt,
           updatedAt: new Date(mtimeMs).toISOString(),
           ...(typeof obj.title === "string" && obj.title ? { title: obj.title } : {}),
+          ...(Array.isArray(obj.tags) ? { tags: obj.tags.filter((t: unknown) => typeof t === "string" && t.trim()).slice(0, 8) } : {}),
           ...(typeof obj.forkedFrom === "string" && obj.forkedFrom ? { forkedFrom: obj.forkedFrom } : {}),
         };
       else if (obj.type === "model" && meta) meta.model = obj.model; // last marker wins
@@ -205,6 +240,8 @@ export interface SessionHit {
   snippet: string;
   /** true when the query also appears in the session title. */
   titleMatch: boolean;
+  /** true when the query appears in one of the session's tags. */
+  tagMatch: boolean;
 }
 
 /**
@@ -238,6 +275,7 @@ export async function searchSessions(
     if (!parsed) continue;
     if (opts.excludeId && parsed.meta.id === opts.excludeId) continue;
     const titleMatch = re.test(parsed.meta.title ?? "");
+    const tagMatch = (parsed.meta.tags ?? []).some((t) => re.test(t));
     let matches = 0;
     let snippet = "";
     for (const m of parsed.messages) {
@@ -246,8 +284,8 @@ export async function searchSessions(
       matches++;
       if (!snippet) snippet = makeSnippet(text, re);
     }
-    if (!matches && !titleMatch) continue;
-    hits.push({ meta: parsed.meta, matches, snippet, titleMatch });
+    if (!matches && !titleMatch && !tagMatch) continue;
+    hits.push({ meta: parsed.meta, matches, snippet, titleMatch, tagMatch });
   }
   hits.sort((a, b) => b.meta.updatedAt.localeCompare(a.meta.updatedAt));
   return hits.slice(0, limit);

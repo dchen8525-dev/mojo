@@ -5,7 +5,7 @@ import { HookManager } from "../hooks.js";
 import { McpManager, loadMcpConfig } from "../mcp.js";
 import { loadSlashCommands, type SlashCommand } from "../commands.js";
 import { configureLsp, disposeLsp, loadLspConfig } from "../lsp.js";
-import { createSession, loadSession, listSessions, renameSession, deleteSession, searchSessions, type SessionMeta } from "../session.js";
+import { createSession, loadSession, listSessions, renameSession, deleteSession, searchSessions, tagSession, type SessionMeta } from "../session.js";
 import type { MessageParam } from "../types.js";
 import { SseHub } from "./sse.js";
 import { GuiRuntime } from "./state.js";
@@ -130,6 +130,7 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
       listSessions: async (): Promise<SessionMeta[]> => listSessions(),
       searchSessions: async (q, o) => searchSessions(q, { regex: o?.regex, limit: 20 }),
       renameSession: async (id, title) => renameSession(id, title),
+      tagSession: async (id, tags) => tagSession(id, tags),
       deleteSession: async (id) => {
         // Deleting the session the agent is currently writing to would leave
         // dangling appends; swap in a fresh one first.
