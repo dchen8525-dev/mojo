@@ -5,7 +5,7 @@ import type { HookManager } from "./hooks.js";
 import type { McpManager } from "./mcp.js";
 import type { SlashCommand } from "./commands.js";
 import { knownModelNames } from "./llm.js";
-import { createSession, listSessions, loadSession, renameSession } from "./session.js";
+import { createSession, listSessions, loadSession, renderSessionMarkdown, renameSession, searchSessions, tagSession } from "./session.js";
 import { getLspManager } from "./lsp.js";
 
 /**
@@ -22,6 +22,12 @@ export interface CommandResult {
   kind: CommandKind;
   /** Set by /quit — the host UI should shut down. */
   quit?: boolean;
+  /**
+   * Term the surface should emphasize inside `text` (e.g. the /search query).
+   * The text itself stays plain so every UI can style it its own way —
+   * the terminal paints bold/inverse, the GUI wraps it in <mark>.
+   */
+  highlight?: string;
 }
 
 export interface CommandContext {
@@ -39,7 +45,7 @@ export interface CommandContext {
 /** Names of the built-in commands (for /help listings and the GUI palette). */
 export const BUILTIN_COMMANDS = [
   "help", "model", "auto", "yolo", "plan", "mcp", "lsp", "compact", "context", "review",
-  "permissions", "hooks", "sessions", "resume", "fork", "rename", "todos", "undo", "cost", "clear", "quit",
+  "permissions", "hooks", "sessions", "search", "resume", "fork", "rename", "tag", "export", "todos", "undo", "cost", "clear", "quit",
 ] as const;
 
 /**
@@ -60,7 +66,7 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       return {
         kind: "ok",
         text: [
-          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks · /sessions · /resume <id> · /fork [N] [名称] · /rename <名称> · /todos · /undo [-y] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
+          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks · /sessions [--cwd <dir>] [--title <词>] [--tag <tag>] [N] · /search [-r] <term> · /resume <id> · /fork [N] [名称] · /rename <名称> · /tag [+<tag> | -<tag> | clear] · /export [md|json] [路径] · /todos · /undo [-y] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
           "file refs: @path/to/file inlines the file; Ctrl+V pastes a clipboard image",
           custom ? `custom commands: ${custom}` : "",
         ]
@@ -205,13 +211,94 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       };
     }
     case "sessions": {
-      const list = await listSessions();
+      // /sessions [--cwd <dir>] [--title <kw>] [N]  — N caps the listed rows (default 10)
+      const words = [...rest];
+      let cwdFilter = "";
+      let titleFilter = "";
+      let tagFilter = "";
+      let limit = 10;
+      for (let i = 0; i < words.length; i++) {
+        if ((words[i] === "--cwd" || words[i] === "--title" || words[i] === "--tag") && words[i + 1] !== undefined) {
+          const v = words[++i];
+          if (words[i - 1] === "--cwd") cwdFilter = v.toLowerCase();
+          else if (words[i - 1] === "--title") titleFilter = v.toLowerCase();
+          else tagFilter = v.toLowerCase();
+        } else if (/^\d+$/.test(words[i])) {
+          limit = Math.max(1, Number(words[i]));
+        }
+      }
+      const all = await listSessions();
+      let list = all;
+      if (cwdFilter) list = list.filter((s) => s.cwd.toLowerCase().includes(cwdFilter));
+      if (titleFilter)
+        list = list.filter((s) => (s.title ?? "").toLowerCase().includes(titleFilter) || s.id.includes(titleFilter));
+      if (tagFilter) list = list.filter((s) => (s.tags ?? []).some((t) => t.toLowerCase().includes(tagFilter)));
+      const desc = [cwdFilter && `cwd~"${cwdFilter}"`, titleFilter && `title~"${titleFilter}"`, tagFilter && `tag~"${tagFilter}"`]
+        .filter(Boolean)
+        .join(" & ");
+      if (!list.length) return { kind: "ok", text: desc ? `(no sessions match ${desc})` : "(no sessions)" };
+      const shown = list.slice(0, limit);
+      const head = desc
+        ? `${list.length} match${desc ? ` (${desc})` : ""}`
+        : `${shown.length} shown / ${all.length} total`;
       return {
         kind: "ok",
-        text: list.length
-          ? list.slice(0, 10).map((s) => `${s.id}  ${s.updatedAt.slice(0, 16)}  ${s.model ?? "?"}  ${s.cwd}`).join("\n")
-          : "(no sessions)",
+        text:
+          `${head} — resume with /resume <id>\n` +
+          shown
+            .map((s) => {
+              const tags = s.tags?.length ? ` [${s.tags.join(",")}]` : "";
+              return `${s.id}  ${s.updatedAt.slice(0, 16)}  ${s.model ?? "?"}  ${s.title ? `"${s.title}" ` : ""}${tags}${s.cwd}`;
+            })
+            .join("\n"),
       };
+    }
+    case "search": {
+      if (!rest.length) return { kind: "error", text: "usage: /search [-r] <term>  (case-insensitive; -r enables regex)" };
+      let regex = false;
+      const words = [...rest];
+      if (words[0] === "-r" || words[0] === "--regex") {
+        regex = true;
+        words.shift();
+      }
+      const query = words.join(" ");
+      if (!query.trim()) return { kind: "error", text: "usage: /search [-r] <term>" };
+      const hits = await searchSessions(query, { excludeId: agent.sessionId, regex });
+      if (!hits.length) return { kind: "ok", text: `no sessions match "${query}" (searched message text, tool calls, tags, and titles)` };
+      const lines = hits.map((h) => {
+        const label = h.meta.title ? `"${h.meta.title}"` : h.meta.cwd;
+        const tags = h.meta.tags?.length ? ` [${h.meta.tags.join(",")}]` : "";
+        const where = h.matches ? `${h.matches} msg${h.matches > 1 ? "s" : ""}` : h.tagMatch ? "tag" : "title";
+        const snip = h.snippet ? `\n    ${h.snippet}` : "";
+        return `${h.meta.id}  ${h.meta.updatedAt.slice(0, 16)}  ${label}${tags}  (${where})${snip}`;
+      });
+      return {
+        kind: "ok",
+        text: [`${hits.length} session(s) match "${query}" — resume with /resume <id>`, ...lines].join("\n"),
+        // Surfaces emphasize the raw query (substring match); regex syntax is
+        // not re-applied here — close enough for visual emphasis.
+        highlight: query,
+      };
+    }
+    case "export": {
+      const loaded = await loadSession(agent.sessionId);
+      if (!loaded || !loaded.messages.length) return { kind: "error", text: "nothing to export yet (the conversation is empty)" };
+      const format = (rest[0] ?? "md").toLowerCase();
+      if (format !== "md" && format !== "json") return { kind: "error", text: "usage: /export [md|json] [path]" };
+      const positional = rest.slice(1);
+      const body =
+        format === "json"
+          ? JSON.stringify({ meta: loaded.meta, messages: loaded.messages }, null, 2)
+          : renderSessionMarkdown(loaded.meta, loaded.messages);
+      const defaultName = `${agent.sessionId}.${format}`;
+      const out = path.resolve(cwd, positional[0] ?? defaultName);
+      try {
+        const { writeFile } = await import("node:fs/promises");
+        await writeFile(out, body, "utf8");
+      } catch (err) {
+        return { kind: "error", text: `export failed: ${err instanceof Error ? err.message : String(err)}` };
+      }
+      return { kind: "ok", text: `exported ${loaded.messages.length} messages → ${out} (${body.length.toLocaleString()} chars)` };
     }
     case "resume": {
       if (!rest[0]) return { kind: "error", text: "usage: /resume <id>" };
@@ -238,6 +325,36 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
         kind: "ok",
         text: title ? `renamed session ${agent.sessionId} to "${title}"` : `cleared the name on session ${agent.sessionId}`,
       };
+    }
+    case "tag": {
+      // /tag                     — show the current session's tags
+      // /tag +a +b / tag word    — add (a bare word adds too)
+      // /tag -a                  — remove (case-insensitive)
+      // /tag clear               — remove all
+      const words = [...rest].filter(Boolean);
+      if (!words.length) {
+        const cur = (await loadSession(agent.sessionId))?.meta.tags ?? [];
+        return { kind: "ok", text: cur.length ? `tags: ${cur.join(", ")}` : "(no tags — /tag +name adds, -name removes, clear empties)" };
+      }
+      if (words[0] === "clear") {
+        await tagSession(agent.sessionId, []);
+        return { kind: "ok", text: `cleared tags on session ${agent.sessionId}` };
+      }
+      const cur = (await loadSession(agent.sessionId))?.meta.tags ?? [];
+      const next = new Set(cur);
+      for (const w of words) {
+        if (w.startsWith("-") && w.length > 1) {
+          for (const t of [...next]) if (t.toLowerCase() === w.slice(1).toLowerCase()) next.delete(t);
+        } else if (w.startsWith("+") && w.length > 1) {
+          next.add(w.slice(1));
+        } else if (!w.startsWith("-")) {
+          next.add(w);
+        }
+      }
+      const saved = await tagSession(agent.sessionId, [...next]);
+      return saved?.length
+        ? { kind: "ok", text: `tags: ${saved.join(", ")}` }
+        : { kind: "ok", text: "(no tags)" };
     }
     case "todos": {
       const items = agent.currentTodos();

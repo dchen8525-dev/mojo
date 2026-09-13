@@ -31,8 +31,22 @@ export interface GuiServerOptions {
   resumeSession: (id: string) => Promise<string | null>;
   /** List sessions for the sidebar. */
   listSessions: () => Promise<Array<{ id: string; cwd: string; updatedAt: string; model?: string; title?: string }>>;
+  /** Full-text search over saved sessions (sidebar quick search). */
+  searchSessions: (
+    q: string,
+    o?: { regex?: boolean },
+  ) => Promise<
+    Array<{
+      meta: { id: string; cwd: string; updatedAt: string; model?: string; title?: string };
+      matches: number;
+      snippet: string;
+      titleMatch: boolean;
+    }>
+  >;
   /** Rename a stored session. Returns false when it does not exist. */
   renameSession: (id: string, title: string) => Promise<boolean>;
+  /** Replace a stored session's tags. Returns the stored tags or null. */
+  tagSession: (id: string, tags: string[]) => Promise<string[] | null>;
   /** Delete a stored session; replaces the agent's session when it was active. */
   deleteSession: (id: string) => Promise<{ ok: boolean; error?: string; activeReplaced?: string }>;
   /** Called after /quit or the shutdown button. */
@@ -174,7 +188,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
           notify: (m) => hub.broadcast("system", { text: m }),
         });
         if (r.quit) opts.onQuit();
-        if (r.text) hub.broadcast("system", { text: r.text, kind: r.kind });
+        if (r.text) hub.broadcast("system", { text: r.text, kind: r.kind, highlight: r.highlight });
         return;
       }
     }
@@ -281,6 +295,14 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       return sendJson(res, 200, await opts.listSessions());
     }
 
+    if (method === "GET" && p === "/api/search") {
+      const url = new URL(req.url ?? "", "http://localhost");
+      const q = (url.searchParams.get("q") ?? "").trim();
+      if (!q) return sendJson(res, 400, { error: "missing q" });
+      const regex = url.searchParams.get("regex") === "1";
+      return sendJson(res, 200, await opts.searchSessions(q, { regex }));
+    }
+
     if (method === "GET" && p === "/api/models") {
       try {
         return sendJson(res, 200, await agent.listModels());
@@ -327,7 +349,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
           notify: (m) => hub.broadcast("system", { text: m }),
         });
         if (r.quit) opts.onQuit();
-        return sendJson(res, 200, { text: r.text, kind: r.kind, quit: !!r.quit });
+        return sendJson(res, 200, { text: r.text, kind: r.kind, quit: !!r.quit, highlight: r.highlight });
       }
 
       if (p === "/api/settings") {
@@ -352,6 +374,13 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
         const title = typeof body.title === "string" ? body.title : "";
         const ok = await opts.renameSession(id, title);
         return sendJson(res, ok ? 200 : 404, ok ? { ok: true } : { error: "session not found" });
+      }
+
+      if (p === "/api/session/tags") {
+        const id = typeof body.id === "string" ? body.id : "";
+        const tags = Array.isArray(body.tags) ? body.tags.filter((t): t is string => typeof t === "string") : [];
+        const saved = await opts.tagSession(id, tags);
+        return sendJson(res, saved ? 200 : 404, saved ? { ok: true, tags: saved } : { error: "session not found" });
       }
 
       if (p === "/api/session/delete") {

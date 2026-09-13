@@ -16,6 +16,8 @@ export interface SessionMeta {
   model?: string;
   /** Optional user-assigned name (shown in the GUI sidebar / /sessions). */
   title?: string;
+  /** Optional user-assigned labels (set via /tag or the GUI sidebar). */
+  tags?: string[];
   /** Session id this one was branched from (set by /fork). */
   forkedFrom?: string;
 }
@@ -97,6 +99,38 @@ export async function renameSession(id: string, title: string): Promise<boolean>
 }
 
 /**
+ * Replace a session's tags. Tags are trimmed, deduped, capped at 24 chars and
+ * 8 per session; an empty list removes the field. Returns the stored tags, or
+ * null when the session does not exist / its meta line is corrupt.
+ */
+export async function tagSession(id: string, tags: string[]): Promise<string[] | null> {
+  if (!ID_RE.test(id)) return null;
+  const file = fileFor(id);
+  let raw: string;
+  try {
+    raw = await fs.readFile(file, "utf8");
+  } catch {
+    return null;
+  }
+  const lines = raw.split("\n");
+  const idx = lines.findIndex((l) => l.trim().startsWith('{"type":"meta"'));
+  if (idx === -1) return null;
+  let meta: SessionMeta;
+  try {
+    meta = JSON.parse(lines[idx]);
+  } catch {
+    return null;
+  }
+  const clean = [...new Set(tags.map((t) => t.trim().slice(0, 24)).filter(Boolean))].slice(0, 8);
+  if (clean.length) meta.tags = clean;
+  else delete meta.tags;
+  delete (meta as { updatedAt?: string }).updatedAt; // not part of the stored header
+  lines[idx] = JSON.stringify({ type: "meta", ...meta });
+  await fs.writeFile(file, lines.join("\n"), "utf8");
+  return clean;
+}
+
+/**
  * Create a new session that starts as a copy of `messages`, optionally titled and
  * recorded as branched from `fromId`. Used by /fork to continue from a point in
  * history without disturbing the original session file.
@@ -167,6 +201,7 @@ async function parseSessionFile(full: string): Promise<ParsedSession | null> {
           startedAt: obj.startedAt,
           updatedAt: new Date(mtimeMs).toISOString(),
           ...(typeof obj.title === "string" && obj.title ? { title: obj.title } : {}),
+          ...(Array.isArray(obj.tags) ? { tags: obj.tags.filter((t: unknown) => typeof t === "string" && t.trim()).slice(0, 8) } : {}),
           ...(typeof obj.forkedFrom === "string" && obj.forkedFrom ? { forkedFrom: obj.forkedFrom } : {}),
         };
       else if (obj.type === "model" && meta) meta.model = obj.model; // last marker wins
@@ -195,6 +230,101 @@ export async function listSessions(): Promise<SessionMeta[]> {
   } catch {
     return [];
   }
+}
+
+export interface SessionHit {
+  meta: SessionMeta;
+  /** Number of messages that matched. */
+  matches: number;
+  /** The first matching message's plain text, trimmed to a snippet. */
+  snippet: string;
+  /** true when the query also appears in the session title. */
+  titleMatch: boolean;
+  /** true when the query appears in one of the session's tags. */
+  tagMatch: boolean;
+}
+
+/**
+ * Full-text search across saved sessions for a case-insensitive substring (or
+ * regex, when `opts.regex`). Returns the most recently-updated sessions that
+ * contain the term, each with a snippet of the first match. Skips the current
+ * session when `excludeId` is set. Corrupt lines are tolerated like the loader.
+ */
+export async function searchSessions(
+  query: string,
+  opts: { limit?: number; excludeId?: string; regex?: boolean } = {},
+): Promise<SessionHit[]> {
+  const q = query.trim();
+  if (!q) return [];
+  const limit = opts.limit ?? 15;
+  let re: RegExp;
+  try {
+    re = opts.regex ? new RegExp(q, "i") : new RegExp(escapeRegExp(q), "i");
+  } catch {
+    return []; // invalid regex — treat as no results rather than crash
+  }
+  let files: string[];
+  try {
+    files = (await fs.readdir(SESSION_DIR)).filter((f) => f.endsWith(".jsonl"));
+  } catch {
+    return [];
+  }
+  const hits: SessionHit[] = [];
+  for (const f of files) {
+    const parsed = await parseSessionFile(path.join(SESSION_DIR, f));
+    if (!parsed) continue;
+    if (opts.excludeId && parsed.meta.id === opts.excludeId) continue;
+    const titleMatch = re.test(parsed.meta.title ?? "");
+    const tagMatch = (parsed.meta.tags ?? []).some((t) => re.test(t));
+    let matches = 0;
+    let snippet = "";
+    for (const m of parsed.messages) {
+      const text = messageToPlainText(m.content);
+      if (!re.test(text)) continue;
+      matches++;
+      if (!snippet) snippet = makeSnippet(text, re);
+    }
+    if (!matches && !titleMatch && !tagMatch) continue;
+    hits.push({ meta: parsed.meta, matches, snippet, titleMatch, tagMatch });
+  }
+  hits.sort((a, b) => b.meta.updatedAt.localeCompare(a.meta.updatedAt));
+  return hits.slice(0, limit);
+}
+
+/** Flatten a message's content blocks into searchable plain text. */
+function messageToPlainText(content: MessageParam["content"]): string {
+  if (typeof content === "string") return content;
+  const parts: string[] = [];
+  for (const b of content as Array<{ type: string; text?: string; name?: string; input?: unknown; content?: unknown }>) {
+    if (b.type === "text" && b.text) parts.push(b.text);
+    else if (b.type === "tool_use") parts.push(`${b.name ?? ""} ${safeJson(b.input)}`);
+    else if (b.type === "tool_result") {
+      parts.push(typeof b.content === "string" ? b.content : safeJson(b.content));
+    }
+  }
+  return parts.join("\n");
+}
+
+function safeJson(v: unknown): string {
+  try {
+    return typeof v === "string" ? v : JSON.stringify(v);
+  } catch {
+    return "";
+  }
+}
+
+/** Grab ~120 chars of context around the first match, on a single line. */
+function makeSnippet(text: string, re: RegExp): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  const m = re.exec(flat);
+  if (!m) return flat.slice(0, 120);
+  const start = Math.max(0, m.index - 50);
+  const snip = flat.slice(start, start + 170).trim();
+  return (start > 0 ? "…" : "") + snip + (start + 170 < flat.length ? "…" : "");
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /** Plain-text serialization of a content block (for export / review). */

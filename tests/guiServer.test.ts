@@ -36,7 +36,9 @@ async function withServer(
   agentOverrides: Partial<Agent> = {},
   serverOverrides: Partial<{
     renameSession: (id: string, title: string) => Promise<boolean>;
+    tagSession: (id: string, tags: string[]) => Promise<string[] | null>;
     deleteSession: (id: string) => Promise<{ ok: boolean; error?: string; activeReplaced?: string }>;
+    searchSessions: (q: string, o?: { regex?: boolean }) => Promise<unknown[]>;
   }> = {},
 ): Promise<void> {
   const hub = new SseHub();
@@ -56,6 +58,8 @@ async function withServer(
       newSession: async () => ({ id: "new1" }),
       resumeSession: async () => null,
       listSessions: async () => [],
+      searchSessions: serverOverrides.searchSessions ?? (async () => []),
+      tagSession: serverOverrides.tagSession ?? (async () => null),
       renameSession: serverOverrides.renameSession ?? (async () => true),
       deleteSession: serverOverrides.deleteSession ?? (async () => ({ ok: true })),
       onQuit: () => {},
@@ -223,6 +227,53 @@ describe("gui server", () => {
       },
       {},
       { deleteSession: async () => ({ ok: false, error: "session not found" }) },
+    );
+  });
+
+  it("/api/session/tags saves and clears tags", async () => {
+    await withServer(
+      async (gui) => {
+        const saved = await req(gui.port, "/api/session/tags", { method: "POST", token: TOKEN, body: { id: "abcd", tags: [" bug ", "perf", ""] } });
+        expect(saved.status).toBe(200);
+        expect(saved.json).toEqual({ ok: true, tags: ["bug", "perf"] });
+        const missing = await req(gui.port, "/api/session/tags", { method: "POST", token: TOKEN, body: { id: "nope", tags: [] } });
+        expect(missing.status).toBe(404);
+      },
+      {},
+      {
+        tagSession: async (_id, tags) => {
+          const clean = [...new Set(tags.map((t) => t.trim().slice(0, 24)).filter(Boolean))];
+          return clean.length ? clean : null; // mirrors session.ts normalization
+        },
+      },
+    );
+  });
+
+  it("/api/search proxies query+regex to searchSessions", async () => {
+    const calls: Array<{ q: string; regex: boolean }> = [];
+    await withServer(
+      async (gui) => {
+        const hit = await req(gui.port, "/api/search?q=websocket%20timeout", { token: TOKEN });
+        expect(hit.status).toBe(200);
+        expect(hit.json).toHaveLength(1);
+        expect(hit.json[0].meta.id).toBe("abcd1234");
+
+        const empty = await req(gui.port, "/api/search", { token: TOKEN });
+        expect(empty.status).toBe(400);
+
+        const regex = await req(gui.port, "/api/search?q=%5Cd%7B4%7D&regex=1", { token: TOKEN });
+        expect(regex.status).toBe(200);
+        expect(calls[calls.length - 1]).toEqual({ q: "\\d{4}", regex: true });
+      },
+      {},
+      {
+        searchSessions: async (q, o) => {
+          calls.push({ q, regex: !!o?.regex });
+          return q.includes("websocket")
+            ? [{ meta: { id: "abcd1234", cwd: "/tmp", updatedAt: "2026-09-10T10:00:00.000Z" }, matches: 2, snippet: "…websocket…", titleMatch: false }]
+            : [];
+        },
+      },
     );
   });
 });

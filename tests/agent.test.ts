@@ -63,6 +63,9 @@ vi.mock("../src/session.js", () => ({
   appendMessages: async () => {},
   appendModel: async () => {},
   rewriteMessages: async () => {},
+  renameSession: async () => true,
+  searchSessions: async () => [],
+  renderSessionMarkdown: () => "",
   forkSession: async () => ({ id: "fork0000", meta: { id: "fork0000", cwd: "", startedAt: "", updatedAt: "" } }),
 }));
 
