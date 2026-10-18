@@ -6,6 +6,7 @@ import { SseHub } from "../src/gui/sse.js";
 import { GuiRuntime } from "../src/gui/state.js";
 import { startGuiServer, type RunningGui } from "../src/gui/server.js";
 import type { SwitchResult } from "../src/gui/project.js";
+import type { ProfileInput, PublicProfile } from "../src/llmProfiles.js";
 
 const TOKEN = "testtoken123";
 
@@ -41,6 +42,12 @@ async function withServer(
     deleteSession: (id: string) => Promise<{ ok: boolean; error?: string; activeReplaced?: string }>;
     searchSessions: (q: string, o?: { regex?: boolean }) => Promise<unknown[]>;
     switchProject: (cwd: string, opts?: { resumeId?: string }) => Promise<SwitchResult>;
+    listLlmProfiles: () => Promise<{ activeId?: string; profiles: PublicProfile[]; projectOverrides: boolean }>;
+    saveLlmProfile: (input: ProfileInput) => Promise<{ ok: boolean; id?: string; error?: string }>;
+    deleteLlmProfile: (id: string) => Promise<{ ok: boolean; error?: string }>;
+    activateLlmProfile: (id: string) => Promise<{ ok: boolean; provider?: string; model?: string; error?: string; warning?: string }>;
+    disableLlmProfile: (id: string) => Promise<{ ok: boolean; error?: string }>;
+    listModelsForProfile: (input: ProfileInput) => Promise<{ models?: string[]; error?: string }>;
   }> = {},
 ): Promise<void> {
   const hub = new SseHub();
@@ -70,6 +77,12 @@ async function withServer(
       tagSession: serverOverrides.tagSession ?? (async () => null),
       renameSession: serverOverrides.renameSession ?? (async () => true),
       deleteSession: serverOverrides.deleteSession ?? (async () => ({ ok: true })),
+      listLlmProfiles: serverOverrides.listLlmProfiles ?? (async () => ({ profiles: [], projectOverrides: false })),
+      saveLlmProfile: serverOverrides.saveLlmProfile ?? (async () => ({ ok: true, id: "p_1" })),
+      deleteLlmProfile: serverOverrides.deleteLlmProfile ?? (async () => ({ ok: true })),
+      activateLlmProfile: serverOverrides.activateLlmProfile ?? (async () => ({ ok: true, provider: "anthropic", model: "m" })),
+      disableLlmProfile: serverOverrides.disableLlmProfile ?? (async () => ({ ok: true })),
+      listModelsForProfile: serverOverrides.listModelsForProfile ?? (async () => ({ models: ["m1"] })),
       onQuit: () => {},
     },
     0,
@@ -110,6 +123,39 @@ function req(port: number, path: string, opts: { method?: string; token?: string
 }
 
 describe("gui server", () => {
+  it("broadcasts round and tool events with structured input and result", async () => {
+    await withServer(
+      async (gui) => {
+        const sse = collectSse(gui.port, 4);
+        await sse.ready;
+        await req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "hi" } });
+        const events = (await sse.done).slice(0, 4);
+        expect(events.map((e) => e.event)).toEqual(["turn_start", "round_start", "tool_start", "tool_end"]);
+        expect(events[1].data.round).toBe(1);
+        expect(events[2].data.input).toEqual({ path: "a.ts" });
+        expect(events[3].data.result).toBe("file body");
+      },
+      {
+        chat: async (_text, _signal, events) => {
+          events?.onRoundStart?.(1);
+          events?.onToolStart?.("t1", "read_file", '{"path":"a.ts"}', { path: "a.ts" });
+          events?.onToolEnd?.("t1", "read_file", true, "file body", "file body");
+          return "done";
+        },
+      },
+    );
+  });
+
+  it("serves the app icon without a token", async () => {
+    await withServer(async (gui) => {
+      const r = await req(gui.port, "/icon.png");
+      expect(r.status).toBe(200);
+      expect(r.text).toContain("PNG");
+      const ico = await req(gui.port, "/favicon.ico");
+      expect(ico.status).toBe(200);
+    });
+  });
+
   it("rejects /api/* without the token", async () => {
     await withServer(async (gui) => {
       const r = await req(gui.port, "/api/state");
@@ -332,6 +378,129 @@ describe("gui server", () => {
             ? [{ meta: { id: "abcd1234", cwd: "/tmp", updatedAt: "2026-09-10T10:00:00.000Z" }, matches: 2, snippet: "…websocket…", titleMatch: false }]
             : [];
         },
+      },
+    );
+  });
+  it("/api/llm/profiles passes the masked list through", async () => {
+    await withServer(
+      async (gui) => {
+        const r = await req(gui.port, "/api/llm/profiles", { token: TOKEN });
+        expect(r.status).toBe(200);
+        expect(r.json.activeId).toBe("p_1");
+        expect(r.json.projectOverrides).toBe(false);
+        expect(r.json.profiles[0].keyMasked).toBe("sk-1…cd9f");
+        expect(r.json.profiles[0].apiKey).toBeUndefined();
+      },
+      {},
+      {
+        listLlmProfiles: async () => ({
+          activeId: "p_1",
+          projectOverrides: false,
+          profiles: [
+            { id: "p_1", name: "网关", provider: "openai", model: "glm-4.6", updatedAt: "2026-10-18T00:00:00.000Z", hasKey: true, keyMasked: "sk-1…cd9f" },
+          ],
+        }),
+      },
+    );
+  });
+
+  it("/api/llm/profile/save rejects a missing model and trims what it forwards", async () => {
+    const seen: ProfileInput[] = [];
+    await withServer(
+      async (gui) => {
+        const bad = await req(gui.port, "/api/llm/profile/save", { method: "POST", token: TOKEN, body: { name: "只有名字" } });
+        expect(bad.status).toBe(400);
+        expect(seen).toHaveLength(0);
+
+        const ok = await req(gui.port, "/api/llm/profile/save", {
+          method: "POST",
+          token: TOKEN,
+          body: { id: "p_1", name: " 网关 ", provider: "openai", baseURL: " https://gw.example/v1 ", apiKey: " sk-abc ", model: " glm-4.6 " },
+        });
+        expect(ok.status).toBe(200);
+        expect(ok.json).toEqual({ ok: true, id: "p_9" });
+        expect(seen[0]).toEqual({
+          id: "p_1",
+          name: "网关",
+          provider: "openai",
+          baseURL: "https://gw.example/v1",
+          apiKey: "sk-abc",
+          model: "glm-4.6",
+        });
+      },
+      {},
+      {
+        saveLlmProfile: async (input) => {
+          seen.push(input);
+          return { ok: true, id: "p_9" };
+        },
+      },
+    );
+  });
+
+  it("/api/llm/profile/activate maps busy to 409 and a missing profile to 404", async () => {
+    await withServer(
+      async (gui) => {
+        const busy = await req(gui.port, "/api/llm/profile/activate", { method: "POST", token: TOKEN, body: { id: "p_1" } });
+        expect(busy.status).toBe(409);
+        expect(busy.json.error).toBe("busy");
+
+        const gone = await req(gui.port, "/api/llm/profile/activate", { method: "POST", token: TOKEN, body: { id: "nope" } });
+        expect(gone.status).toBe(404);
+      },
+      {},
+      {
+        activateLlmProfile: async (id) => (id === "nope" ? { ok: false, error: "not found" } : { ok: false, error: "busy" }),
+      },
+    );
+  });
+
+  it("/api/llm/profile/delete reports an unknown id as 404", async () => {
+    await withServer(
+      async (gui) => {
+        const missing = await req(gui.port, "/api/llm/profile/delete", { method: "POST", token: TOKEN, body: { id: "nope" } });
+        expect(missing.status).toBe(404);
+        const ok = await req(gui.port, "/api/llm/profile/delete", { method: "POST", token: TOKEN, body: { id: "p_1" } });
+        expect(ok.status).toBe(200);
+      },
+      {},
+      { deleteLlmProfile: async (id) => (id === "p_1" ? { ok: true } : { ok: false, error: "not found" }) },
+    );
+  });
+
+  it("/api/llm/profile/disable reports an unknown id as 404", async () => {
+    await withServer(
+      async (gui) => {
+        const missing = await req(gui.port, "/api/llm/profile/disable", { method: "POST", token: TOKEN, body: { id: "nope" } });
+        expect(missing.status).toBe(404);
+        const ok = await req(gui.port, "/api/llm/profile/disable", { method: "POST", token: TOKEN, body: { id: "p_1" } });
+        expect(ok.status).toBe(200);
+        expect(ok.json).toEqual({ ok: true });
+      },
+      {},
+      { disableLlmProfile: async (id) => (id === "p_1" ? { ok: true } : { ok: false, error: "not found" }) },
+    );
+  });
+
+  it("/api/llm/models lists a draft config and maps an endpoint failure to 502", async () => {
+    await withServer(
+      async (gui) => {
+        const ok = await req(gui.port, "/api/llm/models", {
+          method: "POST",
+          token: TOKEN,
+          body: { provider: "openai", model: "", apiKey: "sk-x" },
+        });
+        expect(ok.status).toBe(200);
+        expect(ok.json.models).toEqual(["m1"]);
+
+        // An empty key is dropped by the parser, so the callback reports failure.
+        const bad = await req(gui.port, "/api/llm/models", { method: "POST", token: TOKEN, body: { provider: "openai", model: "", apiKey: "" } });
+        expect(bad.status).toBe(502);
+        expect(bad.json.error).toMatch(/401/);
+      },
+      {},
+      {
+        listModelsForProfile: async (input) => (input.apiKey ? { models: ["m1"] } : { error: "401 unauthorized" }),
       },
     );
   });

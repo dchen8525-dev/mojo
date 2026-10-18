@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>mojo · 输入区改版 · 5 个皮肤</title>
+<style>
+:root{
+  --bg:#f5f6f8;--card:#fff;--fg:#16181d;--dim:#5c6370;--faint:#8c939f;
+  --line:#e3e6eb;--accent:#4f46e5;--ok:#15803d;--warn:#b45309;
+  --mono:"Cascadia Code","Consolas",monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:14px/1.65 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:1320px;margin:0 auto;padding:40px 28px 80px}
+h1{margin:0 0 8px;font-size:27px;letter-spacing:-.02em}
+.lead{margin:0 0 6px;color:var(--dim)}
+.note{color:var(--faint);font-size:12.5px;margin-bottom:14px}
+.note code{font-family:var(--mono);font-size:12px;background:#eceef2;padding:1px 6px;border-radius:4px}
+.banner{
+  background:#fff;border:1px solid var(--line);border-left:3px solid var(--accent);
+  border-radius:10px;padding:14px 18px;margin:0 0 28px;font-size:13px;color:var(--dim);
+}
+.banner b{color:var(--fg)}
+.banner ul{margin:8px 0 0;padding-left:18px}
+.banner li{margin:3px 0}
+.banner code{font-family:var(--mono);font-size:12px;background:#f1f3f7;padding:1px 5px;border-radius:4px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(410px,1fr));gap:22px}
+.card{
+  background:#fff;border:1px solid var(--line);border-radius:14px;overflow:hidden;
+  box-shadow:0 2px 10px rgba(22,24,29,.05);display:flex;flex-direction:column;
+  transition:box-shadow .18s,transform .18s;
+}
+.card:hover{box-shadow:0 14px 36px rgba(22,24,29,.12);transform:translateY(-2px)}
+.shot{position:relative;height:290px;overflow:hidden;border-bottom:1px solid var(--line);background:#eceef2}
+.shot iframe{width:1440px;height:900px;border:0;transform:scale(.48);transform-origin:0 0;pointer-events:none}
+.shot a{position:absolute;inset:0}
+.meta{padding:15px 18px 18px;display:flex;flex-direction:column;gap:7px;flex:1}
+.row{display:flex;align-items:baseline;gap:10px}
+.num{font-family:var(--mono);font-size:11px;color:var(--faint)}
+.name{font-size:16px;font-weight:700;letter-spacing:-.01em}
+.desc{color:var(--dim);font-size:13px;margin:0}
+.kv{display:flex;gap:8px;font-size:12px;color:var(--dim);margin:0}
+.kv span:first-child{color:var(--faint);flex:0 0 46px;font-family:var(--mono);font-size:11px}
+.tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:auto;padding-top:10px}
+.tag{font-size:11px;color:var(--dim);background:#f1f3f7;border-radius:999px;padding:2px 10px}
+.tag.pro{background:#e8f5ec;color:var(--ok)}
+.tag.con{background:#fdf1e6;color:var(--warn)}
+.open{
+  display:inline-flex;align-items:center;gap:6px;align-self:flex-start;margin-top:12px;
+  font-size:12.5px;font-weight:600;color:#fff;background:var(--fg);text-decoration:none;
+  border-radius:8px;padding:7px 14px;transition:.15s;
+}
+.open:hover{background:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>输入区改版 · 5 个皮肤</h1>
+  <p class="lead">结构已经定下来了（就是紧凑那一版），这 5 个文件的 DOM 完全一样，只换皮肤。</p>
+  <p class="note">共用 <code>base.css</code> + <code>demo.js</code>，每个文件只有十来行 <code>&lt;style&gt;</code> 覆盖变量。两个下拉是真能点的，工具卡能展开。</p>
+
+  <div class="banner">
+    <b>这一版的结构</b>
+    <ul>
+      <li>无顶栏、无底部状态栏，只留左侧会话侧栏。</li>
+      <li>输入卡片：上文本域；卡片内底行 = 左「＋」/ 右「模型 ⌄ · 发送」（空输入时发送置灰）。</li>
+      <li><b>卡片外</b>下方一条左对齐工具行：左端 <code>📁 选择工作空间 ⌄</code> 和 <code>ⓘ 权限模式 ⌄</code>；右端 <code>ses_id · ctx · 成本 · 后台任务</code>。</li>
+      <li><b>PLAN 已并进权限下拉</b>，成为第四档「PLAN 计划模式（只读探索，先出计划待批准）」，不再单独占一个开关。</li>
+      <li>点「选择工作空间」→ 上浮菜单：最近项目 + 「打开文件夹…」；选完按钮文字变成该目录名（默认是占位文案）。</li>
+    </ul>
+    <b style="display:block;margin-top:10px">两处说明</b>
+    <ul>
+      <li><b>演示切换器（欢迎页 / 对话 / 授权弹窗）已整个去掉</b>，页面固定展示对话状态。</li>
+      <li>「授权弹窗」（写文件时那个确认弹窗）也从 demo 里去掉了 —— 它原来只能从那排切换器进入。真实 GUI 里它照旧存在，不受这次改动影响；要重新看它的样子我可以单独出一个。</li>
+    </ul>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="shot"><iframe src="e-dense-meta.html" loading="lazy" scrolling="no"></iframe><a href="e-dense-meta.html"></a></div>
+      <div class="meta">
+        <div class="row"><span class="num">5</span><span class="name">紧凑（基准版）</span></div>
+        <p class="desc">你指定的那一版：卡片内边距、字号、行距、工具行间距都比其他几版小一号，右端 mono 元信息贴在同一行。整体最紧凑。</p>
+        <p class="kv"><span>间距</span>gap 14px · 字号 12px</p>
+        <p class="kv"><span>圆角</span>14px</p>
+        <div class="tags"><span class="tag pro">最紧凑</span><span class="tag">基准结构</span></div>
+        <a class="open" href="e-dense-meta.html">打开预览 →</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="shot"><iframe src="a-card-toolbar.html" loading="lazy" scrolling="no"></iframe><a href="a-card-toolbar.html"></a></div>
+      <div class="meta">
+        <div class="row"><span class="num">1</span><span class="name">纯文字控件</span></div>
+        <p class="desc">工具行两个控件平时只是图标 + 文字 + 箭头，没有边框和底色，hover 才浮出一层浅底。比基准版松一档，最贴近参考图。</p>
+        <p class="kv"><span>间距</span>gap 20px · 字号 12.5px</p>
+        <p class="kv"><span>圆角</span>16px</p>
+        <div class="tags"><span class="tag pro">最安静</span><span class="tag pro">最像参考图</span><span class="tag con">可点性最弱</span></div>
+        <a class="open" href="a-card-toolbar.html">打开预览 →</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="shot"><iframe src="b-chip-toolbar.html" loading="lazy" scrolling="no"></iframe><a href="b-chip-toolbar.html"></a></div>
+      <div class="meta">
+        <div class="row"><span class="num">2</span><span class="name">胶囊控件行</span></div>
+        <p class="desc">两个控件都是带边框的胶囊 chip，之间用细竖线分隔 —— 一眼看出「这些是能点的」。卡片圆角更大、阴影更轻。</p>
+        <p class="kv"><span>间距</span>gap 9px · 胶囊</p>
+        <p class="kv"><span>圆角</span>20px</p>
+        <div class="tags"><span class="tag pro">可点性清楚</span><span class="tag con">比 1 抢眼</span></div>
+        <a class="open" href="b-chip-toolbar.html">打开预览 →</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="shot"><iframe src="c-dark.html" loading="lazy" scrolling="no"></iframe><a href="c-dark.html"></a></div>
+      <div class="meta">
+        <div class="row"><span class="num">3</span><span class="name">深色开发者向</span></div>
+        <p class="desc">只换皮肤：深炭底 + 冷蓝 accent + mono 主导。用来确认这套结构在夜间 / 深色终端下同样成立。</p>
+        <p class="kv"><span>间距</span>同 1</p>
+        <p class="kv"><span>圆角</span>16px</p>
+        <div class="tags"><span class="tag pro">护眼</span><span class="tag pro">终端气质</span><span class="tag con">与暖纸主题冲突</span></div>
+        <a class="open" href="c-dark.html">打开预览 →</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="shot"><iframe src="d-minimal.html" loading="lazy" scrolling="no"></iframe><a href="d-minimal.html"></a></div>
+      <div class="meta">
+        <div class="row"><span class="num">4</span><span class="name">极简灰阶</span></div>
+        <p class="desc">页面与卡片同色（纯白），卡片只靠一道发丝边和几乎看不见的阴影区分；工具行字更小更淡，hover 前近乎隐形，间距最松。</p>
+        <p class="kv"><span>间距</span>gap 22px · 字号 12px</p>
+        <p class="kv"><span>圆角</span>14px</p>
+        <div class="tags"><span class="tag pro">干扰最少</span><span class="tag con">层级最弱</span></div>
+        <a class="open" href="d-minimal.html">打开预览 →</a>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

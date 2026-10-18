@@ -20,6 +20,23 @@ export interface SessionMeta {
   tags?: string[];
   /** Session id this one was branched from (set by /fork). */
   forkedFrom?: string;
+  /**
+   * First line of the first user message, derived on read (never persisted) so
+   * lists have something friendlier than the id to show. An explicit `title`
+   * (set via /rename or the GUI) always wins over it.
+   */
+  preview?: string;
+}
+
+export interface SessionSubCall {
+  /** The parent `task` tool_use this call belongs to. */
+  toolUseId: string;
+  name: string;
+  inputPreview: string;
+  ok?: boolean;
+  result?: string;
+  /** The subagent's own model round (1-based). */
+  round?: number;
 }
 
 function fileFor(id: string) {
@@ -51,20 +68,35 @@ export async function appendMessages(id: string, messages: MessageParam[]) {
 export async function rewriteMessages(id: string, messages: MessageParam[]) {
   const file = fileFor(id);
   let metaLine = "";
+  const extras: string[] = [];
   try {
     const raw = await fs.readFile(file, "utf8");
-    metaLine = raw.split("\n").find((l) => l.trim().startsWith('{"type":"meta"')) ?? "";
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      if (!metaLine && line.trim().startsWith('{"type":"meta"')) metaLine = line;
+      // UI-only records survive compaction so the transcript keeps its chains.
+      else if (line.includes('"type":"subcall"')) extras.push(line);
+    }
   } catch {
     return; // no session file: nothing to rewrite
   }
   if (!metaLine) return;
   const lines = messages.map((m) => JSON.stringify({ type: "message", message: m })).join("\n");
-  await fs.writeFile(file, metaLine + "\n" + (lines ? lines + "\n" : ""), "utf8");
+  const out = [metaLine, ...extras, ...(lines ? [lines] : [])];
+  await fs.writeFile(file, out.join("\n") + "\n", "utf8");
 }
 
 /** Append a model marker; the last one in the file is the session's model. */
 export async function appendModel(id: string, model: string) {
   await fs.appendFile(fileFor(id), JSON.stringify({ type: "model", model }) + "\n");
+}
+
+/**
+ * Record one tool call a subagent performed. UI-only: `loadSession` keeps these
+ * out of `messages`, so the model never sees them.
+ */
+export async function appendSubCall(id: string, call: SessionSubCall) {
+  await fs.appendFile(fileFor(id), JSON.stringify({ type: "subcall", ...call }) + "\n", "utf8");
 }
 
 /**
@@ -176,6 +208,8 @@ export async function deleteSession(id: string): Promise<boolean> {
 interface ParsedSession {
   meta: SessionMeta;
   messages: MessageParam[];
+  /** Subagent call chains recorded for the UI (never sent to the model). */
+  subCalls: SessionSubCall[];
 }
 
 /** Single-pass parse of a session file; updatedAt comes from the file mtime. */
@@ -190,6 +224,7 @@ async function parseSessionFile(full: string): Promise<ParsedSession | null> {
   }
   let meta: SessionMeta | null = null;
   const messages: MessageParam[] = [];
+  const subCalls: SessionSubCall[] = [];
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     try {
@@ -206,11 +241,41 @@ async function parseSessionFile(full: string): Promise<ParsedSession | null> {
         };
       else if (obj.type === "model" && meta) meta.model = obj.model; // last marker wins
       else if (obj.type === "message" && meta) messages.push(obj.message);
+      else if (obj.type === "subcall" && typeof obj.toolUseId === "string") {
+        subCalls.push({
+          toolUseId: obj.toolUseId,
+          name: typeof obj.name === "string" ? obj.name : "",
+          inputPreview: typeof obj.inputPreview === "string" ? obj.inputPreview : "",
+          ok: obj.ok !== false,
+          result: typeof obj.result === "string" ? obj.result : undefined,
+          round: typeof obj.round === "number" ? obj.round : undefined,
+        });
+      }
     } catch {
       /* skip corrupt line */
     }
   }
-  return meta ? { meta, messages } : null;
+  return meta ? { meta: { ...meta, preview: derivePreview(messages) }, messages, subCalls } : null;
+}
+
+/**
+ * Short, single-line label from the first user message. `@file` expansions
+ * (inlined as <file …>…</file>) are stripped so the preview reads like the
+ * prompt the user typed, not the file dump.
+ */
+function derivePreview(messages: MessageParam[]): string | undefined {
+  for (const m of messages) {
+    if (m.role !== "user") continue;
+    const text =
+      typeof m.content === "string" ? m.content : m.content.map((b) => (b.type === "text" ? b.text : "")).join(" ");
+    const clean = text
+      .replace(/<file\b[^>]*>[\s\S]*?<\/file>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!clean) continue;
+    return clean.length > 48 ? `${clean.slice(0, 48).trimEnd()}…` : clean;
+  }
+  return undefined;
 }
 
 export async function loadSession(id: string): Promise<ParsedSession | null> {

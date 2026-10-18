@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>mojo · 4 极简灰阶</title>
+<link rel="stylesheet" href="base.css" />
+<style>
+/* ============================================================
+   4 · 极简灰阶
+   页面与卡片同色（纯白），卡片只靠一道发丝边和几乎看不见的阴影区分；
+   工具行的字更小更淡，hover 之前近乎隐形。结构不变，追求「界面尽量不存在」。
+   ============================================================ */
+:root{
+  --page:#ffffff;--card:#ffffff;--card-line:#eef0f3;
+  --card-shadow:0 1px 2px rgba(20,22,28,.03);
+  --card-shadow-2:0 14px 38px rgba(20,22,28,.13);
+  --ink:#1b1e24;--dim:#767d88;--faint:#b0b6bf;
+  --line:#f1f3f6;--line-2:#e7eaef;
+  --accent:#4f46e5;--accent-soft:#4f46e50d;
+  --radius:14px;--tb-gap:22px;--tb-font:12px;
+}
+#sidebar{background:#fff;border-right-color:var(--line)}
+.card{padding:16px 18px 12px}
+.toolbar{padding:9px 4px 0}
+.tb-btn{padding:2px 3px}
+.tb-btn:hover{background:transparent}
+.tb-ico{opacity:.7}
+.tb-caret{opacity:.6}
+.pop{border-radius:12px}
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div class="side-head"><span class="brand">mojo<i>.</i></span><span class="ver">v0.1.0</span></div>
+    <div class="side-new"><button id="new-session">＋ 新建任务</button></div>
+    <div class="side-search"><input id="session-search" placeholder="搜索历史会话…" /></div>
+    <div class="side-label">任务</div>
+    <div class="session-list">
+      <div class="session-item active">
+        <div class="s-title">修复 WebSocket 超时重连</div>
+        <div class="s-meta"><span>D:\work\mojo</span><span>刚刚</span></div>
+        <div class="s-tags">#bug #ws</div>
+      </div>
+      <div class="session-item">
+        <div class="s-title">把 multi_edit 的 diff 合并逻辑抽出来</div>
+        <div class="s-meta"><span>D:\work\web-console</span><span>2 小时前</span></div>
+        <div class="s-tags">#refactor</div>
+      </div>
+      <div class="session-item">
+        <div class="s-title">压缩：交接笔记信息衰减</div>
+        <div class="s-meta"><span>D:\work\mojo</span><span>昨天</span></div>
+      </div>
+      <div class="session-item">
+        <div class="s-title">Windows 下 pwsh 危险命令检测</div>
+        <div class="s-meta"><span>C:\Users\admin\code\rag-lab</span><span>周三</span></div>
+        <div class="s-tags">#win</div>
+      </div>
+    </div>
+    <div class="side-foot"><button class="quit">⏻ 退出</button></div>
+  </aside>
+
+  <main id="main">
+    <section id="transcript">
+      <div class="msg user">帮我看看 src/llm/openai.ts —— 流式解析在断线重连之后，会把已经吐过的那一段再重复输出一次。找下根因。</div>
+
+      <div class="tool-card">
+        <div class="tool-head"><span class="think-icon">✻</span><span class="tool-name">思考</span><span class="tool-preview">重连时 buffer 没清空，已 flush 的 delta 再次进入拼接…</span></div>
+        <div class="tool-body"><pre>两条线索：
+1. 重试循环是否复用了上一次的 partial text buffer
+2. 断点恢复时 lastEmittedIndex 是否被重置为 0</pre></div>
+      </div>
+
+      <div class="tool-card open">
+        <div class="tool-head"><span class="tool-status ok"></span><span class="tool-name">read_file</span><span class="tool-preview">src/llm/openai.ts · 1–160</span></div>
+        <div class="tool-body"><pre>export async function* streamChat(req: ChatRequest, signal?: AbortSignal) {
+  let emitted = "";
+  let retries = 0;
+  while (true) {
+    try {
+      const stream = await client.chat.completions.create({ ...req, stream: true });
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta?.content ?? "";
+        if (!delta) continue;
+        emitted += delta;          // ← 重连后 emitted 未重置
+        yield { type: "delta", text: delta };
+      }
+      return;
+    } catch (err) {
+      if (++retries > 3) throw err;
+    }
+  }
+}</pre></div>
+      </div>
+
+      <div class="msg assistant">
+        <div class="who">mojo</div>
+        <div class="md">
+          <p>根因在重试循环里：<code>emitted</code> 是<strong>循环外</strong>声明的，重连成功后会从断点继续累加，而上层把它当作「本轮全部产出」重新回填了一遍。</p>
+          <h3>修法</h3>
+          <p>把「已发出去的长度」当锚点，重连后只 yield 增量：</p>
+          <pre><code>catch (err) {
+  if (++retries &gt; 3) throw err;
+  emitted = emitted.slice(0, lastYielded);
+}</code></pre>
+        </div>
+      </div>
+
+      <div class="msg assistant"><div class="wait"><i></i><i></i><i></i><span style="margin-left:6px">正在应用修改…</span></div></div>
+    </section>
+
+    <div id="composer">
+      <div class="composer-wrap">
+        <div class="card">
+          <textarea id="input" rows="1" placeholder="今天帮你做些什么？ @ 添加上下文，/ 调用技能与指令"></textarea>
+          <div class="card-row">
+            <button class="icon-btn" title="添加图片">＋</button>
+            <span class="sp"></span>
+            <div class="model-btn">
+              <span class="logo">M</span>
+              <select>
+                <option>claude-sonnet-4-5</option>
+                <option>claude-opus-4-1</option>
+                <option>openai:gpt-4o</option>
+              </select>
+              <span class="caret">⌄</span>
+            </div>
+            <button id="send" title="发送" disabled>↑</button>
+          </div>
+        </div>
+
+        <div class="toolbar">
+          <div class="tb-item">
+            <button class="tb-btn" data-pop="ws-pop" title="当前项目目录 D:\work\mojo">
+              <span class="tb-ico">📁</span>
+              <span class="tb-label ws-label">选择工作空间</span>
+              <span class="tb-caret">⌄</span>
+            </button>
+            <div class="pop hidden" id="ws-pop" data-pick="one">
+              <div class="pop-head">最近项目</div>
+              <button class="pop-item on" data-set=".ws-label" data-label="mojo">
+                <span class="p-ico">▸</span>
+                <span class="p-text"><span class="p-name">D:\work\mojo</span></span>
+                <span class="p-cur">当前</span>
+              </button>
+              <button class="pop-item" data-set=".ws-label" data-label="web-console">
+                <span class="p-ico">▸</span>
+                <span class="p-text"><span class="p-name">D:\work\web-console</span></span>
+                <span class="p-when">2 小时前</span>
+              </button>
+              <button class="pop-item" data-set=".ws-label" data-label="rag-lab">
+                <span class="p-ico">▸</span>
+                <span class="p-text"><span class="p-name">C:\Users\admin\code\rag-lab</span></span>
+                <span class="p-when">昨天</span>
+              </button>
+              <button class="pop-item" data-set=".ws-label" data-label="mojo-docs">
+                <span class="p-ico">▸</span>
+                <span class="p-text"><span class="p-name">D:\docs\mojo-docs</span></span>
+                <span class="p-when">上周</span>
+              </button>
+              <div class="pop-sep"></div>
+              <button class="pop-item">
+                <span class="p-ico">📂</span>
+                <span class="p-text"><span class="p-name">打开文件夹…</span><span class="p-desc">选择本机任意目录</span></span>
+              </button>
+            </div>
+          </div>
+
+          <div class="tb-item">
+            <button class="tb-btn" data-pop="perm-pop" title="权限模式">
+              <span class="tb-ico">ⓘ</span>
+              <span class="tb-label perm-label">允许完全访问</span>
+              <span class="tb-caret">⌄</span>
+            </button>
+            <div class="pop hidden" id="perm-pop" data-pick="one">
+              <div class="pop-head">权限模式</div>
+              <button class="pop-item" data-set=".perm-label" data-label="每次都问">
+                <span class="p-ico">○</span>
+                <span class="p-text"><span class="p-name">每次都问</span><span class="p-desc">写操作和危险命令都先确认</span></span>
+              </button>
+              <button class="pop-item" data-set=".perm-label" data-label="自动批准">
+                <span class="p-ico">◐</span>
+                <span class="p-text"><span class="p-name">自动批准</span><span class="p-desc">非高危写操作自动放行</span></span>
+              </button>
+              <button class="pop-item on" data-set=".perm-label" data-label="允许完全访问">
+                <span class="p-ico">◑</span>
+                <span class="p-text"><span class="p-name">允许完全访问</span><span class="p-desc">批准一切，含危险命令（YOLO）</span></span>
+              </button>
+              <div class="pop-sep"></div>
+              <button class="pop-item" data-set=".perm-label" data-label="PLAN 计划模式">
+                <span class="p-ico">◻</span>
+                <span class="p-text"><span class="p-name">PLAN 计划模式</span><span class="p-desc">只读探索，先出计划待你批准，批准前不写任何文件</span></span>
+              </button>
+            </div>
+          </div>
+
+          <span class="sp"></span>
+          <span class="tb-meta">ses_a91f3c</span>
+          <span class="tb-sep"></span>
+          <span class="tb-meta">ctx <b>42%</b></span>
+          <span class="tb-sep"></span>
+          <span class="tb-meta">$0.83</span>
+          <span class="tb-sep"></span>
+          <span class="tb-meta">bg1 运行中</span>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="demo.js"></script>
+</body>
+</html>

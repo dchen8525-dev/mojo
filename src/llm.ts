@@ -7,6 +7,7 @@ import { StreamInterrupted } from "./llm/types.js";
 import { AnthropicBackend } from "./llm/anthropic.js";
 import { OpenAiBackend } from "./llm/openai.js";
 import { lookupModel } from "./llm/models.js";
+import { fetchModelMeta, getModelMeta, setModelMeta, type ModelMeta } from "./modelMeta.js";
 
 export type { AssistantTurn, StreamEvents, Provider } from "./llm/types.js";
 export { knownModelNames, lookupModel } from "./llm/models.js";
@@ -16,6 +17,8 @@ export interface Config {
   model?: string;
   baseURL?: string;
   apiKey?: string;
+  /** Override the model's context window (tokens) instead of guessing it. */
+  contextWindow?: number;
   /** UI theme: "dark" | "light" | "auto" (see src/ui/theme.ts). */
   theme?: string;
 }
@@ -80,8 +83,9 @@ export function resolveSettings(opts: LLMOptions = {}) {
     opts.baseURL ?? ov.baseURL ?? env.AGENT_BASE_URL ?? (provider === "openai" ? env.OPENAI_BASE_URL : env.ANTHROPIC_BASE_URL) ?? file.baseURL;
   const apiKey =
     opts.apiKey ?? ov.apiKey ?? (provider === "openai" ? env.OPENAI_API_KEY : env.ANTHROPIC_API_KEY) ?? file.apiKey;
+  const contextWindow = opts.contextWindow ?? ov.contextWindow ?? file.contextWindow;
 
-  return { provider, model, baseURL, apiKey };
+  return { provider, model, baseURL, apiKey, contextWindow };
 }
 
 /**
@@ -123,15 +127,28 @@ export function parseModelSpec(spec: string, currentProvider: Provider): Config 
 export class LLM {
   private backend: LLMBackend;
   private cwd: string;
-  provider: Provider;
-  model: string;
+  /** Credentials/baseURL for the *current* model, kept for metadata lookups. */
+  private baseURL?: string;
+  private apiKey?: string;
+  /** Explicit window from config — wins over endpoint metadata and the table. */
+  private ctxWindow?: number;
+  provider!: Provider;
+  model!: string;
 
   constructor(opts: LLMOptions = {}) {
     this.cwd = opts.cwd ?? process.cwd();
     const s = resolveSettings(opts);
+    this.adopt(s);
+    this.backend = this.build(s);
+  }
+
+  /** Point this instance at a resolved settings object. */
+  private adopt(s: { provider: Provider; model: string; baseURL?: string; apiKey?: string; contextWindow?: number }): void {
     this.provider = s.provider;
     this.model = s.model;
-    this.backend = this.build(s);
+    this.baseURL = s.baseURL;
+    this.apiKey = s.apiKey;
+    this.ctxWindow = s.contextWindow;
   }
 
   private build(s: { provider: Provider; model: string; baseURL?: string; apiKey?: string }): LLMBackend {
@@ -154,8 +171,7 @@ export class LLM {
       );
     }
     this.backend = this.build(s);
-    this.provider = s.provider;
-    this.model = s.model;
+    this.adopt(s);
     // Only provider+model are pinned session-wide; credentials/baseURL always
     // resolve per-provider from env/config so switching back picks up the
     // right key for each provider.
@@ -163,9 +179,53 @@ export class LLM {
     return { provider: this.provider, model: this.model };
   }
 
-  /** Total input context window for the current model, in tokens. */
+  /**
+   * Rebind this instance to an explicit config (the GUI's LLM profile picker).
+   * Unlike `switchModel` this pins the *whole* config — baseURL and apiKey
+   * included — into the module-level override, so the rest of this process
+   * (subagents included) uses exactly that profile rather than whatever env or
+   * a project-level config.json would otherwise supply.
+   * Throws before changing anything if the config resolves to no API key.
+   */
+  applyConfig(cfg: Config): { provider: Provider; model: string } {
+    const s = resolveSettings({ ...cfg, cwd: this.cwd });
+    if (!s.apiKey) {
+      throw new Error(`No API key for provider "${s.provider}" - fill in an API key for this configuration.`);
+    }
+    this.backend = this.build(s);
+    this.adopt(s);
+    setModelOverride(cfg);
+    return { provider: this.provider, model: this.model };
+  }
+
+  /**
+   * Context window for the current model, in tokens:
+   *   explicit config (`contextWindow`) > endpoint /models metadata > local table.
+   */
   get contextWindow(): number {
-    return lookupModel(this.model).contextWindow;
+    if (this.ctxWindow) return this.ctxWindow;
+    const meta = getModelMeta(this.provider, this.baseURL, this.model);
+    return meta?.contextWindow ?? lookupModel(this.model).contextWindow;
+  }
+
+  /**
+   * Ask the endpoint's model list for a context window. Cheap to call: a
+   * per-(provider, endpoint, model) cache short-circuits repeat lookups.
+   * Never throws — the static table stays the fallback.
+   */
+  async refreshModelMeta(force = false): Promise<ModelMeta | null> {
+    if (!force) {
+      const hit = getModelMeta(this.provider, this.baseURL, this.model);
+      if (hit) return hit;
+    }
+    const meta = await fetchModelMeta({
+      provider: this.provider,
+      model: this.model,
+      baseURL: this.baseURL,
+      apiKey: this.apiKey,
+    });
+    if (meta) setModelMeta(this.provider, this.baseURL, this.model, meta);
+    return meta;
   }
 
   /** Model ids served by the current endpoint (may throw if unsupported). */

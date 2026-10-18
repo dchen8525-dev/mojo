@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>mojo · 应用图标 5 选 1</title>
+<style>
+:root{
+  --bg:#f5f6f8;--card:#fff;--fg:#16181d;--dim:#5c6370;--faint:#8c939f;
+  --line:#e3e6eb;--accent:#b45309;
+  --mono:"Cascadia Code","Consolas",monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:14px/1.65 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:1120px;margin:0 auto;padding:44px 28px 80px}
+h1{margin:0 0 8px;font-size:27px;letter-spacing:-.02em}
+.lead{margin:0 0 6px;color:var(--dim)}
+.note{color:var(--faint);font-size:12.5px;margin-bottom:30px}
+.note code{font-family:var(--mono);font-size:12px;background:#eceef2;padding:1px 6px;border-radius:4px}
+.row{
+  background:var(--card);border:1px solid var(--line);border-radius:14px;
+  padding:18px 20px;margin-bottom:16px;display:flex;gap:26px;align-items:flex-start;
+  box-shadow:0 2px 10px rgba(22,24,29,.04);
+}
+.hero{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:8px}
+.hero img{width:128px;height:128px;border-radius:28px;box-shadow:0 6px 18px rgba(22,24,29,.12)}
+.hero span{font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+.meta{flex:1;min-width:0}
+.name{display:flex;align-items:baseline;gap:10px;margin:4px 0 6px}
+.num{font-family:var(--mono);font-size:11px;color:var(--faint)}
+.name b{font-size:17px;letter-spacing:-.01em}
+.en{font-family:var(--mono);font-size:11.5px;color:var(--faint)}
+.desc{margin:0 0 10px;color:var(--dim);font-size:13px}
+.why{margin:0 0 12px;color:var(--faint);font-size:12px}
+.sizes{display:flex;gap:18px;flex-wrap:wrap}
+.sz{display:flex;align-items:center;gap:8px}
+.sz .tile{
+  display:flex;align-items:center;justify-content:center;
+  border-radius:10px;padding:8px 10px;min-width:44px;min-height:44px;
+}
+.sz .light{background:#f1f3f6}
+.sz .dark{background:#171a1f}
+.sz .lbl{font-family:var(--mono);font-size:10px;color:var(--faint)}
+.sz img{display:block}
+.hint{margin-top:6px;font-size:11.5px;color:var(--faint)}
+footer{margin-top:26px;color:var(--faint);font-size:12.5px;line-height:1.9}
+footer b{color:var(--dim)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>mojo · 应用 / 任务栏图标</h1>
+  <p class="lead">Electron 目前没有设置图标（显示的是 Electron 默认图标）。这是 5 个候选，都按「16×16 还能认出来」设计，配色取自 Porcelain 主题。</p>
+  <p class="note">文件在 <code>ui-demos/icons/</code>，都是 SVG；选定后我会把它接进 <code>BrowserWindow({ icon })</code>，并生成 Windows 需要的 PNG / ICO。</p>
+
+  <div class="row">
+    <div class="hero"><img src="01-m-dot.svg" alt="01" /><span>128px</span></div>
+    <div class="meta">
+      <div class="name"><span class="num">01</span><b>m.</b><span class="en">wordmark</span></div>
+      <p class="desc">纸底 + 黑色几何 <b>m</b> + 琥珀句点，直接来自侧栏的 <code>mojo.</code> 字样。最贴合现有品牌，最安静。</p>
+      <p class="why">识别点：两个拱 + 右下角那个橙点。</p>
+      <div class="sizes">
+        <div class="sz"><span class="lbl">64</span><div class="tile light"><img src="01-m-dot.svg" width="64" height="64" /></div></div>
+        <div class="sz"><span class="lbl">32</span><div class="tile light"><img src="01-m-dot.svg" width="32" height="32" /></div></div>
+        <div class="sz"><span class="lbl">16</span><div class="tile light"><img src="01-m-dot.svg" width="16" height="16" /></div></div>
+        <div class="sz"><span class="lbl">16</span><div class="tile dark"><img src="01-m-dot.svg" width="16" height="16" /></div></div>
+        <div class="sz"><span class="lbl">32</span><div class="tile dark"><img src="01-m-dot.svg" width="32" height="32" /></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="hero"><img src="02-brackets.svg" alt="02" /><span>128px</span></div>
+    <div class="meta">
+      <div class="name"><span class="num">02</span><b>[ · ]</b><span class="en">brackets</span></div>
+      <p class="desc">墨底 + 琥珀大方括号 + 中间一个小圆点，像「代码容器里跑着一个东西」。深底在浅色任务栏上最跳。</p>
+      <p class="why">识别点：一对括号 + 中心白点，16px 下退化成两个竖条 + 一点。</p>
+      <div class="sizes">
+        <div class="sz"><span class="lbl">64</span><div class="tile light"><img src="02-brackets.svg" width="64" height="64" /></div></div>
+        <div class="sz"><span class="lbl">32</span><div class="tile light"><img src="02-brackets.svg" width="32" height="32" /></div></div>
+        <div class="sz"><span class="lbl">16</span><div class="tile light"><img src="02-brackets.svg" width="16" height="16" /></div></div>
+        <div class="sz"><span class="lbl">16</span><div class="tile dark"><img src="02-brackets.svg" width="16" height="16" /></div></div>
+        <div class="sz"><span class="lbl">32</span><div class="tile dark"><img src="02-brackets.svg" width="32" height="32" /></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="hero"><img src="03-m-solid.svg" alt="03" /><span>128px</span></div>
+    <div class="meta">
+      <div class="name"><span class="num">03</span><b>M</b><span class="en">solid tile</span></div>
+      <p class="desc">整块琥珀底 + 白色几何 M。对比度最高、最「像个应用」，在深色任务栏和浅色任务栏上都稳。</p>
+      <p class="why">识别点：实心暖色方块本身就是视觉锚，16px 下仍然清楚。</p>
+      <div class="sizes">
+        <div class="sz"><span class="lbl">64</span><div class="tile light"><img src="03-m-solid.svg" width="64" height="64" /></div></div>
+        <div class="sz"><span class="lbl">32</span><div class="tile light"><img src="03-m-solid.svg" width="32" height="32" /></div></div>
+        <div class="sz"><span class="lbl">16</span><div class="tile light"><img src="03-m-solid.svg" width="16" height="16" /></div></div>
+        <div class="sz"><span class="lbl">16</span><div class="tile dark"><img src="03-m-solid.svg" width="16" height="16" /></div></div>
+        <div class="sz"><span class="lbl">32</span><div class="tile dark"><img src="03-m-solid.svg" width="32" height="32" /></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="hero"><img src="04-prompt.svg" alt="04" /><span>128px</span></div>
+    <div class="meta">
+      <div class="name"><span class="num">04</span><b>›_</b><span class="en">prompt</span></div>
+      <p class="desc">墨底 + 琥珀提示符 + 白色下划线。最直白地说明「这是个跑在终端里的编程智能体」，和 mojo 的气质一致。</p>
+      <p class="why">识别点：左边一个尖括号、右下一道短横，图形语言最独特。</p>
+      <div class="sizes">
+        <div class="sz"><span class="lbl">64</span><div class="tile light"><img src="04-prompt.svg" width="64" height="64" /></div></div>
+        <div class="sz"><span class="lbl">32</span><div class="tile light"><img src="04-prompt.svg" width="32" height="32" /></div></div>
+        <div class="sz"><span class="lbl">16</span><div class="tile light"><img src="04-prompt.svg" width="16" height="16" /></div></div>
+        <div class="sz"><span class="lbl">16</span><div class="tile dark"><img src="04-prompt.svg" width="16" height="16" /></div></div>
+        <div class="sz"><span class="lbl">32</span><div class="tile dark"><img src="04-prompt.svg" width="32" height="32" /></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="hero"><img src="05-loop.svg" alt="05" /><span>128px</span></div>
+    <div class="meta">
+      <div class="name"><span class="num">05</span><b>环 + 点</b><span class="en">agent loop</span></div>
+      <p class="desc">纸底 + 墨色圆环 + 顶部一个琥珀卫星点，指代「上下文 → 模型 → 工具」的循环。最抽象、最不像字母。</p>
+      <p class="why">识别点：一个环 + 顶部一点，16px 下像一枚印章。</p>
+      <div class="sizes">
+        <div class="sz"><span class="lbl">64</span><div class="tile light"><img src="05-loop.svg" width="64" height="64" /></div></div>
+        <div class="sz"><span class="lbl">32</span><div class="tile light"><img src="05-loop.svg" width="32" height="32" /></div></div>
+        <div class="sz"><span class="lbl">16</span><div class="tile light"><img src="05-loop.svg" width="16" height="16" /></div></div>
+        <div class="sz"><span class="lbl">16</span><div class="tile dark"><img src="05-loop.svg" width="16" height="16" /></div></div>
+        <div class="sz"><span class="lbl">32</span><div class="tile dark"><img src="05-loop.svg" width="32" height="32" /></div></div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <b>选定之后我会做：</b>把图标接进 <code>BrowserWindow({ icon })</code>（窗口 + 任务栏），生成 256/128/64/48/32/16 的 PNG 和一个多尺寸 <code>.ico</code>；如果你也想要<br />
+    macOS / Linux 的打包图标，一并生成 <code>.icns</code>。<br />
+    也可以组合：比如 <b>01 的配色 + 04 的图形</b>，说一声我调。
+  </footer>
+</div>
+</body>
+</html>

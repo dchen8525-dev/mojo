@@ -3,5 +3,6 @@ dist/
 .env
 .workbuddy/
 .commandcode/
+.trae/
 .vitest-out.log
 .vitest-all.log

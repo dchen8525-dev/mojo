@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>mojo · 项目入口 V5 图标按钮 + 居中面板</title>
+<link rel="stylesheet" href="base.css" />
+<style>
+/* ============================================================
+   V5 · 图标按钮 + 居中面板
+   底栏只放一个 24px 方形图标按钮（和「＋」同级），路径文本彻底从界面上消失，
+   只在 hover tooltip 和状态栏里出现。点击弹出居中面板：路径输入 + 最近项目 chips。
+   最省空间；切换项目本来就低频，用一次「正经的」弹窗反而更稳。
+   ============================================================ */
+#proj-btn{
+  width:24px;height:24px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;
+  background:transparent;border:1px solid var(--line-2);border-radius:var(--r);
+  font-size:11px;line-height:1;color:var(--dim);padding:0;transition:.15s;
+}
+#proj-btn:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+#statusbar .sb-proj{display:flex;align-items:center;gap:5px;color:var(--dim);min-width:0}
+#statusbar .sb-proj .proj-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* 居中面板：复用 .modal 外壳，内容自己排 */
+.proj-head{
+  font-family:var(--serif);font-size:16px;padding:16px 20px;border-bottom:1px solid var(--line);
+}
+.proj-body{padding:16px 20px;display:flex;flex-direction:column;gap:10px}
+.proj-lbl{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);font-weight:600}
+.proj-input{
+  width:100%;background:var(--paper-2);border:1px solid var(--line-2);border-radius:var(--r);
+  padding:9px 11px;font-family:var(--mono);font-size:12.5px;color:var(--ink);outline:none;
+}
+.proj-input:focus{border-color:var(--accent)}
+.proj-recent{display:flex;flex-wrap:wrap;gap:6px}
+.chip{
+  background:transparent;border:1px solid var(--line-2);border-radius:999px;padding:3px 11px;
+  font-family:var(--mono);font-size:11px;color:var(--dim);transition:.15s;
+}
+.chip:hover{border-color:var(--accent);color:var(--accent)}
+.proj-note{margin:2px 0 0;font-size:11.5px;color:var(--faint);line-height:1.7}
+</style>
+</head>
+<body data-view="transcript">
+<div id="app">
+  <aside id="sidebar">
+    <div class="side-head"><span class="brand">mojo<i>.</i></span><span class="ver">v0.1.0</span></div>
+    <div class="side-new"><button id="new-session">＋ 新建任务</button></div>
+    <div class="side-search"><input id="session-search" placeholder="搜索历史会话…" /></div>
+    <div class="side-label">任务</div>
+    <div class="session-list">
+      <div class="session-item active">
+        <div class="s-title">修复 WebSocket 超时重连</div>
+        <div class="s-meta"><span>D:\work\mojo</span><span>刚刚</span></div>
+        <div class="s-tags">#bug #ws</div>
+      </div>
+      <div class="session-item">
+        <div class="s-title">把 multi_edit 的 diff 合并逻辑抽出来</div>
+        <div class="s-meta"><span>D:\work\web-console</span><span>2 小时前</span></div>
+        <div class="s-tags">#refactor</div>
+      </div>
+      <div class="session-item">
+        <div class="s-title">压缩：交接笔记信息衰减</div>
+        <div class="s-meta"><span>D:\work\mojo</span><span>昨天</span></div>
+      </div>
+      <div class="session-item">
+        <div class="s-title">Windows 下 pwsh 危险命令检测</div>
+        <div class="s-meta"><span>C:\Users\admin\code\rag-lab</span><span>周三</span></div>
+        <div class="s-tags">#win</div>
+      </div>
+    </div>
+    <div class="side-foot"><button class="quit">⏻ 退出</button></div>
+  </aside>
+
+  <main id="main">
+    <div class="topbar">
+      <span class="t-title">修复 WebSocket 超时重连</span>
+      <span class="sp"></span>
+      <span class="crumb">ses_a91f3c</span>
+    </div>
+
+    <section id="welcome" class="welcome">
+      <h1>mojo，<em>帮你</em>。</h1>
+      <p>一个会话、一条命令。把仓库、报错、设计稿交给它，剩下的交给一轮轮工具调用。</p>
+      <div class="hints">
+        <button class="hint">解释这个仓库的架构</button>
+        <button class="hint">/review main 并发安全</button>
+        <button class="hint">修一下失败的测试</button>
+        <button class="hint">@src/llm/openai.ts 流式解析</button>
+      </div>
+    </section>
+
+    <section id="transcript">
+      <div class="msg user">帮我看看 src/llm/openai.ts —— 流式解析在断线重连之后，会把已经吐过的那一段再重复输出一次。找下根因。</div>
+
+      <div class="tool-card">
+        <div class="tool-head"><span class="think-icon">✻</span><span class="tool-name">思考</span><span class="tool-preview">重连时 buffer 没清空，已 flush 的 delta 再次进入拼接…</span></div>
+        <div class="tool-body"><pre>两条线索：
+1. 重试循环是否复用了上一次的 partial text buffer
+2. 断点恢复时 lastEmittedIndex 是否被重置为 0</pre></div>
+      </div>
+
+      <div class="tool-card open">
+        <div class="tool-head"><span class="tool-status ok"></span><span class="tool-name">read_file</span><span class="tool-preview">src/llm/openai.ts · 1–160</span></div>
+        <div class="tool-body"><pre>export async function* streamChat(req: ChatRequest, signal?: AbortSignal) {
+  let emitted = "";
+  let retries = 0;
+  while (true) {
+    try {
+      const stream = await client.chat.completions.create({ ...req, stream: true });
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta?.content ?? "";
+        if (!delta) continue;
+        emitted += delta;          // ← 重连后 emitted 未重置
+        yield { type: "delta", text: delta };
+      }
+      return;
+    } catch (err) {
+      if (++retries > 3) throw err;
+    }
+  }
+}</pre></div>
+      </div>
+
+      <div class="msg assistant">
+        <div class="who">mojo</div>
+        <div class="md">
+          <p>根因在重试循环里：<code>emitted</code> 是<strong>循环外</strong>声明的，重连成功后会从断点继续累加，而上层把它当作「本轮全部产出」重新回填了一遍。</p>
+          <h3>修法</h3>
+          <p>把「已发出去的长度」当锚点，重连后只 yield 增量：</p>
+          <pre><code>catch (err) {
+  if (++retries &gt; 3) throw err;
+  emitted = emitted.slice(0, lastYielded);
+}</code></pre>
+          <ul>
+            <li><code>lastYielded</code> 在每次 <code>yield</code> 之后同步</li>
+            <li>退避重试保留，但不再污染文本流</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="msg assistant"><div class="wait"><i></i><i></i><i></i><span style="margin-left:6px">正在应用修改…</span></div></div>
+    </section>
+
+    <!-- 路径下沉到状态栏；底栏只留一个图标 -->
+    <footer id="statusbar">
+      <span class="sb-proj" title="当前项目目录">
+        <span>📁</span><span class="proj-label">D:\work\mojo</span>
+      </span>
+      <span class="sep">·</span><b>claude-sonnet-4-5</b><span class="sep">·</span>ctx 42% (84k/200k)<span class="sep">·</span>$0.83
+    </footer>
+
+    <div id="composer">
+      <div class="composer-box">
+        <textarea id="input" rows="1" placeholder="今天帮你做些什么？输入 / 调用命令"></textarea>
+        <div class="composer-bar">
+          <div class="bar-left">
+            <button id="attach" title="添加图片">＋</button>
+            <button id="proj-btn" data-pop="proj-modal" title="切换项目目录（D:\work\mojo）">📁</button>
+            <div class="mode-picker">
+              <button>默认</button><button class="active">自动</button><button>YOLO</button>
+            </div>
+            <label class="plan-toggle"><input type="checkbox" /> PLAN</label>
+          </div>
+          <div class="bar-right">
+            <div class="ctx" title="上下文占用"><span>42%</span><div class="track"><div class="fill"></div></div></div>
+            <div class="model-picker">
+              <select>
+                <option>claude-sonnet-4-5</option>
+                <option>claude-opus-4-1</option>
+                <option>openai:gpt-4o</option>
+              </select>
+            </div>
+            <button id="send" title="发送">↑</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- 切换项目：居中面板 -->
+<div id="proj-modal" class="modal hidden pop-panel">
+  <div class="modal-card narrow">
+    <div class="proj-head">切换项目目录</div>
+    <div class="proj-body">
+      <label class="proj-lbl">目标目录</label>
+      <input class="proj-input" value="D:\work\mojo" />
+      <label class="proj-lbl">最近</label>
+      <div class="proj-recent">
+        <button class="chip" data-set=".proj-input" data-label="D:\work\web-console">D:\work\web-console</button>
+        <button class="chip" data-set=".proj-input" data-label="C:\Users\admin\code\rag-lab">C:\Users\admin\code\rag-lab</button>
+        <button class="chip" data-set=".proj-input" data-label="D:\docs\mojo-docs">D:\docs\mojo-docs</button>
+      </div>
+      <p class="proj-note">切换会新建一个属于该目录的会话，并重载该项目的权限规则、hooks、自定义命令、LSP 与 MCP；旧项目仍在运行的后台任务会被终止。</p>
+    </div>
+    <div class="perm-actions">
+      <button>取消</button>
+      <button>浏览…</button>
+      <button class="primary">打开</button>
+    </div>
+  </div>
+</div>
+
+<div id="perm-modal" class="modal hidden">
+  <div class="modal-card">
+    <div class="perm-head"><span class="badge high">高风险</span><span class="perm-desc">写入 src/llm/openai.ts</span></div>
+    <pre class="perm-preview">  <span class="del">-      emitted += delta;</span>
+<span class="add">+      emitted += delta;</span>
+<span class="add">+      lastYielded = emitted.length;</span>
+   }
+   return;
+ } catch (err) {
+<span class="del">-      if (++retries &gt; 3) throw err;</span>
+<span class="add">+      if (++retries &gt; 3) throw err;</span>
+<span class="add">+      emitted = emitted.slice(0, lastYielded);</span>
+ }</pre>
+    <div class="perm-actions">
+      <button class="primary">允许一次<kbd>Y</kbd></button>
+      <button>总是允许<kbd>A</kbd></button>
+      <button>拒绝一次<kbd>N</kbd></button>
+      <button class="danger">总是拒绝<kbd>D</kbd></button>
+    </div>
+  </div>
+</div>
+
+<div class="demo-switch">
+  <span>V5 · 图标按钮</span>
+  <button data-view="welcome">欢迎页</button>
+  <button data-view="transcript" class="active">对话</button>
+  <button data-view="perm">授权弹窗</button>
+</div>
+<script src="demo.js"></script>
+</body>
+</html>

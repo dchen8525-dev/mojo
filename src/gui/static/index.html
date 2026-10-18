@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>mojo</title>
+    <link rel="icon" href="/icon.png" />
     <link rel="stylesheet" href="/style.css" />
     <script src="/vendor/marked.min.js"></script>
   </head>
@@ -21,26 +22,27 @@
         </div>
         <div class="side-label">任务</div>
         <div id="session-list" class="session-list"></div>
+        <div class="side-config">
+          <button id="llm-config" title="配置 LLM：格式 / API Key / Base URL / 模型">
+            <span class="cfg-icon">⚙</span>
+            <span>模型配置</span>
+          </button>
+        </div>
         <div class="side-foot">
-          <button id="quit" class="quit" title="退出">⏻ 退出</button>
+          <button id="quit" class="quit" title="退出">
+            <svg class="quit-ico" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+              <path d="M8 2v5.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+              <path d="M11.5 4.4a4.9 4.9 0 1 1-7 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+            </svg>
+            <span>退出</span>
+          </button>
         </div>
       </aside>
 
       <main id="main">
-        <div id="topbar">
-          <span class="crumb brand-crumb">mojo</span>
-          <button class="crumb crumb-btn" id="open-project" title="切换项目目录">
-            <span class="crumb-icon">📁</span>
-            <span id="crumb-cwd"></span>
-            <span class="crumb-caret">▾</span>
-          </button>
-          <span class="sp"></span>
-          <span class="crumb" id="crumb-session"></span>
-        </div>
-
         <section id="welcome" class="welcome">
           <h1>mojo，<em>帮你</em>。</h1>
-          <p class="welcome-sub">一个会话、一条命令。把仓库、报错、设计稿交给它，剩下的交给一轮轮工具调用。</p>
+          <p class="welcome-sub">说一句要做什么，剩下的交给它。</p>
           <div class="hints">
             <button class="hint" data-prompt="解释这个仓库的架构">解释这个仓库的架构</button>
             <button class="hint" data-prompt="/review main 并发安全">/review main 并发安全</button>
@@ -51,41 +53,74 @@
 
         <section id="transcript" class="hidden"></section>
 
-        <footer id="statusbar"></footer>
-
         <div id="composer">
-          <div id="attachments"></div>
           <div id="palette" class="hidden"></div>
-          <div id="model-pop" class="hidden">
-            <input id="model-input" placeholder="provider:model 或别名，回车确认" />
-            <button id="model-apply">切换</button>
-          </div>
-          <div class="composer-box">
+
+          <!-- 输入卡片：上文本域，下 右「模型 · 发送」 -->
+          <div class="card">
             <textarea id="input" rows="1" placeholder="今天帮你做些什么？输入 / 调用命令"></textarea>
-            <div class="composer-bar">
-              <div class="bar-left">
-                <button id="attach" title="添加图片">＋</button>
-                <div class="mode-picker" id="mode-picker">
-                  <button data-mode="default" class="active">默认</button>
-                  <button data-mode="auto">自动</button>
-                  <button data-mode="yolo">YOLO</button>
-                </div>
-                <label class="plan-toggle"><input type="checkbox" id="plan-toggle" /> PLAN</label>
+            <div class="card-row">
+              <div class="model-btn">
+                <span class="logo" id="model-logo">·</span>
+                <select id="model-select" title="选择模型" aria-label="选择模型"></select>
+                <span class="caret">⌄</span>
               </div>
-              <div class="bar-right">
-                <div class="ctx-bar" title="上下文占用">
-                  <div class="ctx-fill" id="ctx-fill"></div>
-                  <span id="ctx-text"></span>
-                </div>
-                <div class="model-picker">
-                  <select id="model-select" title="选择模型" aria-label="选择模型"></select>
-                  <button id="model-custom" title="自定义模型">✎</button>
-                </div>
-                <input type="file" id="file-input" accept="image/*" multiple hidden />
-                <button id="send" title="发送">↑</button>
-                <button id="stop" class="hidden" title="停止">■</button>
+              <button id="stop" class="hidden" title="停止">■</button>
+              <button id="send" title="发送">↑</button>
+            </div>
+          </div>
+
+          <!-- 卡片外下方那一行：左 工作空间 / 权限模式，右 会话·上下文·成本·后台任务 -->
+          <div class="toolbar">
+            <div class="tb-item">
+              <button class="tb-btn" id="open-project" title="切换工作目录">
+                <span class="tb-ico">📁</span>
+                <span class="tb-label" id="crumb-cwd">选择工作空间</span>
+                <span class="tb-caret">⌄</span>
+              </button>
+              <div class="pop hidden" id="ws-pop"></div>
+            </div>
+
+            <span class="tb-div"></span>
+
+            <div class="tb-item">
+              <button class="tb-btn" id="perm-btn" title="决定写文件、跑命令前是否需要确认">
+                <span class="tb-ico">ⓘ</span>
+                <span class="tb-label" id="perm-label">每次都问</span>
+                <span class="tb-caret">⌄</span>
+              </button>
+              <div class="pop hidden" id="perm-pop">
+                <div class="pop-head">模式</div>
+                <button class="pop-item" data-mode="default">
+                  <span class="p-ico">○</span>
+                  <span class="p-text"><span class="p-name">每次都问</span><span class="p-desc">每步操作都先确认</span></span>
+                </button>
+                <button class="pop-item" data-mode="auto">
+                  <span class="p-ico">◐</span>
+                  <span class="p-text"><span class="p-name">自动批准</span><span class="p-desc">常规操作自动放行，危险操作仍确认</span></span>
+                </button>
+                <button class="pop-item" data-mode="yolo">
+                  <span class="p-ico">◑</span>
+                  <span class="p-text"><span class="p-name">允许完全访问</span><span class="p-desc">全部放行，不再询问</span></span>
+                </button>
+                <div class="pop-sep"></div>
+                <button class="pop-item" data-plan="1">
+                  <span class="p-ico">◻</span>
+                  <span class="p-text"><span class="p-name">计划模式</span><span class="p-desc">只读分析，先出方案，不改文件</span></span>
+                </button>
               </div>
             </div>
+
+            <span class="sp"></span>
+            <span class="tb-meta tip" id="meta-session" data-tip="当前会话 ID，用 /resume &lt;id&gt; 可随时回到它"></span>
+            <span class="tb-sep" id="sep-ctx"></span>
+            <span class="tb-meta tip" id="meta-ctx" data-tip="上下文占用：估算 token ÷ 模型窗口。到 75% 会自动压缩"></span>
+            <span class="tb-sep" id="sep-cost"></span>
+            <span class="tb-meta tip" id="meta-cost" data-tip="本会话累计 API 费用；终端里用 /cost 看明细"></span>
+            <span class="tb-sep" id="sep-todo"></span>
+            <span class="tb-meta tip" id="meta-todo" data-tip="待办进度，由 todo_write 工具维护"></span>
+            <span class="tb-sep" id="sep-bg"></span>
+            <span class="tb-meta tip" id="meta-bg" data-tip="仍在运行的后台命令（bash run_in_background）"></span>
           </div>
         </div>
       </main>
@@ -103,6 +138,65 @@
           <button data-decision="always">总是允许 <kbd>A</kbd></button>
           <button data-decision="no">拒绝一次 <kbd>N</kbd></button>
           <button data-decision="always_deny" class="danger">总是拒绝 <kbd>D</kbd></button>
+        </div>
+      </div>
+    </div>
+
+    <div id="llm-modal" class="modal hidden">
+      <div class="modal-card cfg-card">
+        <div class="cfg-head">
+          <span class="cfg-title">LLM 配置</span>
+          <span id="cfg-active" class="cfg-active"></span>
+          <span class="sp"></span>
+          <button id="cfg-new" class="cfg-btn">＋ 新增</button>
+          <button id="cfg-close" class="cfg-x" title="关闭">✕</button>
+        </div>
+
+        <div class="cfg-body">
+          <div id="cfg-list" class="cfg-list"></div>
+
+          <form id="cfg-form" class="cfg-form hidden" autocomplete="off">
+            <div class="cfg-fields">
+              <label class="cfg-field">
+                <span>名称</span>
+                <input id="cfg-name" maxlength="40" placeholder="给这条配置起个名字" />
+              </label>
+              <label class="cfg-field">
+                <span>格式</span>
+                <select id="cfg-provider">
+                  <option value="anthropic">Anthropic</option>
+                  <option value="openai">OpenAI 兼容（GLM / DeepSeek / Qwen / 自建网关…）</option>
+                </select>
+              </label>
+              <label class="cfg-field">
+                <span>Base URL</span>
+                <input id="cfg-baseurl" placeholder="留空用官方默认地址" spellcheck="false" />
+              </label>
+              <label class="cfg-field">
+                <span>API Key</span>
+                <input id="cfg-key" type="password" placeholder="粘贴 API Key" spellcheck="false" />
+              </label>
+              <label class="cfg-field">
+                <span>模型</span>
+                <span class="cfg-model-row">
+                  <input id="cfg-model" list="cfg-model-list" placeholder="如 claude-sonnet-4-5 / deepseek-flash" spellcheck="false" />
+                  <button id="cfg-fetch" type="button" title="用上面的地址与 Key 拉取该端点的模型列表">拉取列表</button>
+                </span>
+              </label>
+              <datalist id="cfg-model-list"></datalist>
+              <label class="cfg-field">
+                <span>上下文窗口（可选）</span>
+                <input id="cfg-ctx" inputmode="numeric" placeholder="如 1048576；留空则按端点元数据或内置表" spellcheck="false" />
+              </label>
+            </div>
+
+            <p id="cfg-note" class="cfg-note hidden"></p>
+
+            <div class="cfg-actions">
+              <button id="cfg-save" class="primary" type="submit">保存</button>
+              <button id="cfg-cancel" type="button">取消</button>
+            </div>
+          </form>
         </div>
       </div>
     </div>

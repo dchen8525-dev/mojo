@@ -16,6 +16,7 @@
     "start": "node dist/cli.js",
     "gui": "npm run build && electron .",
     "gui:browser": "npm run build && node dist/cli.js --gui",
+    "icon": "electron scripts/make-icon.cjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- 04 · ›_ —— 墨底 + 琥珀提示符 + 下划线（终端 / 命令行智能体） -->
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#1c1917"/>
+  <path d="M20 22 L32 32 L20 42" fill="none" stroke="#b45309" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M36 42 H46" fill="none" stroke="#faf8f4" stroke-width="6" stroke-linecap="round"/>
+</svg>

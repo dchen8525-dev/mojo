@@ -79,13 +79,34 @@ const state = {
   planMode: false,
   mode: "default",
   sessionId: "",
+  cwd: "",
+  model: "",
+  sessions: [], // last /api/sessions result — drives the 最近项目 menu
   items: [], // {kind, ...} finalized transcript entries
   liveTurn: null, // {turnId, text, thinking, tools[]}
-  images: [], // pending attachments {media_type, data}
   perms: [], // queued permission requests
 };
 
 const transcriptEl = $("#transcript");
+
+/** 权限下拉的四个档位：前三档是 permissions.mode，PLAN 是 agent.planMode。 */
+const MODE_LABELS = { default: "每次都问", auto: "自动批准", yolo: "允许完全访问" };
+
+function baseName(p) {
+  const parts = String(p ?? "")
+    .split(/[\\/]+/)
+    .filter(Boolean);
+  return parts[parts.length - 1] ?? "";
+}
+
+function samePath(a, b) {
+  const norm = (p) =>
+    String(p ?? "")
+      .replace(/[\\/]+$/, "")
+      .replace(/\//g, "\\")
+      .toLowerCase();
+  return !!a && norm(a) === norm(b);
+}
 
 /* ---------------- rendering ---------------- */
 
@@ -141,46 +162,361 @@ function makeSystemItem(text, kind, highlight) {
   return div;
 }
 
+/* ---------------- tool cards ---------------- */
+
+const RESULT_PREVIEW_LINES = 12;
+const LONG_ARG = 80;
+
+/** One-line, human description of a call — used in the card head and the sub-chain. */
+function toolSummary(tool) {
+  const input = tool.input ?? {};
+  const str = (v) => (typeof v === "string" ? v : "");
+  const short = (t, n = 60) => (t && t.length > n ? t.slice(0, n) + "…" : t || "");
+  const result = tool.result ?? "";
+  const pick = (re) => {
+    const m = re.exec(result);
+    return m ? m[1] : "";
+  };
+
+  switch (tool.name) {
+    case "read_file": {
+      const from = Number(input.offset) || 1;
+      const limit = Number(input.limit);
+      const range = input.offset || input.limit ? ` · ${from}–${limit ? from + limit - 1 : "…"}` : "";
+      return str(input.path) + range;
+    }
+    case "write_file": {
+      const content = str(input.content);
+      return `${str(input.path)} · 写入 ${content ? content.split("\n").length : 0} 行`;
+    }
+    case "edit_file": {
+      const stat = /\+(\d+)\s*[−-]\s*(\d+)/.exec(result);
+      const n = /(\d+) replacement/.exec(result);
+      return str(input.path) + (stat ? ` · ${stat[0]}` : n ? ` · ${n[1]} 处替换` : "");
+    }
+    case "multi_edit":
+      return `${str(input.pattern)} · 搜 ${JSON.stringify(str(input.search))}`;
+    case "grep": {
+      const hits = pick(/(\d+)\s*(?:matches|处命中|match)/i);
+      return `${JSON.stringify(str(input.pattern))} · ${str(input.path) || "."}${hits ? ` · ${hits} 处` : ""}`;
+    }
+    case "glob_files": {
+      const n = pick(/(\d+)\s*(?:files|个文件|file)/i);
+      return `${str(input.pattern)}${n ? ` · ${n} 个` : ""}`;
+    }
+    case "bash": {
+      const code = pick(/\[exit code (\d+)\]/);
+      return `${short(str(input.command), 64)}${code ? ` · exit ${code}` : ""}`;
+    }
+    case "bash_output":
+    case "bash_kill":
+      return str(input.id);
+    case "task": {
+      const mode = input.mode === "worker" ? "编码" : "研究";
+      const calls = (tool.subCalls ?? []).length || Number(pick(/finished after (\d+) tool calls/)) || 0;
+      return `${mode} · ${str(input.description)}${calls ? ` · ${calls} calls` : ""}`;
+    }
+    case "web_search":
+      return short(str(input.query));
+    case "web_fetch":
+      return short(str(input.url));
+    case "todo_write":
+      return `${Array.isArray(input.todos) ? input.todos.length : 0} 项待办`;
+    case "get_diagnostics":
+      return str(input.path);
+    case "exit_plan":
+      return "提交计划";
+    default:
+      break;
+  }
+  if (tool.name.startsWith("git_")) {
+    return short(str(input.branch) || str(input.message) || str(input.base) || str(input.path) || tool.name);
+  }
+  for (const v of Object.values(input)) if (typeof v === "string" && v.trim()) return short(v);
+  return "";
+}
+
+function renderToolHead(card, tool) {
+  const head = el("div", "tool-head");
+  head.appendChild(el("span", "tool-status " + (tool.ok === undefined ? "running" : tool.ok ? "ok" : "err")));
+  head.appendChild(el("span", "tool-name", tool.name));
+  head.appendChild(el("span", "tool-summary", toolSummary(tool) || "正在生成参数…"));
+  head.appendChild(el("span", "tool-state", tool.ok === undefined ? "运行中" : tool.ok ? "✓" : "✗"));
+  head.onclick = () => card.classList.toggle("open");
+  return head;
+}
+
+function renderArgs(input) {
+  const box = el("div", "tool-args");
+  const entries = Object.entries(input ?? {});
+  if (!entries.length) {
+    box.appendChild(el("div", "tool-empty", "（无参数）"));
+    return box;
+  }
+  for (const [key, value] of entries) {
+    const text = typeof value === "string" ? value : JSON.stringify(value);
+    const row = el("div", "tool-arg" + (text.length > LONG_ARG ? " wide" : ""));
+    row.appendChild(el("span", "arg-key", key));
+    if (text.length > LONG_ARG) {
+      const pre = el("pre", "arg-value");
+      pre.textContent = text;
+      row.appendChild(pre);
+    } else {
+      row.appendChild(el("span", "arg-value", text));
+    }
+    box.appendChild(row);
+  }
+  return box;
+}
+
+/** Fill a <pre> with result lines, colouring +/- lines inside a diff block. */
+function fillResult(pre, lines, colored) {
+  for (const line of lines) {
+    let cls = "";
+    if (colored) {
+      if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("@@")) cls = "diff-hunk";
+      else if (line.startsWith("+")) cls = "diff-add";
+      else if (line.startsWith("-")) cls = "diff-del";
+    }
+    pre.appendChild(el("span", cls, line + "\n"));
+  }
+}
+
+function renderResult(tool) {
+  const section = el("div", "tool-section");
+  const label = el("div", "tool-label");
+  label.appendChild(el("span", "", "结果"));
+  section.appendChild(label);
+
+  if (tool.ok === undefined) {
+    section.appendChild(el("div", "tool-empty", "运行中…"));
+    return section;
+  }
+  const all = tool.result ? tool.result.split("\n") : [];
+  if (!all.length) {
+    section.appendChild(el("div", "tool-empty", "（空）"));
+    return section;
+  }
+
+  label.appendChild(el("span", "tool-count", `${all.length} 行`));
+  const colored = /<diff>|^@@ .*@@$/m.test(tool.result ?? "");
+  const clipped = all.length > RESULT_PREVIEW_LINES;
+  const pre = el("pre", "tool-result");
+  fillResult(pre, clipped ? all.slice(0, RESULT_PREVIEW_LINES) : all, colored);
+  section.appendChild(pre);
+  if (clipped) {
+    const more = el("button", "tool-more", `展开全部 ${all.length} 行`);
+    more.onclick = () => {
+      pre.replaceChildren();
+      fillResult(pre, all, colored);
+      more.remove();
+    };
+    section.appendChild(more);
+  }
+  return section;
+}
+
+/** Subagent chain: what the child did, summarised per call. */
+function subCallSummary(call) {
+  try {
+    return toolSummary({ name: call.name, input: JSON.parse(call.inputPreview), result: call.result ?? "" });
+  } catch {
+    return call.inputPreview || "";
+  }
+}
+
+/**
+ * Subagent chain as a call-stack tree:
+ *   task
+ *   └ 第 1 轮 · 3 次
+ *      ├ 01 read_file  src/llm.ts · 1–160
+ *      └ 02 grep       "resolveSettings" · 12 处
+ *   └ 第 2 轮 · 2 次
+ * Each row still expands to its arguments and result.
+ */
+function renderSubChain(calls, openSet) {
+  const section = el("div", "tool-section sub-chain");
+  const label = el("div", "tool-label");
+  label.appendChild(el("span", "", "调用链"));
+  label.appendChild(el("span", "tool-count", `${calls.length} 次`));
+  section.appendChild(label);
+
+  // Group by the subagent's own model round, keeping first-seen order.
+  const groups = [];
+  const indexOf = new Map();
+  calls.forEach((call, i) => {
+    indexOf.set(call, i);
+    const key = call.round ?? null;
+    let group = groups.find((g) => g.key === key);
+    if (!group) {
+      group = { key, calls: [] };
+      groups.push(group);
+    }
+    group.calls.push(call);
+  });
+
+  const tree = el("div", "sub-tree");
+  groups.forEach((group, gi) => {
+    const roundEl = el("div", "sub-round");
+    const rhead = el("div", "sub-round-head");
+    rhead.appendChild(el("span", "sub-rail", gi === groups.length - 1 ? "└" : "├"));
+    rhead.appendChild(el("span", "sub-round-label", group.key ? `第 ${group.key} 轮` : "调用"));
+    rhead.appendChild(el("span", "sub-round-count", `${group.calls.length} 次`));
+    roundEl.appendChild(rhead);
+
+    group.calls.forEach((call, ci) => {
+      const i = indexOf.get(call) ?? 0;
+      const item = el("div", "sub-item " + (call.ok === false ? "err" : "ok"));
+      if (openSet?.has(i)) item.classList.add("open");
+
+      const head = el("div", "sub-head");
+      head.appendChild(el("span", "sub-rail", ci === group.calls.length - 1 ? "└" : "├"));
+      head.appendChild(el("span", "sub-index", String(i + 1).padStart(2, "0")));
+      head.appendChild(el("span", "sub-name", call.name));
+      head.appendChild(el("span", "sub-sum", subCallSummary(call)));
+      head.appendChild(el("span", "sub-caret", "▸"));
+
+      const body = el("div", "sub-body");
+      let parsed = null;
+      try {
+        parsed = JSON.parse(call.inputPreview);
+      } catch {
+        parsed = null;
+      }
+      if (parsed && typeof parsed === "object") body.appendChild(renderArgs(parsed));
+      else if (call.inputPreview) {
+        const raw = el("pre", "arg-value");
+        raw.textContent = call.inputPreview;
+        body.appendChild(raw);
+      }
+      if (call.result) {
+        const pre = el("pre", "sub-result");
+        pre.textContent = call.result;
+        body.appendChild(pre);
+      }
+
+      head.onclick = () => {
+        const open = item.classList.toggle("open");
+        if (!openSet) return;
+        if (open) openSet.add(i);
+        else openSet.delete(i);
+      };
+
+      item.appendChild(head);
+      item.appendChild(body);
+      roundEl.appendChild(item);
+    });
+
+    tree.appendChild(roundEl);
+  });
+
+  section.appendChild(tree);
+  return section;
+}
+
+function renderToolInto(card, tool) {
+  card.replaceChildren();
+  card.appendChild(renderToolHead(card, tool));
+  const body = el("div", "tool-body");
+
+  const argsSection = el("div", "tool-section");
+  argsSection.appendChild(el("div", "tool-label", "参数"));
+  argsSection.appendChild(renderArgs(tool.input));
+  body.appendChild(argsSection);
+
+  body.appendChild(renderResult(tool));
+  if (tool.subCalls?.length) {
+    // Remember which rows the user expanded so a live refresh does not close them.
+    card._openSubs ??= new Set();
+    body.appendChild(renderSubChain(tool.subCalls, card._openSubs));
+  } else if (tool.name === "task" && /finished after \d+ tool calls/.test(tool.result ?? "")) {
+    // Older sessions were recorded before chains were persisted.
+    body.appendChild(el("div", "tool-empty", "（这次没有记录到子代理调用链）"));
+  }
+
+  card.appendChild(body);
+}
+
 function makeToolCard(tool) {
   const card = el("div", "tool-card");
-  const head = el("div", "tool-head");
-  const dot = el("span", "tool-status " + (tool.ok === undefined ? "running" : tool.ok ? "ok" : "err"));
-  head.appendChild(dot);
-  head.appendChild(el("span", "tool-name", "⚡ " + tool.name));
-  head.appendChild(el("span", "tool-preview", tool.result ? tool.result.split("\n")[0] : tool.inputPreview || "正在生成参数…"));
-  const body = el("div", "tool-body");
-  const pre = el("pre");
-  pre.textContent = `入参: ${tool.inputPreview || "…"}\n结果: ${tool.result ?? "…"}`;
-  body.appendChild(pre);
-  head.onclick = () => card.classList.toggle("open");
-  card.appendChild(head);
-  card.appendChild(body);
   card._tool = tool;
+  renderToolInto(card, tool);
   return card;
 }
 
 function refreshToolCard(card) {
-  const t = card._tool;
-  card.querySelector(".tool-status").className = "tool-status " + (t.ok === undefined ? "running" : t.ok ? "ok" : "err");
-  card.querySelector(".tool-preview").textContent = t.result ? t.result.split("\n")[0] : t.inputPreview || "正在生成参数…";
-  card.querySelector(".tool-body pre").textContent = `入参: ${t.inputPreview || "…"}\n结果: ${t.result ?? "…"}`;
+  if (!card || !card._tool) return;
+  const open = card.classList.contains("open");
+  renderToolInto(card, card._tool);
+  card.classList.toggle("open", open);
+}
+
+/* ---- round groups: one model response + the tools it asked for ---- */
+
+function makeToolGroup(round) {
+  const wrap = el("div", "tool-group");
+  const head = el("div", "tool-group-head");
+  head.appendChild(el("span", "tg-caret", "▾"));
+  head.appendChild(el("span", "tg-label", `第 ${round} 轮`));
+  const meta = el("span", "tg-meta", "");
+  head.appendChild(meta);
+  head.onclick = () => wrap.classList.toggle("collapsed");
+  const body = el("div", "tool-group-body");
+  wrap.appendChild(head);
+  wrap.appendChild(body);
+  wrap._round = round;
+  wrap._body = body;
+  wrap._meta = meta;
+  wrap._tools = 0;
+  updateGroupMeta(wrap);
+  return wrap;
+}
+
+function updateGroupMeta(wrap, ms) {
+  const parts = [`${wrap._tools} 个调用`];
+  if (ms !== undefined) parts.push(`${(ms / 1000).toFixed(1)}s`);
+  wrap._meta.textContent = parts.join(" · ");
+}
+
+function groupAddTool(wrap, card) {
+  wrap._body.appendChild(card);
+  wrap._tools += 1;
+  updateGroupMeta(wrap);
 }
 
 /* ---- thinking card ---- */
 
-function makeThinkingCard(text, open) {
-  const card = el("div", "tool-card thinking-card" + (open ? " open" : ""));
+/**
+ * Thinking is the model's inner voice, not tool output: same head shape as a
+ * tool card, but the body is rendered as Markdown behind a quiet left rail so
+ * it reads as prose instead of a log dump.
+ */
+function renderThinkingInto(card) {
+  const text = card._text ?? "";
+  const live = !!card._live;
+
+  card.replaceChildren();
   const head = el("div", "tool-head");
-  head.appendChild(el("span", "think-icon", "💭"));
-  head.appendChild(el("span", "tool-name", "思考过程"));
-  head.appendChild(el("span", "tool-preview", firstLine(text)));
-  const body = el("div", "tool-body");
-  const pre = el("pre");
-  pre.textContent = text;
-  body.appendChild(pre);
+  head.appendChild(el("span", "tool-status " + (live ? "running" : "done")));
+  head.appendChild(el("span", "tool-name", "思考"));
+  head.appendChild(el("span", "tool-preview", firstLine(text) || "…"));
+  head.appendChild(el("span", "tool-state", live ? "思考中…" : `${text.split("\n").length} 行`));
   head.onclick = () => card.classList.toggle("open");
+
+  const body = el("div", "tool-body");
+  const md = el("div", "thinking-body md");
+  renderMarkdown(md, text);
+  body.appendChild(md);
+
   card.appendChild(head);
   card.appendChild(body);
+}
+
+function makeThinkingCard(text, open, live) {
+  const card = el("div", "tool-card thinking-card" + (open ? " open" : ""));
+  card._text = text;
+  card._live = live;
+  renderThinkingInto(card);
   return card;
 }
 
@@ -189,11 +525,21 @@ function firstLine(text) {
   return line.length > 60 ? line.slice(0, 60) + "…" : line;
 }
 
-function refreshThinkingCard(card, text) {
-  card.querySelector(".tool-preview").textContent = firstLine(text);
-  const pre = card.querySelector(".tool-body pre");
-  pre.textContent = text;
-  if (card.classList.contains("open")) pre.parentElement.scrollTop = pre.parentElement.scrollHeight;
+/** Update text/state; markdown rendering is coalesced to one frame. */
+function refreshThinkingCard(card, text, live) {
+  if (!card) return;
+  card._text = text;
+  if (live !== undefined) card._live = live;
+  if (card._queued) return;
+  card._queued = true;
+  requestAnimationFrame(() => {
+    card._queued = false;
+    const open = card.classList.contains("open");
+    renderThinkingInto(card);
+    card.classList.toggle("open", open);
+    const body = card.querySelector(".tool-body");
+    if (open && body) body.scrollTop = body.scrollHeight;
+  });
 }
 
 function scrollBottom() {
@@ -213,42 +559,95 @@ function updateWelcome() {
   transcriptEl.classList.toggle("hidden", !!empty);
 }
 
-/* Live streaming: thinking card + assistant bubble + tool cards, rebuilt from state.liveTurn. */
-let liveNodes = null; // {thinkEl, textEl, mdEl, waitEl, toolEls: Map<id, card>, renderQueued}
+/* Live streaming: one segment per model round (thinking + text bubble), with
+   that round's tool cards appended right after it — so the stream stays in
+   conversation order instead of piling every tool under a single text bubble. */
+let liveNodes = null; // {rounds: Map<round, seg>, toolEls: Map<id, card>, groups: Map<round, wrap>, waitEl}
 
 function mountLive() {
   unmountLive();
   if (!state.liveTurn) return;
-  liveNodes = { toolEls: new Map() };
-  if (state.liveTurn.thinking) {
-    liveNodes.thinkEl = makeThinkingCard(state.liveTurn.thinking, true);
-    transcriptEl.appendChild(liveNodes.thinkEl);
+  liveNodes = { rounds: new Map(), toolEls: new Map(), groups: new Map() };
+
+  const lt = state.liveTurn;
+  // A reconnecting tab gets per-round text from the snapshot; older payloads
+  // fall back to the accumulated text in a single segment.
+  const rounds = lt.rounds?.length ? lt.rounds : [{ round: lt.round ?? 1, text: lt.text ?? "", thinking: lt.thinking ?? "" }];
+
+  for (const r of rounds) {
+    const seg = makeLiveSegment(r.round);
+    seg.text = r.text ?? "";
+    seg.thinking = r.thinking ?? "";
+    if (seg.thinking) {
+      seg.thinkEl = makeThinkingCard(seg.thinking, true, true);
+      transcriptEl.insertBefore(seg.thinkEl, seg.textEl);
+    }
+    for (const t of lt.tools.filter((x) => (x.round ?? 1) === r.round)) {
+      const card = makeToolCard(t);
+      liveNodes.toolEls.set(t.id, card);
+      liveToolGroup(r.round).appendChild(card);
+    }
+    if (seg.text.trim()) {
+      seg.textEl.classList.remove("hidden");
+      renderMarkdown(seg.mdEl, seg.text);
+    }
   }
-  liveNodes.textEl = el("div", "msg assistant");
-  liveNodes.mdEl = el("div", "md streaming");
-  liveNodes.textEl.appendChild(liveNodes.mdEl);
-  if (!state.liveTurn.text) liveNodes.textEl.classList.add("hidden");
-  transcriptEl.appendChild(liveNodes.textEl);
-  if (state.liveTurn.text || state.liveTurn.thinking) {
-    liveNodes.waitEl = null;
-  } else {
+
+  if (!lt.text && !lt.thinking && !lt.tools.length) {
     liveNodes.waitEl = makeWaitIndicator();
     transcriptEl.appendChild(liveNodes.waitEl);
   }
-  for (const t of state.liveTurn.tools) {
-    const card = makeToolCard(t);
-    liveNodes.toolEls.set(t.id, card);
-    transcriptEl.appendChild(card);
-  }
   updateWelcome();
-  scheduleLiveRender();
+}
+
+/** A round's own text bubble, appended at the current end of the transcript. */
+function makeLiveSegment(round) {
+  const seg = { round, text: "", thinking: "", renderQueued: false };
+  seg.textEl = el("div", "msg assistant hidden");
+  seg.mdEl = el("div", "md streaming");
+  seg.textEl.appendChild(seg.mdEl);
+  transcriptEl.appendChild(seg.textEl);
+  liveNodes.rounds.set(round, seg);
+  return seg;
+}
+
+function liveSegment(round) {
+  return liveNodes?.rounds.get(round) ?? (liveNodes ? makeLiveSegment(round) : null);
+}
+
+function renderSegment(seg) {
+  if (!seg || seg.renderQueued) return;
+  seg.renderQueued = true;
+  requestAnimationFrame(() => {
+    seg.renderQueued = false;
+    renderMarkdown(seg.mdEl, seg.text);
+    seg.mdEl.classList.add("streaming");
+    seg.textEl.classList.toggle("hidden", !seg.text.trim());
+    scrollBottom();
+  });
+}
+
+/** Body of the (possibly new) round group for a live tool card. */
+function liveToolGroup(round) {
+  let wrap = liveNodes.groups.get(round);
+  if (!wrap) {
+    wrap = makeToolGroup(round);
+    liveNodes.groups.set(round, wrap);
+    transcriptEl.appendChild(wrap);
+  }
+  wrap._tools += 1;
+  updateGroupMeta(wrap);
+  return wrap._body;
 }
 
 function unmountLive() {
   if (!liveNodes) return;
-  liveNodes.thinkEl?.remove();
-  liveNodes.textEl.remove();
+  for (const seg of liveNodes.rounds.values()) {
+    seg.thinkEl?.remove();
+    seg.textEl.remove();
+  }
   liveNodes.waitEl?.remove();
+  for (const group of liveNodes.groups.values()) group.remove();
   for (const card of liveNodes.toolEls.values()) card.remove();
   liveNodes = null;
   updateWelcome();
@@ -270,24 +669,19 @@ function dismissWait() {
   }
 }
 
-function scheduleLiveRender() {
-  if (!liveNodes || liveNodes.renderQueued) return;
-  liveNodes.renderQueued = true;
-  requestAnimationFrame(() => {
-    if (!liveNodes) return;
-    liveNodes.renderQueued = false;
-    renderMarkdown(liveNodes.mdEl, state.liveTurn?.text ?? "");
-    liveNodes.mdEl.classList.add("streaming");
-    liveNodes.textEl.classList.toggle("hidden", !(state.liveTurn?.text ?? "").trim());
-    scrollBottom();
-  });
-}
-
 function finalizeLive() {
   if (!liveNodes) return;
-  liveNodes.mdEl.classList.remove("streaming");
-  // Collapse the thinking card once the turn is done; keep it expandable.
-  liveNodes.thinkEl?.classList.remove("open");
+  // Close the timing of the round that was running when the turn ended.
+  const lt = state.liveTurn;
+  if (lt?.round && lt.roundStartAt) {
+    const group = liveNodes.groups.get(lt.round);
+    if (group) updateGroupMeta(group, performance.now() - lt.roundStartAt);
+  }
+  for (const seg of liveNodes.rounds.values()) {
+    seg.mdEl.classList.remove("streaming");
+    // Collapse thinking once the turn is done; keep it expandable.
+    seg.thinkEl?.classList.remove("open");
+  }
   liveNodes = null;
 }
 
@@ -300,11 +694,28 @@ async function refreshState() {
   state.mode = s.mode;
   state.sessionId = s.sessionId;
   transcriptEl.replaceChildren();
+  // Consecutive tool cards from the same model round are collected into one group.
+  let group = null;
+  let groupRound = 0;
   for (const item of s.transcript) {
-    if (item.kind === "user") appendItem(makeUserItem(item.text, item.images ?? 0));
-    else if (item.kind === "assistant") appendItem(makeAssistantItem(item.text));
-    else if (item.kind === "tool") appendItem(makeToolCard(item.tool));
-    else if (item.kind === "thinking") appendItem(makeThinkingCard(item.text, false));
+    if (item.kind === "user") {
+      group = null;
+      appendItem(makeUserItem(item.text, item.images ?? 0));
+    } else if (item.kind === "assistant") {
+      group = null;
+      appendItem(makeAssistantItem(item.text));
+    } else if (item.kind === "thinking") {
+      group = null;
+      appendItem(makeThinkingCard(item.text, false));
+    } else if (item.kind === "tool") {
+      const round = item.tool.round ?? 1;
+      if (!group || groupRound !== round) {
+        group = makeToolGroup(round);
+        groupRound = round;
+        appendItem(group);
+      }
+      groupAddTool(group, makeToolCard(item.tool));
+    }
   }
   state.liveTurn = s.liveTurn ?? null;
   mountLive();
@@ -322,25 +733,55 @@ async function refreshState() {
 }
 
 function updateHeader(s) {
-  $("#crumb-cwd").textContent = s.cwd ?? "";
-  $("#crumb-session").textContent = s.sessionId ? `session ${s.sessionId}` : "";
-  $("#model-input").placeholder = `${s.provider}:${s.model}`;
-  $("#plan-toggle").checked = s.planMode;
-  document.querySelectorAll("#mode-picker button").forEach((b) => b.classList.toggle("active", b.dataset.mode === s.mode));
-  const pct = Math.min(100, Math.round((s.tokenEstimate / s.contextWindow) * 100));
-  $("#ctx-fill").style.width = pct + "%";
-  $("#ctx-text").textContent = `${s.tokenEstimate.toLocaleString()} / ${s.contextWindow.toLocaleString()} tokens`;
+  state.cwd = s.cwd ?? "";
+  state.model = s.model ?? "";
+  const name = baseName(state.cwd);
+  $("#crumb-cwd").textContent = name || "选择工作空间";
+  $("#open-project").title = state.cwd ? `切换工作目录 · ${state.cwd}` : "切换工作目录";
+  $("#model-logo").textContent = (s.provider ?? "").charAt(0) || "·";
+  syncPermissionUi(s);
 }
 
+/** 权限下拉显示当前生效的那一档（PLAN 优先于 mode），并高亮对应菜单项。 */
+function syncPermissionUi(s) {
+  state.planMode = !!s.planMode;
+  state.mode = s.mode ?? state.mode;
+  $("#perm-label").textContent = state.planMode ? "计划模式" : (MODE_LABELS[state.mode] ?? state.mode);
+  document.querySelectorAll("#perm-pop .pop-item").forEach((b) => {
+    const on = state.planMode ? b.dataset.plan === "1" : !b.dataset.plan && b.dataset.mode === state.mode;
+    b.classList.toggle("on", on);
+  });
+}
+
+/** 工具行右端的 mono 元信息；空项连同它前面的分隔线一起隐藏。 */
 function updateStatus(s) {
-  $("#statusbar").textContent =
-    `${s.provider}:${s.model} · session ${s.sessionId} · 上下文 ${Math.min(100, Math.round((s.tokenEstimate / s.contextWindow) * 100))}% · ${s.cost}` +
-    (s.todos?.length ? ` · 待办 ${s.todos.filter((t) => t.status === "completed").length}/${s.todos.length}` : "");
+  const pct = s.contextWindow > 0 ? Math.min(100, Math.round((s.tokenEstimate / s.contextWindow) * 100)) : 0;
+  const todos = s.todos ?? [];
+  setMeta("#meta-session", null, s.sessionId ?? "");
+  setMeta("#meta-ctx", "#sep-ctx", `上下文 ${pct}%`);
+  setMeta("#meta-cost", "#sep-cost", compactCost(s.cost));
+  setMeta("#meta-todo", "#sep-todo", todos.length ? `待办 ${todos.filter((t) => t.status === "completed").length}/${todos.length}` : "");
+  setMeta("#meta-bg", "#sep-bg", s.backgroundTasks ? `后台任务 ${s.backgroundTasks}` : "");
+}
+
+/** 终端 /cost 是多行报告；工具行只需要一个短数字。 */
+function compactCost(raw) {
+  const line = String(raw ?? "").split("\n")[0].trim();
+  if (!line || line.startsWith("no API calls")) return "$0";
+  return line.replace(/^total:\s*/, "");
+}
+
+function setMeta(sel, sepSel, text) {
+  const node = $(sel);
+  node.textContent = text;
+  node.classList.toggle("hidden", !text);
+  if (sepSel) $(sepSel).classList.toggle("hidden", !text);
 }
 
 function updateComposer() {
   $("#send").classList.toggle("hidden", state.busy);
   $("#stop").classList.toggle("hidden", !state.busy);
+  $("#send").disabled = !input.value.trim();
   $("#input").disabled = false; // still allow typing while busy; send is guarded
 }
 
@@ -363,20 +804,45 @@ function connectSSE() {
     finalizeLive();
     if (d.user) appendItem(makeUserItem(d.user, d.images ?? 0));
     state.busy = true;
-    state.liveTurn = { turnId: d.turnId, text: "", thinking: "", tools: [] };
+    state.liveTurn = {
+      turnId: d.turnId,
+      text: "",
+      thinking: "",
+      tools: [],
+      round: 1,
+      roundStartAt: performance.now(),
+      rounds: [],
+    };
     mountLive();
     updateComposer();
+  });
+
+  on("round_start", (d) => {
+    if (!state.liveTurn) return;
+    const now = performance.now();
+    const prev = state.liveTurn.round;
+    if (prev && state.liveTurn.roundStartAt && liveNodes) {
+      const group = liveNodes.groups.get(prev);
+      if (group) updateGroupMeta(group, now - state.liveTurn.roundStartAt);
+    }
+    state.liveTurn.round = d.round;
+    state.liveTurn.roundStartAt = now;
+    (state.liveTurn.rounds ??= []).push({ round: d.round, text: "", thinking: "" });
+    // Create this round's bubble now so it lands after the previous round's tools.
+    liveSegment(d.round);
   });
 
   on("thinking_delta", (d) => {
     if (!state.liveTurn) return;
     state.liveTurn.thinking += d.d;
-    if (!liveNodes) return;
-    if (!liveNodes.thinkEl) {
-      liveNodes.thinkEl = makeThinkingCard(state.liveTurn.thinking, true);
-      transcriptEl.insertBefore(liveNodes.thinkEl, liveNodes.textEl);
+    const seg = liveSegment(state.liveTurn.round ?? 1);
+    if (!seg) return;
+    seg.thinking += d.d;
+    if (!seg.thinkEl) {
+      seg.thinkEl = makeThinkingCard(seg.thinking, true, true);
+      transcriptEl.insertBefore(seg.thinkEl, seg.textEl);
     } else {
-      refreshThinkingCard(liveNodes.thinkEl, state.liveTurn.thinking);
+      refreshThinkingCard(seg.thinkEl, seg.thinking, true);
     }
     dismissWait();
     scrollBottom();
@@ -385,21 +851,25 @@ function connectSSE() {
   on("text_delta", (d) => {
     if (!state.liveTurn) return;
     state.liveTurn.text += d.d;
+    const seg = liveSegment(state.liveTurn.round ?? 1);
+    if (seg) {
+      seg.text += d.d;
+      renderSegment(seg);
+    }
     dismissWait();
-    scheduleLiveRender();
   });
 
   on("tool_use_start", (d) => {
     // The model started a tool call; render its card immediately (args still streaming).
     if (!state.liveTurn) return;
     if (state.liveTurn.tools.some((t) => t.id === d.id)) return;
-    const tool = { id: d.id, name: d.name, inputPreview: "" };
+    const tool = { id: d.id, name: d.name, round: d.round ?? state.liveTurn.round ?? 1, inputPreview: "" };
     state.liveTurn.tools.push(tool);
     if (liveNodes) {
       dismissWait();
       const card = makeToolCard(tool);
       liveNodes.toolEls.set(tool.id, card);
-      transcriptEl.appendChild(card);
+      liveToolGroup(tool.round).appendChild(card);
       scrollBottom();
     }
   });
@@ -409,19 +879,27 @@ function connectSSE() {
     let t = state.liveTurn.tools.find((x) => x.id === d.id);
     if (t) {
       t.inputPreview = d.inputPreview;
+      if (d.input) t.input = d.input;
+      if (d.round) t.round = d.round;
     } else {
-      t = { id: d.id, name: d.name, inputPreview: d.inputPreview };
+      t = {
+        id: d.id,
+        name: d.name,
+        round: d.round ?? state.liveTurn.round ?? 1,
+        inputPreview: d.inputPreview,
+        input: d.input,
+      };
       state.liveTurn.tools.push(t);
     }
-    const card = liveNodes?.toolEls.get(d.id);
+    let card = liveNodes?.toolEls.get(d.id);
     if (card) {
       dismissWait();
       refreshToolCard(card);
     } else if (liveNodes) {
       dismissWait();
-      const created = makeToolCard(t);
-      liveNodes.toolEls.set(t.id, created);
-      transcriptEl.appendChild(created);
+      card = makeToolCard(t);
+      liveNodes.toolEls.set(t.id, card);
+      liveToolGroup(t.round).appendChild(card);
       scrollBottom();
     }
   });
@@ -430,11 +908,27 @@ function connectSSE() {
     if (!state.liveTurn) return;
     const t = state.liveTurn.tools.find((x) => x.id === d.id);
     if (t) {
-      t.result = d.preview;
+      t.result = d.result ?? d.preview;
       t.ok = d.ok;
     }
     const card = liveNodes?.toolEls.get(d.id);
     if (card) refreshToolCard(card);
+  });
+
+  on("sub_tool", (d) => {
+    // A subagent ran one of its own tools — append it to the parent task card.
+    if (!state.liveTurn) return;
+    const t = state.liveTurn.tools.find((x) => x.id === d.id);
+    if (!t) return;
+    (t.subCalls ??= []).push({
+      name: d.name,
+      inputPreview: d.inputPreview,
+      ok: d.ok,
+      result: d.preview,
+      round: d.round,
+    });
+    refreshToolCard(liveNodes?.toolEls.get(d.id));
+    scrollBottom();
   });
 
   on("turn_end", () => {
@@ -442,7 +936,11 @@ function connectSSE() {
     state.liveTurn = null;
     state.busy = false;
     updateComposer();
-    refreshState().catch(() => {}); // pick up fresh token/cost numbers
+    // refreshState picks up the token/cost numbers and, when this was the first
+    // message of a fresh window, the session id the agent just created.
+    refreshState()
+      .then(loadSessions)
+      .catch(() => {});
   });
 
   on("turn_error", (d) => {
@@ -452,9 +950,17 @@ function connectSSE() {
     updateComposer();
     if (!d.aborted && d.message) appendItem(makeSystemItem("错误: " + d.message, "error"));
     if (d.aborted) appendItem(makeSystemItem("（已中断）"));
+    refreshState()
+      .then(loadSessions)
+      .catch(() => {});
   });
 
   on("usage", () => {
+    api("/api/state").then(updateStatus).catch(() => {});
+  });
+
+  on("model_meta", () => {
+    // The endpoint's context window changed (or arrived): refresh the readout.
     api("/api/state").then(updateStatus).catch(() => {});
   });
 
@@ -463,8 +969,7 @@ function connectSSE() {
   on("compacted", (d) => appendItem(makeSystemItem(`上下文: ${d.before.toLocaleString()} → ${d.after.toLocaleString()} tokens`)));
   on("hook", (d) => appendItem(makeSystemItem(`[hook ${d.event}] ${d.message}`)));
   on("plan_approved", () => {
-    state.planMode = false;
-    $("#plan-toggle").checked = false;
+    syncPermissionUi({ planMode: false, mode: state.mode });
     appendItem(makeSystemItem("计划已批准 — 进入执行模式"));
   });
   on("system", (d) => appendItem(makeSystemItem(d.text, d.kind, d.highlight)));
@@ -530,6 +1035,7 @@ const input = $("#input");
 input.addEventListener("input", () => {
   input.style.height = "auto";
   input.style.height = Math.min(200, input.scrollHeight) + "px";
+  updateComposer();
   updatePalette();
 });
 
@@ -552,7 +1058,7 @@ input.addEventListener("keydown", (e) => {
 
 async function send() {
   const text = input.value.trim();
-  if (!text && !state.images.length) return;
+  if (!text) return;
   if (state.busy) {
     toast("上一轮还在进行中，可先点“停止”", true);
     return;
@@ -560,11 +1066,9 @@ async function send() {
   input.value = "";
   input.style.height = "auto";
   hidePalette();
-  const images = state.images;
-  state.images = [];
-  renderAttachments();
+  updateComposer();
   try {
-    const r = await api("/api/chat", { text, images: images.length ? images : undefined });
+    const r = await api("/api/chat", { text });
     if (r.error === "busy") toast("智能体正忙", true);
   } catch (err) {
     toast("发送失败: " + err.message, true);
@@ -582,44 +1086,6 @@ document.querySelectorAll("#welcome .hint").forEach((b) => {
     input.dispatchEvent(new Event("input"));
   };
 });
-
-/* attachments */
-$("#attach").onclick = () => $("#file-input").click();
-$("#file-input").onchange = (e) => {
-  for (const file of e.target.files) {
-    if (file.size > 5 * 1024 * 1024) {
-      toast(`图片 ${file.name} 超过 5MB 上限`, true);
-      continue;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = reader.result;
-      const base64 = dataUrl.split(",")[1];
-      state.images.push({ type: "image", source: { type: "base64", media_type: file.type, data: base64 } });
-      renderAttachments();
-    };
-    reader.readAsDataURL(file);
-  }
-  e.target.value = "";
-};
-
-function renderAttachments() {
-  const box = $("#attachments");
-  box.replaceChildren();
-  state.images.forEach((img, i) => {
-    const chip = el("span", "chip");
-    const im = document.createElement("img");
-    im.src = `data:${img.source.media_type};base64,${img.source.data}`;
-    const x = el("button", "", "✕");
-    x.onclick = () => {
-      state.images.splice(i, 1);
-      renderAttachments();
-    };
-    chip.appendChild(im);
-    chip.appendChild(x);
-    box.appendChild(chip);
-  });
-}
 
 /* command palette */
 const BUILTIN_CMDS = [
@@ -693,81 +1159,89 @@ function applyPalette(cmd) {
   input.focus();
 }
 
-/* ---------------- header controls ---------------- */
+/* ---------------- 卡片下方工具行：权限模式 / 工作空间 ---------------- */
 
-$("#mode-picker").addEventListener("click", async (e) => {
-  const btn = e.target.closest("button[data-mode]");
-  if (!btn) return;
-  const r = await api("/api/settings", { mode: btn.dataset.mode });
-  state.mode = r.mode;
-  document.querySelectorAll("#mode-picker button").forEach((b) => b.classList.toggle("active", b === btn));
-});
+/** 极简浮层开合：点按钮切换，点别处收起。 */
+function togglePop(id) {
+  const pop = document.getElementById(id);
+  const willOpen = pop.classList.contains("hidden");
+  closePops();
+  if (!willOpen) return;
+  if (id === "ws-pop") renderWorkspaceMenu(); // 菜单内容跟着最新的会话列表走
+  pop.classList.remove("hidden");
+}
 
-$("#plan-toggle").addEventListener("change", async (e) => {
-  const r = await api("/api/settings", { planMode: e.target.checked });
-  state.planMode = r.planMode;
-});
+function closePops() {
+  document.querySelectorAll(".pop").forEach((p) => p.classList.add("hidden"));
+}
 
-$("#model-apply").onclick = async () => {
-  const spec = $("#model-input").value.trim();
-  if (!spec) return;
-  const r = await api("/api/command", { line: "/model " + spec });
-  toast(r.text ?? "已切换");
-  $("#model-input").value = "";
-  $("#model-pop").classList.add("hidden");
-  refreshState().catch(() => {});
-};
-
-$("#model-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") {
-    e.preventDefault();
-    $("#model-apply").click();
-  } else if (e.key === "Escape") {
-    $("#model-pop").classList.add("hidden");
-  }
-});
-
-$("#model-custom").onclick = (e) => {
+$("#perm-btn").onclick = (e) => {
   e.stopPropagation();
-  const pop = $("#model-pop");
-  const willShow = pop.classList.contains("hidden");
-  pop.classList.toggle("hidden", !willShow);
-  if (willShow) {
-    const f = $("#model-input");
-    f.focus();
-    f.select();
-  }
+  togglePop("perm-pop");
 };
 
-document.addEventListener("click", (e) => {
-  if (!e.target.closest("#model-pop") && !e.target.closest("#model-custom")) {
-    $("#model-pop").classList.add("hidden");
+$("#open-project").onclick = (e) => {
+  e.stopPropagation();
+  togglePop("ws-pop");
+};
+
+/* 权限下拉：三档 mode + PLAN（= 只读计划模式），选哪个就是哪种权限 */
+$("#perm-pop").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".pop-item");
+  if (!btn) return;
+  closePops();
+  if (state.busy) return toast("请先停止当前回合", true);
+  if (btn.dataset.plan === "1") {
+    const r = await api("/api/settings", { planMode: true });
+    return syncPermissionUi({ planMode: r.planMode, mode: state.mode });
   }
+  const r = await api("/api/settings", { mode: btn.dataset.mode, planMode: false });
+  syncPermissionUi({ planMode: r.planMode, mode: r.mode });
+});
+
+/* 点别处收起浮层（浮层与工具行内部的点击不算） */
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".pop") && !e.target.closest(".tb-item")) closePops();
 });
 
 $("#model-select").onchange = async () => {
-  const spec = $("#model-select").value;
-  if (!spec) return;
-  const r = await api("/api/command", { line: "/model " + spec });
+  const model = $("#model-select").value;
+  if (!model) return;
+  const r = await api("/api/command", { line: "/model " + model });
   toast(r.text ?? "已切换");
   refreshState().catch(() => {});
+  loadModelOptions();
 };
 
+/**
+ * 模型下拉 = 当前生效的模型 + 当前端点返回的模型。
+ * 未启用的配置不在这里出现——切换配置请在「⚙ 模型配置」里做。
+ */
 async function loadModelOptions() {
-  try {
-    const models = await api("/api/models");
-    if (!Array.isArray(models)) return;
-    const sel = $("#model-select");
-    sel.replaceChildren(el("option", "", ""));
-    sel.lastElementChild.value = "";
-    sel.lastElementChild.textContent = "选择模型…";
+  const sel = $("#model-select");
+  const models = await api("/api/models").catch(() => null);
+
+  sel.replaceChildren();
+
+  // 当前生效的模型（value 为空，选它不会触发切换）
+  if (state.model) {
+    const current = el("option", "", state.model);
+    current.value = "";
+    current.selected = true;
+    sel.appendChild(current);
+  } else {
+    const placeholder = el("option", "", "选择模型…");
+    placeholder.value = "";
+    sel.appendChild(placeholder);
+  }
+
+  if (Array.isArray(models)) {
     for (const m of models.slice(0, 200)) {
+      if (m === state.model) continue; // 已经作为当前项列在上面了
       const o = el("option", "", m);
       o.value = m;
       sel.appendChild(o);
     }
-  } catch {
-    /* endpoint may not support listing */
   }
 }
 
@@ -791,12 +1265,21 @@ function relTime(iso) {
 
 async function loadSessions() {
   const list = await api("/api/sessions");
+  state.sessions = Array.isArray(list) ? list : [];
   const box = $("#session-list");
   box.replaceChildren();
   if (!Array.isArray(list)) return;
+  if (!list.length) {
+    box.appendChild(el("div", "s-empty", "还没有会话"));
+    return;
+  }
   for (const s of list.slice(0, 50)) {
     const item = el("div", "session-item" + (s.id === state.sessionId ? " active" : ""));
-    item.appendChild(el("div", "s-title", s.title || s.id));
+    const title = el("div", "s-title");
+    // 徽标放在标题前面：标题过长被省略号截断时它不会被一起吃掉
+    if (s.id === state.sessionId) title.appendChild(el("span", "s-badge", "当前"));
+    title.appendChild(document.createTextNode(s.title || s.preview || s.id));
+    item.appendChild(title);
     if (s.tags?.length) item.appendChild(el("div", "s-tags", s.tags.map((t) => "#" + t).join(" ")));
     const meta = el("div", "s-meta");
     meta.appendChild(el("span", "s-sub", s.model ? s.model.split(":").pop() : ""));
@@ -828,12 +1311,16 @@ async function loadSessions() {
     delBtn.title = "删除";
     delBtn.onclick = async (e) => {
       e.stopPropagation();
+      const isActive = s.id === state.sessionId;
       const label = s.title ? `“${s.title}”` : s.id;
-      if (!(await confirmText(`删除会话 ${label}？此操作不可撤销。`))) return;
+      const msg = isActive
+        ? `删除当前打开的会话 ${label}？删除后当前对话清空，下一条消息才会新建会话。`
+        : `删除会话 ${label}？此操作不可撤销。`;
+      if (!(await confirmText(msg))) return;
       const r = await api("/api/session/delete", { id: s.id });
       if (r.error) return toast(r.error === "busy" ? "请先停止当前回合" : "删除失败: " + r.error, true);
-      if (r.activeReplaced) {
-        toast(`当前会话已删除，已新建 ${r.activeReplaced}`);
+      if (r.activeCleared) {
+        toast("当前会话已删除，下条消息会新建会话");
         await refreshState();
       }
       loadSessions();
@@ -875,7 +1362,7 @@ async function runSessionSearch() {
   for (const h of hits) {
     const s = h.meta;
     const item = el("div", "session-item" + (s.id === state.sessionId ? " active" : ""));
-    item.appendChild(el("div", "s-title", (h.titleMatch ? "标题 · " : "") + (s.title || s.id) + (s.tags?.length ? "  " + s.tags.map((t) => "#" + t).join(" ") : "")));
+    item.appendChild(el("div", "s-title", (h.titleMatch ? "标题 · " : "") + (s.title || s.preview || s.id) + (s.tags?.length ? "  " + s.tags.map((t) => "#" + t).join(" ") : "")));
     if (h.snippet) item.appendChild(el("div", "s-snippet", h.snippet));
     const meta = el("div", "s-meta");
     meta.appendChild(el("span", "s-sub", h.matches ? `${h.matches} 条命中` : h.titleMatch ? "标题命中" : "标签命中"));
@@ -922,13 +1409,13 @@ function promptText(title, value, maxLength = 80) {
 }
 
 /* confirm dialog reusing the same modal shell (no input field) */
-function confirmText(message) {
+function confirmText(message, okLabel = "删除") {
   return new Promise((resolve) => {
     $("#input-title").textContent = message;
     $("#input-field").value = "";
     $("#input-field").style.display = "none";
     $("#input-modal").classList.remove("hidden");
-    $("#input-ok").textContent = "删除";
+    $("#input-ok").textContent = okLabel;
     $("#input-ok").classList.add("danger");
     const finish = (result) => {
       $("#input-modal").classList.add("hidden");
@@ -951,24 +1438,264 @@ $("#new-session").onclick = async () => {
   loadSessions();
 };
 
-/* switch the working directory: native picker in Electron, path input in the browser */
-$("#open-project").onclick = async () => {
-  if (state.busy) return toast("请先停止当前回合", true);
-  const cur = $("#crumb-cwd").textContent || "";
-  let dir = null;
-  try {
-    if (window.mojo?.pickProject) dir = await window.mojo.pickProject(cur);
-    else dir = await promptText("项目目录（绝对路径或相对当前项目）", cur, 260);
-  } catch (err) {
-    return toast("打开目录失败: " + (err instanceof Error ? err.message : String(err)), true);
+/* 工作目录菜单：最近目录（从会话列表里的 cwd 推出来）+ 打开文件夹… */
+
+function renderWorkspaceMenu() {
+  const pop = $("#ws-pop");
+  pop.replaceChildren();
+  pop.appendChild(el("div", "pop-head", "最近目录"));
+
+  const seen = new Set();
+  let added = 0;
+  for (const s of state.sessions) {
+    if (!s.cwd || seen.has(s.cwd)) continue;
+    seen.add(s.cwd);
+    const cur = samePath(s.cwd, state.cwd);
+    const btn = el("button", "pop-item" + (cur ? " on" : ""));
+    btn.title = s.cwd;
+    btn.appendChild(el("span", "p-ico", "▸"));
+    const text = el("span", "p-text");
+    text.appendChild(el("span", "p-name", s.cwd));
+    btn.appendChild(text);
+    btn.appendChild(el(cur ? "p-cur" : "p-when", "", cur ? "当前" : relTime(s.updatedAt)));
+    btn.onclick = () => switchProject(s.cwd);
+    pop.appendChild(btn);
+    if (++added >= 5) break;
   }
-  if (!dir) return;
-  const r = await api("/api/project", { cwd: dir });
+  if (!added) pop.appendChild(el("div", "s-empty", "还没有其他目录"));
+
+  pop.appendChild(el("div", "pop-sep"));
+  const pick = el("button", "pop-item");
+  pick.appendChild(el("span", "p-ico", "📂"));
+  const text = el("span", "p-text");
+  text.appendChild(el("span", "p-name", "打开文件夹…"));
+  text.appendChild(el("span", "p-desc", "选择本机任意目录"));
+  pick.appendChild(text);
+  pick.onclick = pickProjectFolder;
+  pop.appendChild(pick);
+}
+
+async function switchProject(cwd) {
+  closePops();
+  if (state.busy) return toast("请先停止当前回合", true);
+  const r = await api("/api/project", { cwd });
   if (r.error) return toast("切换失败: " + r.error, true);
   await refreshState();
   await loadSessions();
   toast("已切换到 " + r.cwd);
-};
+}
+
+/* Electron 走原生目录选择框，浏览器版走路径输入 */
+async function pickProjectFolder() {
+  closePops();
+  if (state.busy) return toast("请先停止当前回合", true);
+  const cur = state.cwd || "";
+  let dir = null;
+  try {
+    if (window.mojo?.pickProject) dir = await window.mojo.pickProject(cur);
+    else dir = await promptText("工作目录（绝对路径，或相对当前目录）", cur, 260);
+  } catch (err) {
+    return toast("打开目录失败: " + (err instanceof Error ? err.message : String(err)), true);
+  }
+  if (!dir) return;
+  await switchProject(dir);
+}
+
+/* ---------------- LLM 配置面板（侧栏「模型配置」） ---------------- */
+
+const cfgState = { profiles: [], activeId: "", editing: null };
+
+function openLlmModal() {
+  $("#llm-modal").classList.remove("hidden");
+  hideCfgForm();
+  loadLlmProfiles();
+}
+
+function closeLlmModal() {
+  $("#llm-modal").classList.add("hidden");
+}
+
+async function loadLlmProfiles() {
+  const data = await api("/api/llm/profiles");
+  if (data.error) return toast("读取 LLM 配置失败: " + data.error, true);
+  cfgState.profiles = data.profiles ?? [];
+  cfgState.activeId = data.activeId ?? "";
+  renderLlmList(!!data.projectOverrides);
+}
+
+/** 1048576 → "1M", 128000 → "128k". */
+function shortTokens(n) {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (n >= 1000) return `${Math.round(n / 1000)}k`;
+  return String(n);
+}
+
+function renderLlmList(projectOverrides) {
+  const box = $("#cfg-list");
+  box.replaceChildren();
+  const active = cfgState.profiles.find((p) => p.id === cfgState.activeId);
+  $("#cfg-active").textContent = active ? `生效中：${active.name}` : "";
+  $("#cfg-active").title = projectOverrides ? "当前目录的 .node-agent/config.json 里有配置，重启后会以它为准" : "";
+
+  if (!cfgState.profiles.length) {
+    box.appendChild(el("div", "cfg-empty", "还没有配置。点右上角「＋ 新增」，填好格式、Base URL、API Key 和模型即可。"));
+    return;
+  }
+
+  for (const p of cfgState.profiles) {
+    const row = el("div", "cfg-item" + (p.id === cfgState.activeId ? " active" : ""));
+    const main = el("div", "cfg-item-main");
+    const title = el("div", "cfg-item-title");
+    title.appendChild(el("span", "cfg-item-name", p.name));
+    title.appendChild(el("span", "cfg-badge", p.provider === "openai" ? "OpenAI 兼容" : "Anthropic"));
+    if (p.id === cfgState.activeId) title.appendChild(el("span", "cfg-badge on", "生效中"));
+    main.appendChild(title);
+    main.appendChild(el("div", "cfg-item-model", p.model));
+    const ctx = p.contextWindow ? ` · ctx ${shortTokens(p.contextWindow)}` : "";
+    main.appendChild(
+      el("div", "cfg-item-sub", `${p.baseURL || "官方默认地址"} · ${p.hasKey ? "Key " + p.keyMasked : "未填 Key"}${ctx}`),
+    );
+    row.appendChild(main);
+
+    const actions = el("div", "cfg-item-actions");
+    const isOn = p.id === cfgState.activeId;
+    const toggle = el("button", isOn ? "warn" : "", isOn ? "禁用" : "启用");
+    toggle.title = isOn
+      ? "停用这条配置（重启后回落到环境变量 / 默认配置）"
+      : "启用这条配置：写入全局 config.json 并立即切换";
+    toggle.onclick = () => (isOn ? disableLlmProfile(p) : activateLlmProfile(p.id));
+    actions.appendChild(toggle);
+    const edit = el("button", "", "✎");
+    edit.title = "编辑";
+    edit.onclick = () => showCfgForm(p);
+    const del = el("button", "del", "🗑");
+    del.title = "删除";
+    del.onclick = async () => {
+      if (!(await confirmText(`删除配置「${p.name}」？`))) return;
+      const r = await api("/api/llm/profile/delete", { id: p.id });
+      if (r.error) return toast("删除失败: " + r.error, true);
+      if (cfgState.editing === p.id) hideCfgForm();
+      await loadLlmProfiles();
+    };
+    actions.appendChild(edit);
+    actions.appendChild(del);
+    row.appendChild(actions);
+    box.appendChild(row);
+  }
+}
+
+/** 清除上一次「拉取列表」的候选（换配置 / 换地址后不再适用）。 */
+function resetCfgModelSuggestions() {
+  $("#cfg-model-list").replaceChildren();
+}
+
+function showCfgForm(p) {
+  cfgState.editing = p?.id ?? null;
+  $("#cfg-form").classList.remove("hidden");
+  $("#cfg-name").value = p?.name ?? "";
+  $("#cfg-provider").value = p?.provider ?? "anthropic";
+  $("#cfg-baseurl").value = p?.baseURL ?? "";
+  $("#cfg-key").value = "";
+  $("#cfg-key").placeholder = p?.hasKey ? `留空沿用已保存的 Key（${p.keyMasked}）` : "粘贴 API Key";
+  $("#cfg-model").value = p?.model ?? "";
+  $("#cfg-ctx").value = p?.contextWindow ? String(p.contextWindow) : "";
+  resetCfgModelSuggestions();
+  setCfgNote("");
+  $("#cfg-name").focus();
+}
+
+function hideCfgForm() {
+  cfgState.editing = null;
+  $("#cfg-form").classList.add("hidden");
+}
+
+function cfgDraft() {
+  const ctxRaw = $("#cfg-ctx").value.trim();
+  const ctx = ctxRaw ? Number(ctxRaw) : NaN;
+  return {
+    id: cfgState.editing ?? undefined,
+    name: $("#cfg-name").value.trim(),
+    provider: $("#cfg-provider").value,
+    baseURL: $("#cfg-baseurl").value.trim(),
+    apiKey: $("#cfg-key").value.trim(),
+    model: $("#cfg-model").value.trim(),
+    contextWindow: Number.isFinite(ctx) && ctx > 0 ? Math.floor(ctx) : undefined,
+  };
+}
+
+function setCfgNote(text, isError) {
+  const note = $("#cfg-note");
+  note.textContent = text;
+  note.classList.toggle("error", !!isError);
+  note.classList.toggle("hidden", !text);
+}
+
+async function saveCfgProfile() {
+  const draft = cfgDraft();
+  if (!draft.model) return setCfgNote("请填写模型名（可以先点「拉取列表」看看端点提供哪些）", true);
+  const r = await api("/api/llm/profile/save", draft);
+  if (r.error) return setCfgNote("保存失败: " + r.error, true);
+  cfgState.editing = r.id;
+  await loadLlmProfiles();
+  hideCfgForm();
+  toast("已保存");
+}
+
+/** 停用：清掉生效标记（以及它写进全局 config 的值），运行中的会话保持不变。 */
+async function disableLlmProfile(p) {
+  const r = await api("/api/llm/profile/disable", { id: p.id });
+  if (r.error) return toast("禁用失败: " + r.error, true);
+  await loadLlmProfiles();
+  toast(`已禁用 ${p.name}`);
+}
+
+async function activateLlmProfile(id) {
+  const r = await api("/api/llm/profile/activate", { id });
+  if (r.error) {
+    const msg = r.error === "busy" ? "请先停止当前回合再切换配置" : "启用失败: " + r.error;
+    // Clicking 启用 inside the list leaves the form hidden — toast then.
+    if ($("#cfg-form").classList.contains("hidden")) return toast(msg, true);
+    return setCfgNote(msg, true);
+  }
+  hideCfgForm();
+  await loadLlmProfiles();
+  await refreshState();
+  await loadModelOptions();
+  toast(`已启用 ${r.provider}:${r.model}` + (r.warning ? " · " + r.warning : ""));
+}
+
+/** 「拉取列表」：拿草稿里的地址与 Key 问端要点模型 id，填进模型框自带的候选。 */
+async function fetchCfgModels() {
+  setCfgNote("正在拉取模型列表…");
+  resetCfgModelSuggestions();
+  const r = await api("/api/llm/models", cfgDraft());
+  if (!r.models) {
+    return setCfgNote(`拉取失败: ${r.error ?? "未知错误"}。不少端点不提供模型列表，可以直接在模型框手填。`, true);
+  }
+
+  const list = $("#cfg-model-list");
+  for (const m of r.models.slice(0, 300)) {
+    const opt = document.createElement("option");
+    opt.value = m;
+    list.appendChild(opt);
+  }
+
+  // 只有一个候选才自动填；多个时保持输入框为空——datalist 会按输入框内容过滤，
+  // 一旦填了第一个，其余候选就看不到了。
+  if (!$("#cfg-model").value.trim() && r.models.length === 1) $("#cfg-model").value = r.models[0];
+  setCfgNote((r.note ? r.note + " · " : "") + `${r.models.length} 个模型`);
+  $("#cfg-model").focus();
+}
+
+$("#llm-config").onclick = openLlmModal;
+$("#cfg-close").onclick = closeLlmModal;
+$("#cfg-new").onclick = () => showCfgForm(null);
+$("#cfg-cancel").onclick = hideCfgForm;
+$("#cfg-fetch").onclick = fetchCfgModels;
+$("#cfg-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  saveCfgProfile();
+});
 
 /* ---------------- global keys ---------------- */
 
@@ -983,6 +1710,11 @@ document.addEventListener("keydown", (e) => {
       e.preventDefault();
       answerPermission("yes");
     }
+  } else if (e.key === "Escape") {
+    // The prompt/confirm dialog owns Esc while it is up.
+    if (!$("#input-modal").classList.contains("hidden")) return;
+    // 模型配置弹窗是「点了 X 才关」：Esc 和点遮罩都不关闭，避免误关丢掉填了一半的配置。
+    closePops();
   }
 });
 

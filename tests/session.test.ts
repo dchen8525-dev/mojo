@@ -55,6 +55,36 @@ describe("createSession / loadSession", () => {
     expect(loaded?.meta.model).toBe("openai:gpt-4o");
   });
 
+  it("persists subagent call records without polluting the message history", async () => {
+    const { id } = await session.createSession("x");
+    await session.appendMessages(id, [{ role: "user", content: "hi" }]);
+    await session.appendSubCall(id, {
+      toolUseId: "t1",
+      name: "read_file",
+      inputPreview: '{"path":"a.ts"}',
+      ok: true,
+      result: "body",
+      round: 3,
+    });
+
+    const loaded = await session.loadSession(id);
+    expect(loaded?.messages).toHaveLength(1);
+    expect(loaded?.subCalls).toEqual([
+      { toolUseId: "t1", name: "read_file", inputPreview: '{"path":"a.ts"}', ok: true, result: "body", round: 3 },
+    ]);
+  });
+
+  it("keeps subagent call records when the message log is rewritten", async () => {
+    const { id } = await session.createSession("x");
+    await session.appendSubCall(id, { toolUseId: "t1", name: "grep", inputPreview: "{}", ok: false });
+    await session.rewriteMessages(id, [{ role: "user", content: "compacted" }]);
+
+    const loaded = await session.loadSession(id);
+    expect(loaded?.messages).toHaveLength(1);
+    expect(loaded?.subCalls.map((c) => c.name)).toEqual(["grep"]);
+    expect(loaded?.subCalls[0].ok).toBe(false);
+  });
+
   it("skips corrupt lines instead of failing", async () => {
     const { id } = await session.createSession("x");
     const file = path.join(fakeHome, ".node-agent", "sessions", `${id}.jsonl`);

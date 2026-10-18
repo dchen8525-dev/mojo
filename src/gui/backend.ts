@@ -1,17 +1,76 @@
 import { randomBytes } from "node:crypto";
+import os from "node:os";
+import path from "node:path";
 import { Agent } from "../agent.js";
+import { LLM, type Config } from "../llm.js";
+import { mergeConfigJson, readConfigJson } from "../configFile.js";
+import {
+  deleteProfile,
+  findProfile,
+  loadProfileStore,
+  publicProfile,
+  saveProfileStore,
+  upsertProfile,
+  type ProfileInput,
+  type PublicProfile,
+} from "../llmProfiles.js";
 import { PermissionManager, type Mode } from "../permissions.js";
 import { HookManager } from "../hooks.js";
 import { McpManager, loadMcpConfig } from "../mcp.js";
 import { loadSlashCommands, type SlashCommand } from "../commands.js";
 import { configureLsp, disposeLsp, loadLspConfig } from "../lsp.js";
 import { backgroundManager } from "../tools/background.js";
-import { createSession, loadSession, listSessions, renameSession, deleteSession, searchSessions, tagSession, type SessionMeta } from "../session.js";
+import {
+  loadSession,
+  listSessions,
+  renameSession,
+  deleteSession,
+  searchSessions,
+  tagSession,
+  type SessionMeta,
+  type SessionSubCall,
+} from "../session.js";
 import type { MessageParam } from "../types.js";
 import { SseHub } from "./sse.js";
 import { GuiRuntime } from "./state.js";
 import { startGuiServer, type RunningGui } from "./server.js";
 import { resolveProjectDir, samePath, type ProjectContext, type SwitchResult } from "./project.js";
+
+/** Where each SDK looks for the model list when no baseURL is configured. */
+const DEFAULT_BASE_URL = { anthropic: "https://api.anthropic.com", openai: "https://api.openai.com/v1" } as const;
+
+/** The URL `listModels` will hit, for error messages. */
+function modelsUrl(provider: "anthropic" | "openai", baseURL?: string): string {
+  const base = (baseURL?.trim() || DEFAULT_BASE_URL[provider]).replace(/\/+$/, "");
+  return provider === "openai" ? `${base}/models` : `${base}/v1/models`;
+}
+
+/**
+ * Last resort for Anthropic-format gateways: ask the same host's OpenAI-style
+ * `/models` with bearer auth. DeepSeek, for one, serves the Anthropic wire
+ * format at `/anthropic` but only exposes the model list at `/models`.
+ * Returns null when that is unavailable too.
+ */
+async function listOpenAiModels(baseURL: string | undefined, apiKey: string): Promise<string[] | null> {
+  let origin: string;
+  try {
+    origin = new URL(baseURL?.trim() || DEFAULT_BASE_URL.anthropic).origin;
+  } catch {
+    return null;
+  }
+  try {
+    const res = await fetch(`${origin}/models`, {
+      headers: { authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { data?: Array<{ id?: string } | string> };
+    const ids = (body.data ?? []).map((m) => (typeof m === "string" ? m : m.id)).filter((id): id is string => !!id);
+    return ids.length ? ids : null;
+  } catch {
+    return null;
+  }
+}
 
 export interface GuiStartOptions {
   /** Working directory (the project the agent operates on). */
@@ -39,6 +98,8 @@ interface SessionSeed {
   id: string;
   messages?: MessageParam[];
   model?: string;
+  /** UI-only subagent chains stored in the session file. */
+  subCalls?: SessionSubCall[];
 }
 
 interface BuildOptions {
@@ -49,7 +110,7 @@ interface BuildOptions {
   askPermission: PermissionManager["askUser"];
 }
 
-/** Load (or create) the session a project context will start with. */
+/** Load the session a project context resumes, or start with none at all. */
 async function seedSession(cwd: string, resumeId?: string): Promise<SessionSeed> {
   if (resumeId) {
     const loaded = await loadSession(resumeId);
@@ -58,10 +119,12 @@ async function seedSession(cwd: string, resumeId?: string): Promise<SessionSeed>
       id: loaded.meta.id,
       messages: loaded.messages.length ? loaded.messages : undefined,
       model: loaded.meta.model,
+      subCalls: loaded.subCalls,
     };
   }
-  const created = await createSession(cwd);
-  return { id: created.id };
+  // No session file up front: `Agent.chat` creates one on the first message,
+  // so merely opening the app does not add an empty row to the sidebar.
+  return { id: "" };
 }
 
 /**
@@ -139,6 +202,7 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
   const noLsp = !!opts.noLsp;
 
   const session = await seedSession(cwd, resumeId);
+  for (const c of session.subCalls ?? []) runtime.recordSubCall(c.toolUseId, c);
   const project = await buildProject(cwd, {
     session,
     mode,
@@ -147,6 +211,7 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
     askPermission: (desc, risk, preview) => runtime.askPermission(desc, risk, preview),
   });
   runtime.attach(project.agent, project.permissions);
+  void refreshModelMeta();
   // A stuck permission prompt with no client to answer it would hang the turn
   // forever; when the last tab/window closes, deny outstanding prompts.
   hub.onEmpty = () => runtime.flushPermissions();
@@ -206,7 +271,10 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
       });
       // Keep the same object identity: the HTTP handler holds this reference.
       Object.assign(project, next);
+      runtime.subCalls.clear();
+      for (const c of nextSession.subCalls ?? []) runtime.recordSubCall(c.toolUseId, c);
       runtime.attach(project.agent, project.permissions);
+      void refreshModelMeta();
       hub.broadcast("project_changed", {
         cwd: project.cwd,
         sessionId: project.agent.sessionId,
@@ -221,6 +289,139 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
     }
   }
 
+  /* ---------------- LLM profiles (模型配置 panel) ---------------- */
+
+  const globalConfigFile = path.join(os.homedir(), ".node-agent", "config.json");
+  const projectConfigFile = path.join(cwd, ".node-agent", "config.json");
+
+  function hasProjectConfig(): boolean {
+    const cfg = readConfigJson(projectConfigFile);
+    return cfg !== null && cfg !== "corrupt" && Object.keys(cfg).length > 0;
+  }
+
+  async function listLlmProfiles(): Promise<{ activeId?: string; profiles: PublicProfile[]; projectOverrides: boolean }> {
+    const store = await loadProfileStore();
+    return { activeId: store.activeId, profiles: store.profiles.map(publicProfile), projectOverrides: hasProjectConfig() };
+  }
+
+  async function saveLlmProfile(input: ProfileInput): Promise<{ ok: boolean; id?: string; error?: string }> {
+    try {
+      const store = await loadProfileStore();
+      if (input.id && !findProfile(store, input.id)) return { ok: false, error: "not found" };
+      const { store: next, id } = upsertProfile(store, input);
+      await saveProfileStore(next);
+      return { ok: true, id };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  async function deleteLlmProfile(id: string): Promise<{ ok: boolean; error?: string }> {
+    try {
+      const store = await loadProfileStore();
+      const next = deleteProfile(store, id);
+      if (next === store) return { ok: false, error: "not found" };
+      // Accidentally deleting the active profile leaves the running session on
+      // whatever it already resolved; only the "active" marker is dropped.
+      await saveProfileStore(next);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  async function activateLlmProfile(id: string): Promise<{ ok: boolean; provider?: string; model?: string; error?: string; warning?: string }> {
+    if (runtime.busy || runtime.switching) return { ok: false, error: "busy" };
+    const store = await loadProfileStore();
+    const p = findProfile(store, id);
+    if (!p) return { ok: false, error: "not found" };
+
+    const cfg: Config = { provider: p.provider, model: p.model };
+    if (p.baseURL) cfg.baseURL = p.baseURL;
+    if (p.apiKey) cfg.apiKey = p.apiKey;
+    if (p.contextWindow) cfg.contextWindow = p.contextWindow;
+
+    try {
+      // Rebind before touching disk: a profile whose key does not resolve must
+      // not leave a half-applied config behind.
+      const r = project.agent.applyLlmConfig(cfg);
+      // `undefined` drops a stale key (e.g. the previous profile's baseURL)
+      // instead of leaking it into the next provider.
+      await mergeConfigJson(globalConfigFile, {
+        provider: p.provider,
+        model: p.model,
+        baseURL: p.baseURL?.trim() || undefined,
+        apiKey: p.apiKey?.trim() || undefined,
+        contextWindow: p.contextWindow ?? undefined,
+      });
+      await saveProfileStore({ ...store, activeId: id });
+      void refreshModelMeta();
+      hub.broadcast("project_changed", { cwd: project.cwd, sessionId: project.agent.sessionId, model: r.model, provider: r.provider });
+      return {
+        ok: true,
+        provider: r.provider,
+        model: r.model,
+        warning: hasProjectConfig() ? "当前目录的 .node-agent/config.json 里有配置，重启后会以它为准" : undefined,
+      };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
+   * Turn a profile off. The active marker is cleared and the values it wrote
+   * into the global config are dropped, so a restart falls back to env vars /
+   * the defaults instead of silently keeping a "disabled" configuration.
+   * The running session keeps the client it already built.
+   */
+  async function disableLlmProfile(id: string): Promise<{ ok: boolean; error?: string }> {
+    try {
+      const store = await loadProfileStore();
+      if (!findProfile(store, id)) return { ok: false, error: "not found" };
+      if (store.activeId !== id) return { ok: true };
+      await saveProfileStore({ ...store, activeId: undefined });
+      await mergeConfigJson(globalConfigFile, { provider: undefined, model: undefined, baseURL: undefined, apiKey: undefined });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /** Learn the endpoint's context window, then let the UI re-read its state. */
+  async function refreshModelMeta(): Promise<void> {
+    try {
+      await project.agent.refreshModelMeta();
+      hub.broadcast("model_meta", {});
+    } catch {
+      /* best effort — the static table stays the fallback */
+    }
+  }
+
+  /** List an endpoint's models from a draft config, without touching the session. */
+  async function listModelsForProfile(input: ProfileInput): Promise<{ models?: string[]; note?: string; error?: string }> {
+    let apiKey = input.apiKey;
+    if (!apiKey && input.id) {
+      const store = await loadProfileStore();
+      apiKey = findProfile(store, input.id)?.apiKey;
+    }
+
+    const probe = new LLM({ provider: input.provider, model: input.model || undefined, baseURL: input.baseURL, apiKey });
+    try {
+      return { models: await probe.listModels() };
+    } catch (err) {
+      const primary = err instanceof Error ? err.message : String(err);
+      // Anthropic-format gateways that live under a sub-path often have no
+      // `/v1/models`; fall back to the host's OpenAI-compatible list.
+      if (input.provider === "anthropic" && apiKey) {
+        const viaOpenAi = await listOpenAiModels(input.baseURL, apiKey);
+        if (viaOpenAi) {
+          return { models: viaOpenAi, note: "来自 OpenAI 兼容 /models" };
+        }
+      }
+      return { error: `${primary} — GET ${modelsUrl(input.provider, input.baseURL)}` };
+    }
+  }
+
   const gui = await startGuiServer(
     {
       project,
@@ -229,9 +430,10 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
       token,
       switchProject,
       newSession: async () => {
-        const s = await createSession(project.cwd);
-        await project.agent.resetSession(s.id);
-        return s;
+        // Nothing on disk yet; the next message creates the session file.
+        runtime.subCalls.clear();
+        await project.agent.resetSession("");
+        return { id: "" };
       },
       resumeSession: async (id) => {
         const loaded = await loadSession(id);
@@ -247,6 +449,8 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
           return r.ok ? null : r.error;
         }
         await project.agent.resetSession(loaded.meta.id, loaded.messages, loaded.meta.model);
+        runtime.subCalls.clear();
+        for (const c of loaded.subCalls) runtime.recordSubCall(c.toolUseId, c);
         if (loaded.meta.model) {
           try {
             project.agent.switchModel(loaded.meta.model);
@@ -254,6 +458,7 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
             /* no key for that provider - keep current model */
           }
         }
+        void refreshModelMeta();
         return null;
       },
       listSessions: async (): Promise<SessionMeta[]> => listSessions(),
@@ -261,19 +466,25 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
       renameSession: async (id, title) => renameSession(id, title),
       tagSession: async (id, tags) => tagSession(id, tags),
       deleteSession: async (id) => {
-        // Deleting the session the agent is currently writing to would leave
-        // dangling appends; swap in a fresh one first.
+        // The agent must stop appending to a file that no longer exists: drop
+        // back to "no session" and let the next message create a fresh one.
         const active = id === project.agent.sessionId;
         if (active && runtime.busy) return { ok: false, error: "busy" };
         const ok = await deleteSession(id);
         if (!ok) return { ok: false, error: "session not found" };
         if (active) {
-          const s = await createSession(project.cwd);
-          await project.agent.resetSession(s.id);
-          return { ok: true, activeReplaced: s.id };
+          await project.agent.resetSession("");
+          return { ok: true, activeCleared: true };
         }
         return { ok: true };
       },
+      listLlmProfiles,
+      saveLlmProfile,
+      deleteLlmProfile,
+      activateLlmProfile,
+      disableLlmProfile,
+      listModelsForProfile,
+      refreshModelMeta: () => void refreshModelMeta(),
       onQuit: opts.onQuit,
     },
     opts.port ?? 0,

@@ -26,6 +26,12 @@ export interface ToolContext {
   checkpoint?: (absPath: string, label: string) => Promise<void>;
   /** Report LLM token usage incurred by this tool (e.g. subagents) to the session cost tracker. */
   reportUsage?: (usage: { input: number; output: number; cacheRead?: number; cacheWrite?: number }) => void;
+  /**
+   * Report one tool call a tool itself performed on the user's behalf (the
+   * `task` tool uses this so the GUI can show the subagent's call chain).
+   * `round` is the subagent's own model round, for a call-stack style tree.
+   */
+  onSubTool?: (name: string, inputPreview: string, ok: boolean, preview: string, round?: number) => void;
   /** True while the agent is in plan mode (read-only exploration before execution). */
   planMode?: boolean;
   /** Called by exit_plan when the user approves the plan; the agent leaves plan mode. */

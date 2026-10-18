@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>mojo · 「打开项目」下移 · 5 个方案</title>
+<style>
+:root{
+  --bg:#f6f7f9;--card:#fff;--fg:#16181d;--dim:#5c6370;--faint:#8c939f;
+  --line:#e3e6eb;--accent:#4f46e5;--ok:#15803d;
+  --mono:"Cascadia Code","Consolas",monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:14px/1.65 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:1320px;margin:0 auto;padding:44px 28px 80px}
+h1{margin:0 0 8px;font-size:28px;letter-spacing:-.02em}
+.lead{margin:0 0 6px;color:var(--dim)}
+.note{color:var(--faint);font-size:12.5px;margin-bottom:14px}
+.note code{font-family:var(--mono);font-size:12px;background:#eceef2;padding:1px 6px;border-radius:4px}
+.banner{
+  background:#fff;border:1px solid var(--line);border-left:3px solid var(--accent);
+  border-radius:10px;padding:14px 18px;margin:0 0 30px;font-size:13px;color:var(--dim);
+}
+.banner b{color:var(--fg)}
+.banner ul{margin:8px 0 0;padding-left:18px}
+.banner li{margin:3px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(410px,1fr));gap:22px}
+.card{
+  background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden;
+  box-shadow:0 2px 10px rgba(22,24,29,.05);display:flex;flex-direction:column;
+  transition:box-shadow .18s,transform .18s;
+}
+.card:hover{box-shadow:0 14px 36px rgba(22,24,29,.12);transform:translateY(-2px)}
+.shot{position:relative;height:290px;overflow:hidden;border-bottom:1px solid var(--line);background:#eceef2}
+.shot iframe{width:1440px;height:900px;border:0;transform:scale(.48);transform-origin:0 0;pointer-events:none}
+.shot a{position:absolute;inset:0}
+.meta{padding:15px 18px 18px;display:flex;flex-direction:column;gap:8px;flex:1}
+.row{display:flex;align-items:baseline;gap:10px}
+.num{font-family:var(--mono);font-size:11px;color:var(--faint)}
+.name{font-size:16px;font-weight:700;letter-spacing:-.01em}
+.en{font-family:var(--mono);font-size:11.5px;color:var(--faint)}
+.desc{color:var(--dim);font-size:13px;margin:0}
+.kv{display:flex;gap:8px;font-size:12px;color:var(--dim);margin:0}
+.kv span:first-child{color:var(--faint);flex:0 0 62px;font-family:var(--mono);font-size:11px}
+.tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:auto;padding-top:10px}
+.tag{font-size:11px;color:var(--dim);background:#f1f3f7;border-radius:999px;padding:2px 10px}
+.tag.pro{background:#e8f5ec;color:var(--ok)}
+.tag.con{background:#fdeeee;color:#b91c1c}
+.open{
+  display:inline-flex;align-items:center;gap:6px;align-self:flex-start;margin-top:12px;
+  font-size:12.5px;font-weight:600;color:#fff;background:var(--fg);text-decoration:none;
+  border-radius:8px;padding:7px 14px;transition:.15s;
+}
+.open:hover{background:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>「打开项目」下移 · 5 个方案</h1>
+  <p class="lead">把项目入口从顶部面包屑搬到底部输入区，和模式切换、模型下拉、发送按钮做成一家人。</p>
+  <p class="note">5 个方案共用同一套外壳与 Porcelain 主题（<code>base.css</code> + <code>demo.js</code>），差异只在项目入口的位置与形态，方便横向比较。每个页面右下角可切「欢迎页 / 对话 / 授权弹窗」，工具卡可点击展开，项目控件可点开浮层。</p>
+
+  <div class="banner">
+    <b>共同点</b>
+    <ul>
+      <li>顶栏不再显示项目路径；顶栏只剩会话标题 + 会话 id。</li>
+      <li>点击项目控件 → 既有行为不变：Electron 弹原生目录选择框，浏览器版弹路径输入。</li>
+      <li>方案 1/2/4 额外给了「最近项目」列表（需要新增一个最近目录的持久化，约 20 行）；3/5 没有。</li>
+    </ul>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="shot"><iframe src="01-bottom-crumb.html" loading="lazy" scrolling="no"></iframe><a href="01-bottom-crumb.html"></a></div>
+      <div class="meta">
+        <div class="row"><span class="num">V1</span><span class="name">底栏面包屑</span><span class="en">bottom crumb</span></div>
+        <p class="desc">项目就是底栏最左端一段轻量文本「📁 D:\work\mojo ▾」，和原来顶栏的面包屑长得一样，只是搬到了模型/模式那一行。点击在输入区上方展开浮层。</p>
+        <p class="kv"><span>改动</span>移动 1 个按钮 + 换位置</p>
+        <p class="kv"><span>占用</span>低（长路径会省略号）</p>
+        <div class="tags"><span class="tag pro">改动最小</span><span class="tag pro">观感不变</span><span class="tag con">路径易被截断</span></div>
+        <a class="open" href="01-bottom-crumb.html">打开预览 →</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="shot"><iframe src="02-chip-popover.html" loading="lazy" scrolling="no"></iframe><a href="02-chip-popover.html"></a></div>
+      <div class="meta">
+        <div class="row"><span class="num">V2</span><span class="name">药丸 + 最近项目面板</span><span class="en">chip + popover</span></div>
+        <p class="desc">项目是一枚带边框的 chip「📁 mojo ▾」，显示目录名而不是全路径，视觉权重和旁边的模式分段控件一致。点击展开 320px 面板：搜索框 + 最近项目 + 浏览。</p>
+        <p class="kv"><span>改动</span>新按钮样式 + 浮层 + 最近列表</p>
+        <p class="kv"><span>占用</span>低（只显示目录名）</p>
+        <div class="tags"><span class="tag pro">切换最快</span><span class="tag pro">视觉对齐</span><span class="tag con">多一个列表要维护</span></div>
+        <a class="open" href="02-chip-popover.html">打开预览 →</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="shot"><iframe src="03-context-strip.html" loading="lazy" scrolling="no"></iframe><a href="03-context-strip.html"></a></div>
+      <div class="meta">
+        <div class="row"><span class="num">V3</span><span class="name">输入框上方上下文条</span><span class="en">context strip</span></div>
+        <p class="desc">项目放在输入框正上方一条细 mono 行：📁 路径 │ ⎇ 分支 │ 会话名。底栏因此保持纯净（只有模式 / PLAN / 模型 / 发送）。顺手把整个顶栏也去掉了。</p>
+        <p class="kv"><span>改动</span>新增一条 strip，删掉顶栏</p>
+        <p class="kv"><span>占用</span>多一行高（但顶栏省回来了）</p>
+        <div class="tags"><span class="tag pro">分层最清楚</span><span class="tag pro">底栏最干净</span><span class="tag con">纵向多一层</span></div>
+        <a class="open" href="03-context-strip.html">打开预览 →</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="shot"><iframe src="04-segmented-group.html" loading="lazy" scrolling="no"></iframe><a href="04-segmented-group.html"></a></div>
+      <div class="meta">
+        <div class="row"><span class="num">V4</span><span class="name">统一分段控件</span><span class="en">segmented group</span></div>
+        <p class="desc">把底栏左侧原有的三组东西（项目 / 模式 / PLAN）收进一个带边框的分段控件：<b>[📁 mojo ▾] │ [默认 自动 YOLO] │ [PLAN]</b>，项目是它的第一格。</p>
+        <p class="kv"><span>改动</span>底栏左半边重排 + 包一层容器</p>
+        <p class="kv"><span>占用</span>低（宽度可控）</p>
+        <div class="tags"><span class="tag pro">最"一个控件"</span><span class="tag pro">不再像散按钮</span><span class="tag con">样式改动最大</span></div>
+        <a class="open" href="04-segmented-group.html">打开预览 →</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="shot"><iframe src="05-icon-button.html" loading="lazy" scrolling="no"></iframe><a href="05-icon-button.html"></a></div>
+      <div class="meta">
+        <div class="row"><span class="num">V5</span><span class="name">图标按钮 + 居中面板</span><span class="en">icon + modal</span></div>
+        <p class="desc">底栏只放一个 24px 方形 📁（和「＋」同级），路径彻底从界面上消失，只在 hover tooltip 和状态栏里出现。点击弹出居中面板：路径输入 + 最近 chips。</p>
+        <p class="kv"><span>改动</span>改成图标按钮 + 新弹窗</p>
+        <p class="kv"><span>占用</span>最低（24px 固定宽）</p>
+        <div class="tags"><span class="tag pro">最省空间</span><span class="tag pro">低频操作不占地</span><span class="tag con">看不到当前项目</span></div>
+        <a class="open" href="05-icon-button.html">打开预览 →</a>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
