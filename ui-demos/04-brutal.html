@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>mojo · Brutal</title>
+<style>
+/* ============================================================
+   04 Brutal — 新粗野主义
+   2px 硬黑边 + 偏移实心阴影 + 高饱和色块 + 无圆角
+   ============================================================ */
+:root{
+  --bg:#fdfbf3;
+  --fg:#0a0a0a;
+  --dim:#4a4a48;
+  --faint:#8b8b86;
+  --yellow:#ffe500;
+  --blue:#2b5cff;
+  --pink:#ff5cae;
+  --green:#00c46a;
+  --red:#ff3b30;
+  --line:#0a0a0a;
+  --shadow:5px 5px 0 var(--line);
+  --shadow-sm:3px 3px 0 var(--line);
+  --mono:"Cascadia Code","JetBrains Mono","Consolas",monospace;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{
+  background:var(--bg);color:var(--fg);
+  font:14px/1.6 "Archivo","Inter",-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+::selection{background:var(--yellow)}
+::-webkit-scrollbar{width:12px;height:12px}
+::-webkit-scrollbar-thumb{background:var(--fg);border:3px solid var(--bg)}
+::-webkit-scrollbar-track{background:transparent}
+button{font:inherit;color:inherit;cursor:pointer;font-weight:700}
+h1,h2,h3{letter-spacing:-.03em}
+
+#app{display:flex;height:100vh}
+
+/* ---------------- sidebar ---------------- */
+#sidebar{
+  width:266px;flex:0 0 266px;background:var(--yellow);border-right:3px solid var(--line);
+  display:flex;flex-direction:column;
+}
+.side-head{padding:18px 16px 12px;display:flex;align-items:center;gap:10px;border-bottom:3px solid var(--line)}
+.logo{
+  width:30px;height:30px;flex:0 0 30px;background:var(--fg);color:var(--yellow);border:2px solid var(--line);
+  display:flex;align-items:center;justify-content:center;font-weight:900;font-size:16px;
+}
+.brand{font-weight:900;font-size:19px;letter-spacing:-.04em;text-transform:lowercase}
+.ver{margin-left:auto;font-family:var(--mono);font-size:10px;background:#fff;border:2px solid var(--line);padding:1px 6px}
+.side-new{padding:12px}
+#new-session{
+  width:100%;text-align:left;background:#fff;border:2px solid var(--line);box-shadow:var(--shadow-sm);
+  padding:9px 12px;font-size:13px;font-weight:800;transition:.1s;
+}
+#new-session:hover{transform:translate(2px,2px);box-shadow:1px 1px 0 var(--line)}
+#new-session:active{transform:translate(3px,3px);box-shadow:none}
+.side-search{padding:0 12px 12px}
+#session-search{
+  width:100%;background:#fff;border:2px solid var(--line);padding:8px 11px;font-size:12.5px;
+  font-weight:600;outline:none;
+}
+#session-search:focus{background:#fffbe0}
+#session-search::placeholder{color:var(--faint);font-weight:500}
+.side-label{
+  padding:0 16px 8px;font-size:11px;font-weight:900;letter-spacing:.14em;text-transform:uppercase;
+}
+.session-list{overflow-y:auto;flex:1;padding:0 12px 12px}
+.session-item{
+  background:#fff;border:2px solid var(--line);padding:8px 10px;margin-bottom:8px;cursor:pointer;
+  transition:.1s;position:relative;
+}
+.session-item:hover{transform:translate(-2px,-2px);box-shadow:var(--shadow-sm)}
+.session-item.active{background:var(--fg);color:#fff}
+.session-item.active .s-meta,.session-item.active .s-tags{color:var(--yellow)}
+.s-title{font-size:13px;font-weight:800;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.s-meta{display:flex;justify-content:space-between;gap:8px;font-size:10.5px;font-family:var(--mono);color:var(--dim);margin-top:2px}
+.s-tags{font-family:var(--mono);font-size:10.5px;margin-top:3px;color:var(--blue);font-weight:700}
+.side-foot{padding:12px;border-top:3px solid var(--line)}
+.quit{width:100%;background:#fff;border:2px solid var(--line);padding:8px;font-size:12.5px;font-weight:800;transition:.1s}
+.quit:hover{background:var(--red);color:#fff}
+
+/* ---------------- main ---------------- */
+#main{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--bg)}
+.topbar{display:flex;align-items:center;gap:8px;padding:11px 20px;border-bottom:3px solid var(--line);font-size:12px;font-weight:700}
+.crumb{font-family:var(--mono);font-size:11px;font-weight:600}
+.pill{border:2px solid var(--line);padding:1px 9px;font-size:11px;font-weight:800;background:#fff}
+.pill.on{background:var(--blue);color:#fff}
+.pill.plan{background:var(--pink);color:#fff}
+.topbar .sp{margin-left:auto}
+
+/* welcome */
+.welcome{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;text-align:center}
+.welcome .box{
+  background:var(--pink);border:3px solid var(--line);box-shadow:8px 8px 0 var(--line);
+  padding:6px 18px;font-weight:900;font-size:13px;letter-spacing:.1em;text-transform:uppercase;
+  margin-bottom:26px;color:#fff;
+}
+.welcome h1{font-size:46px;font-weight:900;line-height:1.05;margin:0 0 14px;letter-spacing:-.045em}
+.welcome h1 mark{background:var(--yellow);border:3px solid var(--line);padding:0 8px;display:inline-block;transform:rotate(-1.5deg)}
+.welcome p{margin:0;color:var(--dim);font-size:14px;max-width:440px;line-height:1.7;font-weight:600}
+.welcome .hints{display:flex;flex-wrap:wrap;gap:10px;margin-top:30px;justify-content:center;max-width:560px}
+.hint{
+  background:#fff;border:2px solid var(--line);box-shadow:var(--shadow-sm);padding:8px 15px;
+  font-size:12.5px;font-weight:700;transition:.1s;
+}
+.hint:hover{background:var(--yellow);transform:translate(2px,2px);box-shadow:1px 1px 0 var(--line)}
+
+/* transcript */
+#transcript{flex:1;overflow-y:auto;padding:24px 20px 16px;display:flex;flex-direction:column;gap:16px}
+#transcript>*{width:100%;max-width:780px;margin-inline:auto}
+.msg{animation:pop .18s ease}
+@keyframes pop{from{opacity:0;transform:translate(-3px,3px)}to{opacity:1;transform:none}}
+
+.msg.user{
+  align-self:flex-end;width:fit-content;max-width:76%;margin-right:max(0px,calc((100% - 780px)/2));
+  background:var(--blue);color:#fff;border:2px solid var(--line);box-shadow:var(--shadow-sm);
+  padding:11px 16px;white-space:pre-wrap;font-size:13.5px;font-weight:600;
+}
+.msg.assistant{align-self:stretch}
+.msg.assistant .who{
+  display:inline-block;background:var(--fg);color:#fff;font-weight:900;font-size:11px;
+  letter-spacing:.1em;text-transform:uppercase;padding:2px 10px;margin-bottom:8px;
+}
+.md{background:#fff;border:2px solid var(--line);box-shadow:var(--shadow);padding:16px 18px}
+.md>*:first-child{margin-top:0}
+.md>*:last-child{margin-bottom:0}
+.md h3{font-size:17px;font-weight:900;margin:18px 0 8px}
+.md p{margin:9px 0}
+.md ul,.md ol{padding-left:22px;margin:9px 0}
+.md li{margin:3px 0}
+.md code{font-family:var(--mono);font-size:12.5px;font-weight:600}
+.md :not(pre)>code{background:var(--yellow);border:1.5px solid var(--line);padding:0 5px}
+.md pre{
+  background:var(--fg);color:#f5f5f5;border:2px solid var(--line);padding:13px 15px;overflow-x:auto;
+  margin:12px 0;position:relative;
+}
+.md pre code{font-size:12px;line-height:1.7;color:#f0f0f0}
+.md pre .copy{
+  position:absolute;top:8px;right:8px;font-family:var(--mono);font-size:10px;font-weight:700;
+  background:var(--yellow);color:var(--fg);border:2px solid var(--line);padding:1px 7px;opacity:0;transition:.12s;
+}
+.md pre:hover .copy{opacity:1}
+.md blockquote{
+  margin:12px 0;background:#fffbe0;border:2px solid var(--line);border-left:8px solid var(--yellow);
+  padding:9px 14px;font-weight:600;
+}
+.md table{border-collapse:collapse;margin:12px 0;font-size:13px}
+.md th,.md td{border:2px solid var(--line);padding:6px 12px;text-align:left}
+.md th{background:var(--yellow);font-weight:900;font-size:11.5px}
+.md a{color:var(--blue);font-weight:700}
+
+/* tool card */
+.tool-card{
+  background:#fff;border:2px solid var(--line);box-shadow:var(--shadow-sm);overflow:hidden;
+  animation:pop .18s ease;
+}
+.tool-head{display:flex;align-items:center;gap:10px;padding:8px 12px;cursor:pointer;font-size:12.5px}
+.tool-card.open .tool-head{border-bottom:2px solid var(--line);background:#fffbe0}
+.tool-status{width:11px;height:11px;border:2px solid var(--line);flex:0 0 11px}
+.tool-status.running{background:var(--yellow);animation:pulse 1s infinite}
+.tool-status.ok{background:var(--green)}
+.tool-status.err{background:var(--red)}
+@keyframes pulse{50%{opacity:.3}}
+.tool-name{font-family:var(--mono);font-size:11.5px;font-weight:900;background:var(--yellow);border:1.5px solid var(--line);padding:0 6px;white-space:nowrap}
+.think-icon{font-weight:900;color:var(--pink)}
+.tool-preview{color:var(--dim);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:600}
+.tool-body{display:none;padding:12px}
+.tool-card.open .tool-body{display:block;max-height:300px;overflow:auto}
+.tool-body pre{margin:0;font-family:var(--mono);font-size:11.5px;line-height:1.7;white-space:pre-wrap;word-break:break-word;color:var(--dim)}
+
+/* wait */
+.wait{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:800}
+.wait i{width:10px;height:10px;border:2px solid var(--line);background:var(--yellow);animation:wait .9s infinite ease-in-out}
+.wait i:nth-child(2){animation-delay:.12s}
+.wait i:nth-child(3){animation-delay:.24s}
+@keyframes wait{0%,60%,100%{transform:none}30%{transform:translateY(-5px)}}
+
+/* statusbar */
+#statusbar{
+  padding:7px 20px;font-family:var(--mono);font-size:11px;font-weight:600;background:var(--fg);color:#fff;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+#statusbar b{color:var(--yellow);font-weight:600}
+
+/* composer */
+#composer{padding:10px 20px 22px}
+.composer-box{width:100%;max-width:780px;margin-inline:auto;background:#fff;border:3px solid var(--line);box-shadow:var(--shadow);padding:11px 13px 9px}
+.composer-box:focus-within{background:#fffdf0}
+#input{width:100%;display:block;resize:none;min-height:28px;max-height:170px;background:transparent;border:0;
+  color:var(--fg);font:inherit;font-size:14.5px;font-weight:600;line-height:1.55;padding:3px 3px 9px;outline:none}
+#input::placeholder{color:var(--faint);font-weight:500}
+.composer-bar{display:flex;align-items:center;gap:8px}
+.bar-left,.bar-right{display:flex;align-items:center;gap:8px}
+.bar-right{margin-left:auto}
+#attach{width:28px;height:28px;background:#fff;border:2px solid var(--line);font-size:15px;line-height:1;padding:0;transition:.1s}
+#attach:hover{background:var(--yellow)}
+.mode-picker{display:flex;border:2px solid var(--line);background:#fff}
+.mode-picker button{border:0;background:transparent;padding:3px 11px;font-size:11.5px;font-weight:800}
+.mode-picker button + button{border-left:2px solid var(--line)}
+.mode-picker button.active{background:var(--fg);color:#fff}
+.plan-toggle{display:flex;align-items:center;gap:5px;font-size:11.5px;font-weight:800;user-select:none;border:2px solid var(--line);padding:3px 9px;background:#fff}
+.plan-toggle input{accent-color:var(--pink);width:13px;height:13px}
+.ctx{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:10.5px;font-weight:700}
+.ctx .track{width:84px;height:12px;border:2px solid var(--line);background:#fff;overflow:hidden}
+.ctx .fill{height:100%;width:42%;background:var(--green);border-right:2px solid var(--line)}
+.model-picker{border:2px solid var(--line);background:#fff;display:flex;align-items:center}
+.model-picker select{appearance:none;background:transparent;border:0;font-family:var(--mono);font-size:11.5px;font-weight:700;padding:4px 6px;cursor:pointer;outline:none}
+#send,#stop{width:32px;height:32px;border:2px solid var(--line);font-size:15px;display:flex;align-items:center;
+  justify-content:center;padding:0;transition:.1s}
+#send{background:var(--yellow);box-shadow:var(--shadow-sm);font-weight:900}
+#send:hover{transform:translate(2px,2px);box-shadow:1px 1px 0 var(--line)}
+#stop{background:var(--red);color:#fff}
+
+/* ---------------- modals ---------------- */
+.modal{position:fixed;inset:0;background:rgba(10,10,10,.45);display:flex;align-items:center;justify-content:center;z-index:100}
+.modal-card{
+  width:min(700px,92vw);max-height:82vh;display:flex;flex-direction:column;background:#fff;
+  border:3px solid var(--line);box-shadow:10px 10px 0 var(--line);overflow:hidden;animation:pop .16s ease;
+}
+.perm-head{display:flex;align-items:center;gap:12px;padding:15px 18px;border-bottom:3px solid var(--line);background:var(--yellow)}
+.badge{font-size:11px;font-weight:900;padding:2px 10px;border:2px solid var(--line);text-transform:uppercase}
+.badge.high{background:var(--red);color:#fff}
+.badge.medium{background:var(--pink);color:#fff}
+.badge.low{background:var(--green)}
+.perm-desc{font-weight:900;font-size:15px}
+.perm-desc code{font-family:var(--mono);font-size:13px;background:#fff;border:2px solid var(--line);padding:0 6px}
+.perm-preview{flex:1;overflow:auto;margin:0;padding:16px 18px;font-family:var(--mono);font-size:12px;
+  white-space:pre;background:#fff;color:var(--dim);line-height:1.8;font-weight:600}
+.perm-preview .add{color:#008f4d;background:#e5fff2}
+.perm-preview .del{color:var(--red);background:#ffefee}
+.perm-actions{display:flex;gap:9px;padding:15px 18px;border-top:3px solid var(--line);background:#fdfbf3}
+.perm-actions button{flex:1;padding:10px;border:2px solid var(--line);background:#fff;font-size:12.5px;font-weight:800;transition:.1s}
+.perm-actions button:hover{transform:translate(2px,2px)}
+.perm-actions button.primary{background:var(--yellow)}
+.perm-actions button.danger{background:var(--red);color:#fff}
+.perm-actions kbd{font-family:var(--mono);font-size:10px;opacity:.75;margin-left:4px}
+
+/* demo switch */
+.demo-switch{
+  position:fixed;left:50%;bottom:14px;transform:translateX(-50%);z-index:300;display:flex;
+  background:#fff;border:2px solid var(--line);box-shadow:var(--shadow-sm);padding:2px;
+}
+.demo-switch span{padding:4px 8px 4px 12px;font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.1em;color:var(--faint)}
+.demo-switch button{background:transparent;border:0;padding:5px 14px;font-size:11.5px;font-weight:800}
+.demo-switch button.active{background:var(--fg);color:var(--yellow)}
+body[data-view="welcome"] #transcript{display:none}
+body[data-view="transcript"] .welcome{display:none}
+body[data-view="perm"] .welcome{display:none}
+.hidden{display:none!important}
+@media(max-width:860px){#sidebar{display:none}}
+</style>
+</head>
+<body data-view="transcript">
+<div id="app">
+  <aside id="sidebar">
+    <div class="side-head"><div class="logo">m</div><span class="brand">mojo</span><span class="ver">v0.1</span></div>
+    <div class="side-new"><button id="new-session">＋ 新建任务</button></div>
+    <div class="side-search"><input id="session-search" placeholder="搜索历史会话…" /></div>
+    <div class="side-label">任务</div>
+    <div class="session-list">
+      <div class="session-item active">
+        <div class="s-title">修复 WebSocket 超时重连</div>
+        <div class="s-meta"><span>D:\work\mojo</span><span>刚刚</span></div>
+        <div class="s-tags">#bug #ws</div>
+      </div>
+      <div class="session-item">
+        <div class="s-title">把 multi_edit 的 diff 合并逻辑抽出来</div>
+        <div class="s-meta"><span>D:\work\mojo</span><span>2 小时前</span></div>
+        <div class="s-tags">#refactor</div>
+      </div>
+      <div class="session-item">
+        <div class="s-title">压缩：交接笔记信息衰减</div>
+        <div class="s-meta"><span>D:\work\mojo</span><span>昨天</span></div>
+      </div>
+      <div class="session-item">
+        <div class="s-title">Windows 下 pwsh 危险命令检测</div>
+        <div class="s-meta"><span>D:\work\mojo</span><span>周三</span></div>
+        <div class="s-tags">#win</div>
+      </div>
+      <div class="session-item">
+        <div class="s-title">MCP server 端到端测试</div>
+        <div class="s-meta"><span>D:\work\mojo</span><span>3 天前</span></div>
+      </div>
+    </div>
+    <div class="side-foot"><button class="quit">⏻ 退出</button></div>
+  </aside>
+
+  <main id="main">
+    <div class="topbar">
+      <span class="crumb">D:\work\mojo</span>
+      <span class="pill on">自动</span>
+      <span class="pill plan">PLAN 关</span>
+      <span class="sp"></span>
+      <span class="crumb">ses_a91f3c</span>
+    </div>
+
+    <section id="welcome" class="welcome">
+      <div class="box">mojo · node ≥ 20</div>
+      <h1>把活儿<mark>交出去</mark>。</h1>
+      <p>读代码、跑命令、改文件、发 PR。40 轮工具迭代，上下文满了自动压缩。</p>
+      <div class="hints">
+        <button class="hint">解释这个仓库的架构</button>
+        <button class="hint">/review main 并发安全</button>
+        <button class="hint">修一下失败的测试</button>
+        <button class="hint">@src/llm/openai.ts 流式解析</button>
+      </div>
+    </section>
+
+    <section id="transcript">
+      <div class="msg user">帮我看看 src/llm/openai.ts —— 流式解析在断线重连之后，会把已经吐过的那一段再重复输出一次。找下根因。</div>
+
+      <div class="tool-card thinking-card">
+        <div class="tool-head"><span class="think-icon">✻</span><span class="tool-name">thinking</span><span class="tool-preview">重连时 buffer 没清空，已 flush 的 delta 再次进入拼接…</span></div>
+        <div class="tool-body"><pre>两条线索：
+1. 重试循环是否复用了上一次的 partial text buffer
+2. 断点恢复时 lastEmittedIndex 是否被重置为 0</pre></div>
+      </div>
+
+      <div class="tool-card open">
+        <div class="tool-head"><span class="tool-status ok"></span><span class="tool-name">read_file</span><span class="tool-preview">src/llm/openai.ts · 1–160</span></div>
+        <div class="tool-body"><pre>export async function* streamChat(req: ChatRequest, signal?: AbortSignal) {
+  let emitted = "";
+  let retries = 0;
+  while (true) {
+    try {
+      const stream = await client.chat.completions.create({ ...req, stream: true });
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta?.content ?? "";
+        if (!delta) continue;
+        emitted += delta;          // ← 重连后 emitted 未重置
+        yield { type: "delta", text: delta };
+      }
+      return;
+    } catch (err) {
+      if (++retries &gt; 3) throw err;
+    }
+  }
+}</pre></div>
+      </div>
+
+      <div class="tool-card">
+        <div class="tool-head"><span class="tool-status ok"></span><span class="tool-name">grep</span><span class="tool-preview">"emitted" in src/llm — 4 处命中</span></div>
+        <div class="tool-body"><pre>src/llm/openai.ts:12    let emitted = "";
+src/llm/openai.ts:21    emitted += delta;
+src/llm/anthropic.ts:18 let emitted = "";
+src/llm/anthropic.ts:29 emitted += delta;</pre></div>
+      </div>
+
+      <div class="msg assistant">
+        <div class="who">mojo</div>
+        <div class="md">
+          <p>根因在重试循环里：<code>emitted</code> 是循环外声明的，重连成功后会从上次断点继续累加，但上层把它当作「本轮全部产出」重新回填了一遍。</p>
+          <h3>修法</h3>
+          <p>把「已发出去的长度」当锚点，重连后只 yield 增量：</p>
+          <pre><code>catch (err) {
+  if (++retries &gt; 3) throw err;
+  emitted = emitted.slice(0, lastYielded);   // 回退到已确认位置
+}</code><button class="copy">复制</button></pre>
+          <ul>
+            <li><code>lastYielded</code> 在每次 <code>yield</code> 之后同步</li>
+            <li>退避重试保留，但不再污染文本流</li>
+          </ul>
+          <blockquote>anthropic.ts 里有同样的形状，建议一起改。</blockquote>
+        </div>
+      </div>
+
+      <div class="msg assistant"><div class="wait"><i></i><i></i><i></i><span style="margin-left:6px">正在应用修改…</span></div></div>
+    </section>
+
+    <footer id="statusbar"><b>claude-sonnet-4-5</b> · ses_a91f · ctx 42% (84k/200k) · $0.83 · bg1 运行中</footer>
+
+    <div id="composer">
+      <div class="composer-box">
+        <textarea id="input" rows="1" placeholder="今天帮你做些什么？输入 / 调用命令"></textarea>
+        <div class="composer-bar">
+          <div class="bar-left">
+            <button id="attach" title="添加图片">＋</button>
+            <div class="mode-picker"><button>默认</button><button class="active">自动</button><button>YOLO</button></div>
+            <label class="plan-toggle"><input type="checkbox" /> PLAN</label>
+          </div>
+          <div class="bar-right">
+            <div class="ctx" title="上下文占用"><span>42%</span><div class="track"><div class="fill"></div></div></div>
+            <div class="model-picker">
+              <select>
+                <option>claude-sonnet-4-5</option>
+                <option>claude-opus-4-1</option>
+                <option>openai:gpt-4o</option>
+              </select>
+            </div>
+            <button id="send" title="发送">↑</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div id="perm-modal" class="modal hidden">
+  <div class="modal-card">
+    <div class="perm-head">
+      <span class="badge high">高风险</span>
+      <span class="perm-desc">写入 <code>src/llm/openai.ts</code></span>
+    </div>
+    <pre class="perm-preview">  <span class="del">-      emitted += delta;</span>
+<span class="add">+      emitted += delta;</span>
+<span class="add">+      lastYielded = emitted.length;</span>
+   }
+   return;
+ } catch (err) {
+<span class="del">-      if (++retries &gt; 3) throw err;</span>
+<span class="add">+      if (++retries &gt; 3) throw err;</span>
+<span class="add">+      emitted = emitted.slice(0, lastYielded);</span>
+ }</pre>
+    <div class="perm-actions">
+      <button class="primary">允许一次<kbd>Y</kbd></button>
+      <button>总是允许<kbd>A</kbd></button>
+      <button>拒绝一次<kbd>N</kbd></button>
+      <button class="danger">总是拒绝<kbd>D</kbd></button>
+    </div>
+  </div>
+</div>
+
+<div class="demo-switch">
+  <span>DEMO</span>
+  <button data-view="welcome">欢迎页</button>
+  <button data-view="transcript" class="active">对话</button>
+  <button data-view="perm">授权弹窗</button>
+</div>
+
+<script>
+(function(){
+  var btns=[].slice.call(document.querySelectorAll('.demo-switch button'));
+  var modal=document.getElementById('perm-modal');
+  function set(v){
+    document.body.dataset.view=v;
+    btns.forEach(function(b){b.classList.toggle('active',b.dataset.view===v)});
+    modal.classList.toggle('hidden',v!=='perm');
+  }
+  btns.forEach(function(b){b.addEventListener('click',function(){set(b.dataset.view)})});
+  [].slice.call(document.querySelectorAll('.tool-head')).forEach(function(h){
+    h.addEventListener('click',function(){h.parentNode.classList.toggle('open')});
+  });
+})();
+</script>
+</body>
+</html>

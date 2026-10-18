@@ -11,10 +11,13 @@
     <div id="app">
       <aside id="sidebar">
         <div class="side-head">
-          <span class="brand">mojo</span>
+          <span class="brand">mojo<i>.</i></span>
         </div>
         <div class="side-new">
           <button id="new-session" title="新建会话">＋ 新建任务</button>
+        </div>
+        <div class="side-search">
+          <input id="session-search" type="text" placeholder="搜索历史会话…" autocomplete="off" spellcheck="false" />
         </div>
         <div class="side-label">任务</div>
         <div id="session-list" class="session-list"></div>
@@ -24,9 +27,26 @@
       </aside>
 
       <main id="main">
+        <div id="topbar">
+          <span class="crumb brand-crumb">mojo</span>
+          <button class="crumb crumb-btn" id="open-project" title="切换项目目录">
+            <span class="crumb-icon">📁</span>
+            <span id="crumb-cwd"></span>
+            <span class="crumb-caret">▾</span>
+          </button>
+          <span class="sp"></span>
+          <span class="crumb" id="crumb-session"></span>
+        </div>
+
         <section id="welcome" class="welcome">
-          <h1>mojo，我帮你</h1>
-          <p class="welcome-sub">一个会话、一条命令，把活儿交给智能体</p>
+          <h1>mojo，<em>帮你</em>。</h1>
+          <p class="welcome-sub">一个会话、一条命令。把仓库、报错、设计稿交给它，剩下的交给一轮轮工具调用。</p>
+          <div class="hints">
+            <button class="hint" data-prompt="解释这个仓库的架构">解释这个仓库的架构</button>
+            <button class="hint" data-prompt="/review main 并发安全">/review main 并发安全</button>
+            <button class="hint" data-prompt="跑一下测试，把失败的原因和修法说清楚">修一下失败的测试</button>
+            <button class="hint" data-prompt="@src/llm/openai.ts 讲一下流式解析的实现">检查流式解析</button>
+          </div>
         </section>
 
         <section id="transcript" class="hidden"></section>
@@ -58,7 +78,7 @@
                   <span id="ctx-text"></span>
                 </div>
                 <div class="model-picker">
-                  <select id="model-select" title="选择模型"></select>
+                  <select id="model-select" title="选择模型" aria-label="选择模型"></select>
                   <button id="model-custom" title="自定义模型">✎</button>
                 </div>
                 <input type="file" id="file-input" accept="image/*" multiple hidden />
@@ -90,7 +110,7 @@
     <div id="input-modal" class="modal hidden">
       <div class="modal-card narrow">
         <div id="input-title" class="input-title"></div>
-        <input id="input-field" type="text" maxlength="80" />
+        <input id="input-field" type="text" maxlength="260" />
         <div class="perm-actions">
           <button id="input-ok" class="primary">确定</button>
           <button id="input-cancel">取消</button>

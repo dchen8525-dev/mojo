@@ -18,6 +18,7 @@ import { configureLsp, disposeLsp, loadLspConfig } from "./lsp.js";
 import { renderSessionMarkdown, createSession, loadSession, listSessions } from "./session.js";
 import { runAgentCommand, type CommandContext } from "./agentCommands.js";
 import {
+  ansiEmphasize,
   ansiHelpers,
   ansiPaint,
   getTheme,
@@ -311,7 +312,8 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
     const r = await runAgentCommand(line, cmdCtx);
     if (r.quit) return "quit";
     if (!r.text) return null;
-    return r.kind === "error" ? ANSI.error(r.text) : r.text;
+    if (r.kind === "error") return ANSI.error(r.text);
+    return r.highlight ? ansiEmphasize(r.text, r.highlight) : r.text;
   }
 
   const app = render(

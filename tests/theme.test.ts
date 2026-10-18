@@ -5,6 +5,7 @@ import React from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import { render } from "ink-testing-library";
 import {
+  ansiEmphasize,
   ansiHelpers,
   ansiPaint,
   detectBackgroundFromEnv,
@@ -234,6 +235,15 @@ describe("print-mode helpers", () => {
     const painted = ansiPaint(light.error, "boom");
     expect(painted).toContain("boom");
     expect(painted).toMatch(/\x1b\[38;2;\d+;\d+;\d+m/);
+  });
+
+  it("ansiEmphasize marks substrings bold+inverse, without interpreting regex", () => {
+    const out = ansiEmphasize("the WebSocket times out", "webSOCKET");
+    expect(out).toBe("the \x1b[1;7mWebSocket\x1b[0m times out");
+    // metacharacters are escaped, not interpreted: "a.c" must not match "abc"
+    expect(ansiEmphasize("abc", "a.c")).toBe("abc");
+    expect(ansiEmphasize("a.c here", "a.c")).toBe("\x1b[1;7ma.c\x1b[0m here");
+    expect(ansiEmphasize("untouched", "  ")).toBe("untouched");
   });
 
   it("each helper is themed, not hardcoded ANSI", () => {

@@ -373,6 +373,19 @@ export function ansiPaint(hex: string, text: string): string {
   return `${ansiFg(hex)}${text}\x1b[0m`;
 }
 
+/**
+ * Paint every case-insensitive occurrence of `term` bold+inverse (used for
+ * /search output). Inverse video adapts to the terminal's own palette, so the
+ * same codes read on dark and light backgrounds. `term` is treated as a plain
+ * substring: regex metacharacters are escaped, not interpreted.
+ */
+export function ansiEmphasize(text: string, term: string): string {
+  const t = term.trim();
+  if (!t) return text;
+  const re = new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+  return text.replace(re, (m) => `\x1b[1;7m${m}\x1b[0m`);
+}
+
 /** The `chalk`-ish helper bundle `-p` mode uses, derived from a theme. */
 export function ansiHelpers(theme: Theme) {
   return {

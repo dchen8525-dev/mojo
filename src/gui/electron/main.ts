@@ -2,10 +2,25 @@
  * Electron main process: boots the shared GUI backend (same code path as
  * `agent --gui`) and points a BrowserWindow at it. Run with: npm run gui
  */
-import { app, BrowserWindow, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell, type OpenDialogOptions } from "electron";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { RunningBackend } from "../backend.js";
 
+const here = path.dirname(fileURLToPath(import.meta.url));
+
 let backend: RunningBackend | null = null;
+
+ipcMain.handle("mojo:pick-project", async (event, defaultPath: unknown) => {
+  const win = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getAllWindows()[0];
+  const options: OpenDialogOptions = {
+    title: "打开项目",
+    defaultPath: typeof defaultPath === "string" && defaultPath ? defaultPath : undefined,
+    properties: ["openDirectory", "createDirectory"],
+  };
+  const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
+  return result.canceled ? null : (result.filePaths[0] ?? null);
+});
 
 async function startBackend() {
   const { startGuiBackend } = await import("../backend.js");
@@ -30,6 +45,7 @@ async function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      preload: path.join(here, "preload.cjs"),
     },
   });
 

@@ -1,14 +1,25 @@
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { runAgentCommand, type CommandContext } from "../src/agentCommands.js";
 import type { Agent } from "../src/agent.js";
 import type { PermissionManager } from "../src/permissions.js";
 
 // Keep tests from touching real session files.
+const searchLedger: { hits: unknown[] } = { hits: [] };
+const sessionLedger: { metas: Array<Record<string, unknown>> } = { metas: [] };
 vi.mock("../src/session.js", () => ({
   createSession: async () => ({ id: "new1234", meta: { id: "new1234", cwd: "/tmp", startedAt: "", updatedAt: "" } }),
-  listSessions: async () => [],
-  loadSession: async (id: string) => (id === "abc" ? { meta: { id, cwd: "/tmp", startedAt: "", updatedAt: "", model: "anthropic:fake" }, messages: [] } : null),
+  listSessions: async () => sessionLedger.metas,
+  loadSession: async (id: string) =>
+    id === "abc"
+      ? { meta: { id, cwd: "/tmp", startedAt: "", updatedAt: "", model: "anthropic:fake" }, messages: [] }
+      : id === "sess1"
+        ? { meta: { id, cwd: "/tmp", startedAt: "", updatedAt: "", tags: ["old"] }, messages: [{ role: "user", content: "hello export" }] }
+        : null,
   renameSession: async (id: string, title: string) => id === "sess1" && !!title.trim(),
+  tagSession: async (_id: string, tags: string[]) => [...new Set(tags.map((t) => t.trim().slice(0, 24)).filter(Boolean))].slice(0, 8),
+  searchSessions: async () => searchLedger.hits as never,
+  renderSessionMarkdown: () => "# exported",
   forkSession: async (_cwd: string, messages: unknown[], opts: { title?: string; fromId?: string }) => ({
     id: "fork9999",
     meta: { id: "fork9999", cwd: _cwd, startedAt: "", updatedAt: "", title: opts.title, forkedFrom: opts.fromId, messages: messages.length },
@@ -176,6 +187,72 @@ describe("runAgentCommand", () => {
     expect(r.text).toContain("no usage recorded");
   });
 
+  it("/search lists matching sessions with snippets", async () => {
+    searchLedger.hits = [
+      { meta: { id: "abcd1234", cwd: "D:\\proj", startedAt: "", updatedAt: "2026-09-10T10:00:00.000Z", title: "ws bug" }, matches: 3, snippet: "…the WebSocket times out…", titleMatch: false },
+    ];
+    const r = await runAgentCommand("/search websocket", ctx());
+    expect(r.text).toContain("1 session(s) match");
+    expect(r.text).toContain("abcd1234");
+    expect(r.text).toContain('"ws bug"');
+    expect(r.text).toContain("3 msgs");
+    expect(r.text).toContain("/resume");
+    searchLedger.hits = [];
+    const none = await runAgentCommand("/search nothinghere", ctx());
+    expect(none.text).toContain("no sessions match");
+    const bad = await runAgentCommand("/search", ctx());
+    expect(bad.kind).toBe("error");
+  });
+
+  it("/export writes the transcript to disk", async () => {
+    const { mkdtemp, readFile, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const dir = await mkdtemp(path.join(tmpdir(), "mojo-export-"));
+    try {
+      const out = path.join(dir, "chat.md");
+      const r = await runAgentCommand(`/export md ${out}`, ctx());
+      expect(r.kind).toBe("ok");
+      expect(r.text).toContain("exported 1 messages");
+      expect(await readFile(out, "utf8")).toBe("# exported");
+      const bad = await runAgentCommand("/export html", ctx());
+      expect(bad.kind).toBe("error");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("/tag add/remove/clear flows through tagSession", async () => {
+    const ctx0 = ctx();
+    const shown = await runAgentCommand("/tag", ctx0);
+    expect(shown.text).toBe("tags: old");
+
+    const add = await runAgentCommand("/tag +bug perf", ctx0);
+    expect(add.text).toBe("tags: old, bug, perf");
+
+    // the loadSession mock is stateless (always tags:["old"]), so this call
+    // re-derives from ["old"]: -old -perf removes, +new adds.
+    const swap = await runAgentCommand("/tag +new -old -perf", ctx0);
+    expect(swap.text).toBe("tags: new");
+
+    const drain = await runAgentCommand("/tag -old", ctx0); // removing the only tag
+    expect(drain.text).toBe("(no tags)");
+
+    const clear = await runAgentCommand("/tag clear", ctx0);
+    expect(clear.text).toBe("cleared tags on session sess1");
+  });
+
+  it("/sessions --tag filters by tag", async () => {
+    sessionLedger.metas = [
+      { id: "aaaa1111", cwd: "D:\\web", updatedAt: "2026-09-10T10:00:00.000Z", tags: ["bug", "perf"] },
+      { id: "bbbb2222", cwd: "D:\\web", updatedAt: "2026-09-11T10:00:00.000Z" },
+    ];
+    const tagged = await runAgentCommand("/sessions --tag bug", ctx());
+    expect(tagged.text).toContain("aaaa1111");
+    expect(tagged.text).toContain("[bug,perf]");
+    expect(tagged.text).not.toContain("bbbb2222");
+    sessionLedger.metas = [];
+  });
+
   it("/todos empty and filled", async () => {
     const empty = await runAgentCommand("/todos", ctx());
     expect(empty.text).toBe("(empty)");
@@ -187,6 +264,41 @@ describe("runAgentCommand", () => {
   it("/sessions with none", async () => {
     const r = await runAgentCommand("/sessions", ctx());
     expect(r.text).toBe("(no sessions)");
+  });
+
+  it("/sessions filters by --cwd / --title and caps with a limit", async () => {
+    sessionLedger.metas = [
+      { id: "aaaa1111", cwd: "D:\\web", updatedAt: "2026-09-10T10:00:00.000Z", model: "anthropic:x", title: "ws bug" },
+      { id: "bbbb2222", cwd: "D:\\web", updatedAt: "2026-09-11T10:00:00.000Z", model: "openai:y" },
+      { id: "cccc3333", cwd: "D:\\cli", updatedAt: "2026-09-12T10:00:00.000Z", model: "anthropic:x" },
+    ];
+    const byCwd = await runAgentCommand("/sessions --cwd web", ctx());
+    expect(byCwd.text).toContain("2 match");
+    expect(byCwd.text).not.toContain("cccc3333");
+
+    const byTitle = await runAgentCommand("/sessions --title WS", ctx()); // case-insensitive
+    expect(byTitle.text).toContain("aaaa1111");
+    expect(byTitle.text).toContain('title~"ws"');
+
+    const limited = await runAgentCommand("/sessions 1", ctx());
+    expect(limited.text).toContain("1 shown / 3 total");
+    expect(limited.text).toContain("aaaa1111"); // first row of the (mocked) list
+    expect(limited.text).not.toContain("cccc3333");
+
+    const none = await runAgentCommand("/sessions --title zzz", ctx());
+    expect(none.text).toBe('(no sessions match title~"zzz")');
+    sessionLedger.metas = [];
+  });
+
+  it("/search flags the query for highlighting", async () => {
+    searchLedger.hits = [
+      { meta: { id: "abcd1234", cwd: "D:\\proj", startedAt: "", updatedAt: "2026-09-10T10:00:00.000Z" }, matches: 2, snippet: "the WebSocket times out", titleMatch: false },
+    ];
+    const r = await runAgentCommand("/search websocket", ctx());
+    expect(r.highlight).toBe("websocket");
+    searchLedger.hits = [];
+    const none = await runAgentCommand("/search nothing", ctx());
+    expect(none.highlight).toBeUndefined();
   });
 
   it("/resume loads a session and restores its model", async () => {

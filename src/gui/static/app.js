@@ -118,8 +118,27 @@ function makeAssistantItem(text) {
   return wrap;
 }
 
-function makeSystemItem(text, kind) {
-  return el("div", `msg system${kind === "error" ? " error" : ""}`, text);
+function makeSystemItem(text, kind, highlight) {
+  const div = el("div", `msg system${kind === "error" ? " error" : ""}`);
+  if (highlight && text) {
+    // Emphasize case-insensitive occurrences of the highlight term (e.g. the
+    // /search query) with <mark>; everything else stays a plain text node.
+    const re = new RegExp(highlight.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+    let last = 0;
+    let m;
+    while ((m = re.exec(text))) {
+      if (m.index > last) div.appendChild(document.createTextNode(text.slice(last, m.index)));
+      const mark = document.createElement("mark");
+      mark.textContent = m[0];
+      div.appendChild(mark);
+      last = m.index + m[0].length;
+      if (!m[0].length) re.lastIndex++; // zero-length guard
+    }
+    div.appendChild(document.createTextNode(text.slice(last)));
+  } else {
+    div.textContent = text;
+  }
+  return div;
 }
 
 function makeToolCard(tool) {
@@ -289,6 +308,7 @@ async function refreshState() {
   }
   state.liveTurn = s.liveTurn ?? null;
   mountLive();
+  updateWelcome();
   if (Array.isArray(s.customCommands)) customCmds = s.customCommands;
   // Re-show any prompts that arrived while we were disconnected.
   if (Array.isArray(s.pendingPermissions) && s.pendingPermissions.length) {
@@ -302,6 +322,8 @@ async function refreshState() {
 }
 
 function updateHeader(s) {
+  $("#crumb-cwd").textContent = s.cwd ?? "";
+  $("#crumb-session").textContent = s.sessionId ? `session ${s.sessionId}` : "";
   $("#model-input").placeholder = `${s.provider}:${s.model}`;
   $("#plan-toggle").checked = s.planMode;
   document.querySelectorAll("#mode-picker button").forEach((b) => b.classList.toggle("active", b.dataset.mode === s.mode));
@@ -445,7 +467,12 @@ function connectSSE() {
     $("#plan-toggle").checked = false;
     appendItem(makeSystemItem("计划已批准 — 进入执行模式"));
   });
-  on("system", (d) => appendItem(makeSystemItem(d.text, d.kind)));
+  on("system", (d) => appendItem(makeSystemItem(d.text, d.kind, d.highlight)));
+
+  on("project_changed", async () => {
+    await refreshState();
+    loadSessions();
+  });
 
   on("permission_request", (d) => {
     state.perms.push(d);
@@ -547,6 +574,15 @@ async function send() {
 $("#send").onclick = send;
 $("#stop").onclick = () => api("/api/abort", {});
 
+/* welcome quick-start: fill the composer (don't auto-send — approval flow stays in the user's hands) */
+document.querySelectorAll("#welcome .hint").forEach((b) => {
+  b.onclick = () => {
+    input.value = b.dataset.prompt ?? "";
+    input.focus();
+    input.dispatchEvent(new Event("input"));
+  };
+});
+
 /* attachments */
 $("#attach").onclick = () => $("#file-input").click();
 $("#file-input").onchange = (e) => {
@@ -597,8 +633,11 @@ const BUILTIN_CMDS = [
   ["/review", "代码审查"],
   ["/undo", "撤销文件修改"],
   ["/sessions", "会话列表"],
+  ["/search ", "跨会话全文检索 <词>"],
   ["/resume ", "恢复会话 <id>"],
+  ["/fork ", "从当前会话分叉"],
   ["/rename ", "给当前会话改名"],
+  ["/export ", "导出会话 md|json"],
   ["/clear", "新建会话"],
   ["/todos", "查看待办"],
   ["/permissions", "权限规则"],
@@ -758,6 +797,7 @@ async function loadSessions() {
   for (const s of list.slice(0, 50)) {
     const item = el("div", "session-item" + (s.id === state.sessionId ? " active" : ""));
     item.appendChild(el("div", "s-title", s.title || s.id));
+    if (s.tags?.length) item.appendChild(el("div", "s-tags", s.tags.map((t) => "#" + t).join(" ")));
     const meta = el("div", "s-meta");
     meta.appendChild(el("span", "s-sub", s.model ? s.model.split(":").pop() : ""));
     meta.appendChild(el("span", "s-time", relTime(s.updatedAt)));
@@ -771,6 +811,17 @@ async function loadSessions() {
       if (title === null) return;
       const r = await api("/api/session/rename", { id: s.id, title });
       if (r.error) return toast("改名失败: " + r.error, true);
+      loadSessions();
+    };
+    const tagBtn = el("button", "", "🏷");
+    tagBtn.title = "标签";
+    tagBtn.onclick = async (e) => {
+      e.stopPropagation();
+      const raw = await promptText("标签（空格分隔，留空清除全部）", (s.tags ?? []).join(" "));
+      if (raw === null) return;
+      const tags = raw.trim().split(/\s+/).filter(Boolean);
+      const r = await api("/api/session/tags", { id: s.id, tags });
+      if (r.error) return toast("标签保存失败: " + r.error, true);
       loadSessions();
     };
     const delBtn = el("button", "del", "🗑");
@@ -788,6 +839,7 @@ async function loadSessions() {
       loadSessions();
     };
     actions.appendChild(renameBtn);
+    actions.appendChild(tagBtn);
     actions.appendChild(delBtn);
     item.appendChild(actions);
     item.onclick = async () => {
@@ -801,17 +853,60 @@ async function loadSessions() {
   }
 }
 
+/* sidebar quick search — same engine as /search, debounced keystrokes */
+const sessionSearch = $("#session-search");
+let searchTimer = null;
+sessionSearch.addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(runSessionSearch, 250);
+});
+
+async function runSessionSearch() {
+  const q = sessionSearch.value.trim();
+  if (!q) return loadSessions();
+  const hits = await api("/api/search?q=" + encodeURIComponent(q));
+  if (sessionSearch.value.trim() !== q) return; // a newer keystroke won the race
+  const box = $("#session-list");
+  box.replaceChildren();
+  if (!Array.isArray(hits) || !hits.length) {
+    box.appendChild(el("div", "s-empty", `无匹配 “${q}”`));
+    return;
+  }
+  for (const h of hits) {
+    const s = h.meta;
+    const item = el("div", "session-item" + (s.id === state.sessionId ? " active" : ""));
+    item.appendChild(el("div", "s-title", (h.titleMatch ? "标题 · " : "") + (s.title || s.id) + (s.tags?.length ? "  " + s.tags.map((t) => "#" + t).join(" ") : "")));
+    if (h.snippet) item.appendChild(el("div", "s-snippet", h.snippet));
+    const meta = el("div", "s-meta");
+    meta.appendChild(el("span", "s-sub", h.matches ? `${h.matches} 条命中` : h.titleMatch ? "标题命中" : "标签命中"));
+    meta.appendChild(el("span", "s-time", relTime(s.updatedAt)));
+    item.appendChild(meta);
+    item.onclick = async () => {
+      if (state.busy) return toast("请先停止当前回合", true);
+      const r = await api("/api/resume", { id: s.id });
+      if (r.error) return toast("恢复失败: " + r.error, true);
+      sessionSearch.value = "";
+      await refreshState();
+      loadSessions();
+    };
+    box.appendChild(item);
+  }
+}
+
 /* small text-input dialog (Electron has no window.prompt) */
-function promptText(title, value) {
+function promptText(title, value, maxLength = 80) {
   return new Promise((resolve) => {
     $("#input-title").textContent = title;
     const field = $("#input-field");
+    const prevMax = field.maxLength;
+    field.maxLength = maxLength;
     field.value = value ?? "";
     $("#input-modal").classList.remove("hidden");
     field.focus();
     field.select();
     const finish = (result) => {
       $("#input-modal").classList.add("hidden");
+      field.maxLength = prevMax;
       field.onkeydown = null;
       $("#input-ok").onclick = null;
       $("#input-cancel").onclick = null;
@@ -854,6 +949,25 @@ $("#new-session").onclick = async () => {
   await api("/api/new", {});
   await refreshState();
   loadSessions();
+};
+
+/* switch the working directory: native picker in Electron, path input in the browser */
+$("#open-project").onclick = async () => {
+  if (state.busy) return toast("请先停止当前回合", true);
+  const cur = $("#crumb-cwd").textContent || "";
+  let dir = null;
+  try {
+    if (window.mojo?.pickProject) dir = await window.mojo.pickProject(cur);
+    else dir = await promptText("项目目录（绝对路径或相对当前项目）", cur, 260);
+  } catch (err) {
+    return toast("打开目录失败: " + (err instanceof Error ? err.message : String(err)), true);
+  }
+  if (!dir) return;
+  const r = await api("/api/project", { cwd: dir });
+  if (r.error) return toast("切换失败: " + r.error, true);
+  await refreshState();
+  await loadSessions();
+  toast("已切换到 " + r.cwd);
 };
 
 /* ---------------- global keys ---------------- */

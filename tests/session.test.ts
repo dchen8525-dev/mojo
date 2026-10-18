@@ -186,6 +186,75 @@ describe("listSessions", () => {
   });
 });
 
+describe("searchSessions", () => {
+  it("finds sessions by message text, case-insensitively, with a snippet", async () => {
+    const { id } = await session.createSession("D:\\search-proj");
+    await session.appendMessages(id, [
+      { role: "user", content: "how do I configure the WebSocket TIMEOUT properly" },
+      { role: "assistant", content: "set WS_TIMEOUT_MS" },
+    ]);
+    const hits = await session.searchSessions("websocket timeout");
+    const hit = hits.find((h) => h.meta.id === id);
+    expect(hit).toBeDefined();
+    expect(hit!.matches).toBe(1); // only the first message holds the full phrase
+    expect(hit!.snippet.toLowerCase()).toContain("websocket");
+    expect(hit!.titleMatch).toBe(false);
+  });
+
+  it("searches tool calls and titles too", async () => {
+    const { id } = await session.createSession("x");
+    await session.appendMessages(id, [
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "grep", input: { pattern: "zqx-uniqueterm" } }] },
+    ]);
+    const bodyHits = await session.searchSessions("zqx-uniqueterm");
+    expect(bodyHits.find((h) => h.meta.id === id)?.matches).toBe(1);
+
+    await session.renameSession(id, "discuss zqx-titleterm");
+    const titleHits = await session.searchSessions("zqx-titleterm");
+    const th = titleHits.find((h) => h.meta.id === id);
+    expect(th?.titleMatch).toBe(true);
+    expect(th?.matches).toBe(0);
+  });
+
+  it("supports regex mode and tolerates invalid patterns", async () => {
+    const { id } = await session.createSession("x");
+    await session.appendMessages(id, [{ role: "user", content: "error code 4213 happened" }]);
+    const hits = await session.searchSessions("error code \\d{4}", { regex: true });
+    expect(hits.some((h) => h.meta.id === id)).toBe(true);
+    expect(await session.searchSessions("([unclosed", { regex: true })).toEqual([]);
+  });
+
+  it("honors excludeId and returns nothing for a no-match query", async () => {
+    const { id } = await session.createSession("x");
+    await session.appendMessages(id, [{ role: "user", content: "kw-excludeme-9x" }]);
+    const hits = await session.searchSessions("kw-excludeme-9x", { excludeId: id });
+    expect(hits.some((h) => h.meta.id === id)).toBe(false);
+    expect(await session.searchSessions("kw-never-written-7z")).toEqual([]);
+    expect(await session.searchSessions("   ")).toEqual([]);
+  });
+
+  it("tagSession persists tags, and search matches them", async () => {
+    const { id } = await session.createSession("x");
+    await session.appendMessages(id, [{ role: "user", content: "nothing searchable here" }]);
+    expect(await session.tagSession(id, ["  bug ", "perf", "bug", "x".repeat(30)])).toEqual(["bug", "perf", "x".repeat(24)]);
+    // tags survive a reload
+    expect((await session.listSessions()).find((m) => m.id === id)?.tags).toEqual(["bug", "perf", "x".repeat(24)]);
+
+    // a query that only hits a tag finds the session with zero message matches
+    const hits = await session.searchSessions("BUG");
+    const h = hits.find((x) => x.meta.id === id);
+    expect(h?.tagMatch).toBe(true);
+    expect(h?.matches).toBe(0);
+
+    // more than 8 tags get capped; clearing removes the field
+    const many = Array.from({ length: 10 }, (_, i) => "t" + i);
+    expect(await session.tagSession(id, many)).toHaveLength(8);
+    expect(await session.tagSession(id, [])).toEqual([]);
+    expect((await session.listSessions()).find((m) => m.id === id)?.tags).toBeUndefined();
+    expect(await session.tagSession("zzzzzzzz", ["a"])).toBeNull(); // unknown id
+  });
+});
+
 describe("renderSessionMarkdown", () => {
   const meta = { id: "abc123", cwd: "D:\\proj", startedAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:01:00.000Z", model: "anthropic:claude-sonnet-4-5" };
 
