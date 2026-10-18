@@ -1313,11 +1313,30 @@ button {
   grid-column: 1 / -1;
 }
 
-/* While editing, hide the pickers/list so the form and its actions fit. */
-#settings-modal.editing .settings-body > .settings-grid,
+/* While editing, hide the list so the form and its actions fit. */
 #settings-modal.editing .profile-list-head,
 #settings-modal.editing #profile-list {
   display: none;
+}
+
+.project-card {
+  width: min(560px, 92vw);
+}
+
+.path-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.path-row input[type="text"] {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+}
+
+.path-row .link-btn {
+  flex-shrink: 0;
 }
 
 .profile-list-head {
@@ -1396,11 +1415,6 @@ button {
   font-size: 9.5px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-}
-
-.profile-badge.ghost {
-  color: var(--faint);
-  border-color: var(--line-2);
 }
 
 .profile-badge.danger {

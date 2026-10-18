@@ -980,30 +980,6 @@ function defaultModelFor(provider) {
   return provider === "openai" ? "gpt-4o" : "claude-sonnet-4-5";
 }
 
-function renderProfilePickers(view) {
-  const project = $("#cfg-project-profile");
-  const def = $("#cfg-default-profile");
-  const defaultName = view.defaultProfileId
-    ? (apiProfiles.find((p) => p.id === view.defaultProfileId)?.name ?? view.defaultProfileId)
-    : null;
-
-  project.replaceChildren(profileOption("", defaultName ? `跟随全局默认（${defaultName}）` : "跟随全局默认（未设置）"));
-  def.replaceChildren(profileOption("", "未设置"));
-  for (const profile of apiProfiles) {
-    const label = `${profile.name} · ${profile.provider}:${profile.model}`;
-    project.appendChild(profileOption(profile.id, label));
-    def.appendChild(profileOption(profile.id, label));
-  }
-  if (view.projectProfileId && !apiProfiles.some((p) => p.id === view.projectProfileId)) {
-    project.appendChild(profileOption(view.projectProfileId, `缺失的配置 (${view.projectProfileId})`));
-  }
-  if (view.defaultProfileId && !apiProfiles.some((p) => p.id === view.defaultProfileId)) {
-    def.appendChild(profileOption(view.defaultProfileId, `缺失的配置 (${view.defaultProfileId})`));
-  }
-  project.value = view.projectProfileId ?? "";
-  def.value = view.defaultProfileId ?? "";
-}
-
 function renderProfileList(view) {
   const box = $("#profile-list");
   box.replaceChildren();
@@ -1018,7 +994,6 @@ function renderProfileList(view) {
     const name = el("div", "profile-name");
     name.appendChild(document.createTextNode(profile.name));
     if (profile.id === view.projectProfileId) name.appendChild(el("span", "profile-badge", "项目"));
-    if (profile.id === view.defaultProfileId) name.appendChild(el("span", "profile-badge ghost", "默认"));
     if (!profile.hasKey) name.appendChild(el("span", "profile-badge danger", "缺 key"));
     main.appendChild(name);
     main.appendChild(
@@ -1050,7 +1025,6 @@ function renderProfileList(view) {
 async function loadApiProfiles() {
   const view = await api("/api/api-profiles");
   apiProfiles = Array.isArray(view.profiles) ? view.profiles : [];
-  renderProfilePickers(view);
   renderProfileList(view);
   $("#cfg-status").textContent = state.hasKey ? "已配置" : "未配置";
   $("#cfg-status").className = "badge " + (state.hasKey ? "low" : "high");
@@ -1060,10 +1034,7 @@ async function loadApiProfiles() {
     notes.push("检测到旧版单份配置；新建一个 API 配置后即可在这里管理。");
   }
   if (view.missingProfileId) {
-    notes.push(`项目选择的配置 ${view.missingProfileId} 已不存在，当前回退到全局默认。`);
-  }
-  if (view.missingDefaultProfileId) {
-    notes.push(`全局默认配置 ${view.missingDefaultProfileId} 已不存在。`);
+    notes.push(`项目选择的配置 ${view.missingProfileId} 已不存在，请在项目对话框里重新选择。`);
   }
   $("#cfg-note").className = "settings-note" + (notes.length ? " warn" : "");
   $("#cfg-note").textContent = notes.join(" ");
@@ -1110,23 +1081,10 @@ function maybeOpenSettings() {
     settingsPrompted = false;
     return;
   }
+  if (!$("#project-modal").classList.contains("hidden")) return;
   if (settingsPrompted || state.busy) return;
   settingsPrompted = true;
   void openSettings();
-}
-
-async function selectProfile(scope, id) {
-  const r = await api("/api/api-profiles/select", { scope, id });
-  if (r.error) {
-    toast("切换失败: " + r.error, true);
-    await loadApiProfiles();
-    return;
-  }
-  await refreshState();
-  loadModelOptions();
-  await loadApiProfiles();
-  if (r.applyError) toast("已切换；应用失败: " + r.applyError, true);
-  else toast(scope === "project" ? "项目已切换到所选 API 配置" : "已更新全局默认 API 配置");
 }
 
 $("#settings").onclick = () => void openSettings();
@@ -1142,9 +1100,6 @@ $("#cfg-cancel").onclick = () => {
   $("#settings-modal").classList.remove("editing");
   editingProfileId = null;
 };
-$("#cfg-project-profile").onchange = () => selectProfile("project", $("#cfg-project-profile").value || null);
-$("#cfg-default-profile").onchange = () => selectProfile("default", $("#cfg-default-profile").value || null);
-
 $("#cfg-provider").onchange = () => {
   const provider = $("#cfg-provider").value;
   const model = $("#cfg-model").value.trim();
@@ -1197,23 +1152,79 @@ $("#new-session").onclick = async () => {
   loadSessions();
 };
 
-/* switch the working directory: native picker in Electron, path input in the browser */
-$("#open-project").onclick = async () => {
+/* ---------------- project switcher ---------------- */
+
+async function openProjectDialog() {
   if (state.busy) return toast("请先停止当前回合", true);
-  const cur = $("#crumb-cwd").textContent || "";
-  let dir = null;
+  let view;
   try {
-    if (window.mojo?.pickProject) dir = await window.mojo.pickProject(cur);
-    else dir = await promptText("项目目录（绝对路径或相对当前项目）", cur, 260);
+    view = await api("/api/api-profiles");
   } catch (err) {
-    return toast("打开目录失败: " + (err instanceof Error ? err.message : String(err)), true);
+    return toast("加载 API 配置失败: " + (err instanceof Error ? err.message : String(err)), true);
   }
-  if (!dir) return;
-  const r = await api("/api/project", { cwd: dir });
-  if (r.error) return toast("切换失败: " + r.error, true);
-  await refreshState();
-  await loadSessions();
-  toast("已切换到 " + r.cwd);
+  apiProfiles = Array.isArray(view.profiles) ? view.profiles : [];
+
+  $("#proj-path").value = $("#crumb-cwd").textContent || "";
+  const select = $("#proj-profile");
+  select.replaceChildren();
+  if (!apiProfiles.length) {
+    select.appendChild(profileOption("", "无可用配置"));
+  } else {
+    for (const profile of apiProfiles) {
+      select.appendChild(profileOption(profile.id, `${profile.name} · ${profile.provider}:${profile.model}`));
+    }
+    select.value = view.projectProfileId ?? view.activeProfileId ?? apiProfiles[0].id;
+  }
+  $("#proj-empty").classList.toggle("hidden", apiProfiles.length > 0);
+  $("#proj-browse").classList.toggle("hidden", !window.mojo?.pickProject);
+  $("#project-modal").classList.remove("hidden");
+  $("#proj-path").focus();
+  $("#proj-path").select();
+}
+
+$("#open-project").onclick = () => void openProjectDialog();
+$("#proj-close").onclick = () => $("#project-modal").classList.add("hidden");
+$("#proj-cancel").onclick = () => $("#project-modal").classList.add("hidden");
+
+$("#proj-browse").onclick = async () => {
+  if (!window.mojo?.pickProject) return;
+  const dir = await window.mojo.pickProject($("#proj-path").value.trim());
+  if (dir) $("#proj-path").value = dir;
+};
+
+$("#proj-goto-settings").onclick = () => {
+  $("#project-modal").classList.add("hidden");
+  void openSettings();
+};
+
+$("#proj-open").onclick = async () => {
+  if (state.busy) return toast("请先停止当前回合", true);
+  const dir = $("#proj-path").value.trim();
+  const profileId = $("#proj-profile").value;
+  if (!dir) return toast("请填写项目目录", true);
+
+  const btn = $("#proj-open");
+  btn.disabled = true;
+  try {
+    const switched = await api("/api/project", { cwd: dir });
+    if (switched.error) return toast("切换项目失败: " + switched.error, true);
+
+    if (profileId) {
+      const picked = await api("/api/api-profiles/select", { scope: "project", id: profileId });
+      if (picked.error) return toast("切换 API 失败: " + picked.error, true);
+      if (picked.applyError) toast("已切换；应用失败: " + picked.applyError, true);
+    }
+
+    $("#project-modal").classList.add("hidden");
+    await refreshState();
+    loadSessions();
+    loadModelOptions();
+    toast("已打开项目" + (profileId ? "并使用所选 API" : ""));
+  } catch (err) {
+    toast("切换失败: " + (err instanceof Error ? err.message : String(err)), true);
+  } finally {
+    btn.disabled = false;
+  }
 };
 
 /* ---------------- global keys ---------------- */
@@ -1234,6 +1245,9 @@ document.addEventListener("keydown", (e) => {
       e.preventDefault();
       $(e.key === "Escape" ? "#input-cancel" : "#input-ok").click();
     }
+  } else if (e.key === "Escape" && !$("#project-modal").classList.contains("hidden")) {
+    e.preventDefault();
+    $("#project-modal").classList.add("hidden");
   } else if (e.key === "Escape" && !$("#settings-modal").classList.contains("hidden")) {
     e.preventDefault();
     if (!$("#profile-editor").classList.contains("hidden")) {
@@ -1262,6 +1276,7 @@ document.addEventListener("keydown", (e) => {
     document.head.appendChild(s);
   }
   customCmds = []; // loaded lazily from /help output; palette works with builtins meanwhile
+  $("#proj-browse").classList.toggle("hidden", !window.mojo?.pickProject);
   connectSSE();
   await refreshState();
   loadSessions();

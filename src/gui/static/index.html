@@ -117,17 +117,6 @@
         </div>
 
         <div class="settings-body">
-          <div class="settings-grid">
-            <label class="field">
-              <span>当前项目使用</span>
-              <select id="cfg-project-profile"></select>
-            </label>
-            <label class="field">
-              <span>全局默认</span>
-              <select id="cfg-default-profile"></select>
-            </label>
-          </div>
-
           <div class="profile-list-head">
             <span>配置列表</span>
             <button id="profile-new" class="link-btn" type="button">＋ 新建配置</button>
@@ -168,6 +157,35 @@
           </div>
 
           <p class="settings-note" id="cfg-note"></p>
+        </div>
+      </div>
+    </div>
+
+    <div id="project-modal" class="modal hidden">
+      <div class="modal-card project-card">
+        <div class="perm-head">
+          <span class="perm-desc">项目</span>
+          <button id="proj-close" class="modal-x" type="button" title="关闭" aria-label="关闭">×</button>
+        </div>
+        <div class="settings-body">
+          <label class="field">
+            <span>工作目录</span>
+            <div class="path-row">
+              <input id="proj-path" type="text" autocomplete="off" spellcheck="false" placeholder="D:\path\to\project" />
+              <button id="proj-browse" class="link-btn hidden" type="button">浏览…</button>
+            </div>
+          </label>
+          <label class="field">
+            <span>API 配置</span>
+            <select id="proj-profile"></select>
+          </label>
+          <p class="settings-note hidden" id="proj-empty">
+            还没有 API 配置。<button id="proj-goto-settings" class="link-btn" type="button">去配置</button>
+          </p>
+        </div>
+        <div class="perm-actions">
+          <button id="proj-open" class="primary" type="button">打开项目</button>
+          <button id="proj-cancel" type="button">取消</button>
         </div>
       </div>
     </div>
