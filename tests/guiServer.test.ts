@@ -413,6 +413,55 @@ describe("gui server", () => {
     }
   });
 
+  it("GET /api/fs/dirs lists only subdirectories", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "mojo-dirs-"));
+    try {
+      await fs.mkdir(path.join(root, "alpha"));
+      await fs.mkdir(path.join(root, "beta"));
+      await fs.writeFile(path.join(root, "note.txt"), "x");
+      const real = await fs.realpath(root);
+
+      await withServer(async (gui) => {
+        const r = await req(gui.port, "/api/fs/dirs?path=" + encodeURIComponent(root), { token: TOKEN });
+        expect(r.status).toBe(200);
+        expect(r.json.path).toBe(real);
+        expect(r.json.entries.map((entry: { name: string }) => entry.name)).toEqual(["alpha", "beta"]);
+        expect(r.json.entries[0].path).toBe(path.join(real, "alpha"));
+        expect(typeof r.json.parent).toBe("string");
+        expect(Array.isArray(r.json.roots)).toBe(true);
+
+        const missing = await req(gui.port, "/api/fs/dirs?path=" + encodeURIComponent(path.join(root, "nope")), {
+          token: TOKEN,
+        });
+        expect(missing.status).toBe(400);
+        const file = await req(gui.port, "/api/fs/dirs?path=" + encodeURIComponent(path.join(root, "note.txt")), {
+          token: TOKEN,
+        });
+        expect(file.status).toBe(400);
+      });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects profile changes while a turn is running", async () => {
+    await withServer(async (gui, runtime) => {
+      runtime.busy = true;
+      const saved = await req(gui.port, "/api/api-profiles", {
+        method: "POST",
+        token: TOKEN,
+        body: { name: "x", provider: "anthropic", model: "m", apiKey: "sk" },
+      });
+      expect(saved.status).toBe(409);
+      const selected = await req(gui.port, "/api/api-profiles/select", {
+        method: "POST",
+        token: TOKEN,
+        body: { scope: "project", id: "p1" },
+      });
+      expect(selected.status).toBe(409);
+    });
+  });
+
   it("runs a chat turn and broadcasts SSE events", async () => {
     await withServer(
       async (gui, runtime, agent) => {

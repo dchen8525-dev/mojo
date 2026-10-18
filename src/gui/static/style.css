@@ -1053,6 +1053,34 @@ button {
   color: var(--dim);
 }
 
+.api-picker {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  flex-shrink: 1;
+}
+
+.api-picker select {
+  appearance: none;
+  max-width: 150px;
+  padding: 2px 8px;
+  overflow: hidden;
+  background: transparent;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.api-picker select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 .model-picker {
   display: flex;
   align-items: center;
@@ -1337,6 +1365,91 @@ button {
 
 .path-row .link-btn {
   flex-shrink: 0;
+}
+
+.link-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+  text-decoration: none;
+}
+
+.folder-card {
+  width: min(640px, 94vw);
+}
+
+.folder-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.folder-roots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.folder-roots:empty {
+  display: none;
+}
+
+.folder-roots button {
+  padding: 2px 8px;
+  background: transparent;
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.folder-roots button:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.folder-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 240px;
+  overflow-y: auto;
+  border-top: 1px solid var(--line);
+}
+
+.folder-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 6px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.folder-row:hover {
+  background: var(--accent-soft);
+}
+
+.folder-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-arrow {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.folder-empty {
+  padding: 12px 0;
+  color: var(--faint);
+  font-size: 12px;
 }
 
 .profile-list-head {

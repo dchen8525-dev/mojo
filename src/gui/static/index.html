@@ -74,6 +74,9 @@
                 <label class="plan-toggle"><input type="checkbox" id="plan-toggle" /> PLAN</label>
               </div>
               <div class="bar-right">
+                <div class="api-picker">
+                  <select id="api-select" title="API 配置（实时切换）" aria-label="API 配置"></select>
+                </div>
                 <div class="ctx-bar" title="上下文占用">
                   <div class="ctx-fill" id="ctx-fill"></div>
                   <span id="ctx-text"></span>
@@ -172,20 +175,38 @@
             <span>工作目录</span>
             <div class="path-row">
               <input id="proj-path" type="text" autocomplete="off" spellcheck="false" placeholder="D:\path\to\project" />
-              <button id="proj-browse" class="link-btn hidden" type="button">浏览…</button>
+              <button id="proj-browse" class="link-btn" type="button">浏览…</button>
             </div>
           </label>
-          <label class="field">
-            <span>API 配置</span>
-            <select id="proj-profile"></select>
-          </label>
-          <p class="settings-note hidden" id="proj-empty">
-            还没有 API 配置。<button id="proj-goto-settings" class="link-btn" type="button">去配置</button>
-          </p>
         </div>
         <div class="perm-actions">
           <button id="proj-open" class="primary" type="button">打开项目</button>
           <button id="proj-cancel" type="button">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="folder-modal" class="modal hidden">
+      <div class="modal-card folder-card">
+        <div class="perm-head">
+          <span class="perm-desc">选择文件夹</span>
+          <button id="folder-close" class="modal-x" type="button" title="关闭" aria-label="关闭">×</button>
+        </div>
+        <div class="settings-body">
+          <div class="path-row">
+            <input id="folder-path" type="text" autocomplete="off" spellcheck="false" placeholder="D:\path\to\folder" />
+            <button id="folder-go" class="link-btn" type="button">转到</button>
+          </div>
+          <div class="folder-tools">
+            <button id="folder-up" class="link-btn" type="button">↑ 上级</button>
+            <span class="settings-note" id="folder-info"></span>
+          </div>
+          <div id="folder-roots" class="folder-roots"></div>
+          <div id="folder-list" class="folder-list"></div>
+        </div>
+        <div class="perm-actions">
+          <button id="folder-pick" class="primary" type="button">选择此文件夹</button>
+          <button id="folder-cancel" type="button">取消</button>
         </div>
       </div>
     </div>

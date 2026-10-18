@@ -18,7 +18,7 @@ import {
 import { toUiTranscript, type UiTurn } from "./transcript.js";
 import { SseHub } from "./sse.js";
 import { GuiRuntime, type PermissionDecision } from "./state.js";
-import type { ProjectContext, SwitchResult } from "./project.js";
+import { resolveProjectDir, type ProjectContext, type SwitchResult } from "./project.js";
 
 export interface GuiServerOptions {
   /** Mutable project context; replaced in place when the user switches projects. */
@@ -105,6 +105,22 @@ async function readBody(req: http.IncomingMessage): Promise<Record<string, unkno
   } catch {
     return {};
   }
+}
+
+/** Drive roots for the directory picker (Windows) or the filesystem root. */
+async function listRoots(): Promise<string[]> {
+  if (process.platform !== "win32") return [path.parse(process.cwd()).root];
+  const roots: string[] = [];
+  for (let code = 65; code <= 90; code++) {
+    const root = `${String.fromCharCode(code)}:\\`;
+    try {
+      await fs.access(root);
+      roots.push(root);
+    } catch {
+      /* absent drive */
+    }
+  }
+  return roots;
 }
 
 /**
@@ -330,6 +346,32 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       return sendJson(res, 200, listApiProfiles(project.cwd, home));
     }
 
+    if (method === "GET" && p === "/api/fs/dirs") {
+      const requested = (url.searchParams.get("path") ?? "").trim() || project.cwd;
+      let dir: string;
+      try {
+        dir = await resolveProjectDir(requested);
+      } catch (err) {
+        return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+      }
+      try {
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+        const dirs = entries
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => ({ name: entry.name, path: path.join(dir, entry.name) }))
+          .sort((a, b) => a.name.localeCompare(b.name));
+        const root = path.parse(dir).root;
+        return sendJson(res, 200, {
+          path: dir,
+          parent: dir === root ? null : path.dirname(dir),
+          roots: await listRoots(),
+          entries: dirs,
+        });
+      } catch (err) {
+        return sendJson(res, 403, { error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+
     if (method === "GET" && p === "/api/search") {
       const url = new URL(req.url ?? "", "http://localhost");
       const q = (url.searchParams.get("q") ?? "").trim();
@@ -394,6 +436,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       }
 
       if (p === "/api/api-profiles") {
+        if (runtime.busy || runtime.switching) return sendJson(res, 409, { error: "busy" });
         const provider = body.provider === "openai" ? "openai" : body.provider === "anthropic" ? "anthropic" : null;
         const name = typeof body.name === "string" ? body.name.trim() : "";
         const model = typeof body.model === "string" ? body.model.trim() : "";
@@ -428,6 +471,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       }
 
       if (p === "/api/api-profiles/delete") {
+        if (runtime.busy || runtime.switching) return sendJson(res, 409, { error: "busy" });
         const id = typeof body.id === "string" ? body.id : "";
         if (!id) return sendJson(res, 400, { error: "missing id" });
         const before = listApiProfiles(project.cwd, home);
@@ -445,6 +489,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       }
 
       if (p === "/api/api-profiles/select") {
+        if (runtime.busy || runtime.switching) return sendJson(res, 409, { error: "busy" });
         const scope = body.scope === "project" ? "project" : body.scope === "default" ? "default" : null;
         const id = typeof body.id === "string" && body.id ? body.id : null;
         if (!scope) return sendJson(res, 400, { error: "scope must be project or default" });
