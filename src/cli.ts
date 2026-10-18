@@ -420,6 +420,13 @@ async function main() {
     return;
   }
 
+  // The GUI can start without credentials: it opens its own API settings
+  // dialog and the first turn will explain what is missing.
+  if (args.gui) {
+    await runGui(args);
+    return;
+  }
+
   const settings = resolveSettings({ cwd: process.cwd() });
   if (!settings.apiKey) {
     console.error(
@@ -437,8 +444,7 @@ async function main() {
     return;
   }
 
-  if (args.gui) await runGui(args);
-  else if (args.print) await runPrint(args);
+  if (args.print) await runPrint(args);
   else await runInteractive(args);
 }
 

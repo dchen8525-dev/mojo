@@ -79,11 +79,18 @@ const state = {
   planMode: false,
   mode: "default",
   sessionId: "",
+  provider: "anthropic",
+  model: "",
+  baseURL: "",
+  hasKey: true,
   items: [], // {kind, ...} finalized transcript entries
   liveTurn: null, // {turnId, text, thinking, tools[]}
   images: [], // pending attachments {media_type, data}
   perms: [], // queued permission requests
 };
+
+/** Auto-open the API dialog only once per "missing key" episode. */
+let settingsPrompted = false;
 
 const transcriptEl = $("#transcript");
 
@@ -299,6 +306,11 @@ async function refreshState() {
   state.planMode = s.planMode;
   state.mode = s.mode;
   state.sessionId = s.sessionId;
+  state.provider = s.provider;
+  state.model = s.model;
+  state.baseURL = s.api?.baseURL ?? "";
+  state.hasKey = !!s.api?.hasKey;
+  $("#settings").classList.toggle("needs-key", !state.hasKey);
   transcriptEl.replaceChildren();
   for (const item of s.transcript) {
     if (item.kind === "user") appendItem(makeUserItem(item.text, item.images ?? 0));
@@ -319,6 +331,7 @@ async function refreshState() {
   updateHeader(s);
   updateStatus(s);
   updateComposer();
+  maybeOpenSettings();
 }
 
 function updateHeader(s) {
@@ -470,8 +483,15 @@ function connectSSE() {
   on("system", (d) => appendItem(makeSystemItem(d.text, d.kind, d.highlight)));
 
   on("project_changed", async () => {
+    settingsPrompted = false;
     await refreshState();
     loadSessions();
+    if (!$("#settings-modal").classList.contains("hidden")) loadApiProfiles().catch(() => {});
+  });
+
+  on("settings_changed", () => {
+    refreshState().catch(() => {});
+    if (!$("#settings-modal").classList.contains("hidden")) loadApiProfiles().catch(() => {});
   });
 
   on("permission_request", (d) => {
@@ -944,6 +964,230 @@ function confirmText(message) {
   });
 }
 
+/* ---------------- API profiles ---------------- */
+
+let apiProfiles = [];
+let editingProfileId = null;
+
+function profileOption(value, text) {
+  const option = document.createElement("option");
+  option.value = value;
+  option.textContent = text;
+  return option;
+}
+
+function defaultModelFor(provider) {
+  return provider === "openai" ? "gpt-4o" : "claude-sonnet-4-5";
+}
+
+function renderProfilePickers(view) {
+  const project = $("#cfg-project-profile");
+  const def = $("#cfg-default-profile");
+  const defaultName = view.defaultProfileId
+    ? (apiProfiles.find((p) => p.id === view.defaultProfileId)?.name ?? view.defaultProfileId)
+    : null;
+
+  project.replaceChildren(profileOption("", defaultName ? `跟随全局默认（${defaultName}）` : "跟随全局默认（未设置）"));
+  def.replaceChildren(profileOption("", "未设置"));
+  for (const profile of apiProfiles) {
+    const label = `${profile.name} · ${profile.provider}:${profile.model}`;
+    project.appendChild(profileOption(profile.id, label));
+    def.appendChild(profileOption(profile.id, label));
+  }
+  if (view.projectProfileId && !apiProfiles.some((p) => p.id === view.projectProfileId)) {
+    project.appendChild(profileOption(view.projectProfileId, `缺失的配置 (${view.projectProfileId})`));
+  }
+  if (view.defaultProfileId && !apiProfiles.some((p) => p.id === view.defaultProfileId)) {
+    def.appendChild(profileOption(view.defaultProfileId, `缺失的配置 (${view.defaultProfileId})`));
+  }
+  project.value = view.projectProfileId ?? "";
+  def.value = view.defaultProfileId ?? "";
+}
+
+function renderProfileList(view) {
+  const box = $("#profile-list");
+  box.replaceChildren();
+  if (!apiProfiles.length) {
+    box.appendChild(el("div", "profile-empty", "还没有 API 配置。点击“新建配置”添加一个。"));
+    return;
+  }
+
+  for (const profile of apiProfiles) {
+    const row = el("div", "profile-row" + (profile.id === view.activeProfileId ? " active" : ""));
+    const main = el("div", "profile-main");
+    const name = el("div", "profile-name");
+    name.appendChild(document.createTextNode(profile.name));
+    if (profile.id === view.projectProfileId) name.appendChild(el("span", "profile-badge", "项目"));
+    if (profile.id === view.defaultProfileId) name.appendChild(el("span", "profile-badge ghost", "默认"));
+    if (!profile.hasKey) name.appendChild(el("span", "profile-badge danger", "缺 key"));
+    main.appendChild(name);
+    main.appendChild(
+      el("div", "profile-meta", `${profile.provider}:${profile.model}${profile.baseURL ? " · " + profile.baseURL : ""}`),
+    );
+    row.appendChild(main);
+
+    const actions = el("div", "profile-actions");
+    const edit = el("button", "", "编辑");
+    edit.type = "button";
+    edit.onclick = () => openProfileEditor(profile);
+    const del = el("button", "del", "删除");
+    del.type = "button";
+    del.onclick = async () => {
+      if (!(await confirmText(`删除 API 配置「${profile.name}」？`))) return;
+      const r = await api("/api/api-profiles/delete", { id: profile.id });
+      if (r.error) return toast("删除失败: " + r.error, true);
+      await refreshState();
+      loadModelOptions();
+      await loadApiProfiles();
+      toast("已删除 " + profile.name + (r.applyError ? "；应用失败: " + r.applyError : ""));
+    };
+    actions.append(edit, del);
+    row.appendChild(actions);
+    box.appendChild(row);
+  }
+}
+
+async function loadApiProfiles() {
+  const view = await api("/api/api-profiles");
+  apiProfiles = Array.isArray(view.profiles) ? view.profiles : [];
+  renderProfilePickers(view);
+  renderProfileList(view);
+  $("#cfg-status").textContent = state.hasKey ? "已配置" : "未配置";
+  $("#cfg-status").className = "badge " + (state.hasKey ? "low" : "high");
+
+  const notes = [];
+  if (!apiProfiles.length && view.hasLegacyKey) {
+    notes.push("检测到旧版单份配置；新建一个 API 配置后即可在这里管理。");
+  }
+  if (view.missingProfileId) {
+    notes.push(`项目选择的配置 ${view.missingProfileId} 已不存在，当前回退到全局默认。`);
+  }
+  if (view.missingDefaultProfileId) {
+    notes.push(`全局默认配置 ${view.missingDefaultProfileId} 已不存在。`);
+  }
+  $("#cfg-note").className = "settings-note" + (notes.length ? " warn" : "");
+  $("#cfg-note").textContent = notes.join(" ");
+  return view;
+}
+
+function openProfileEditor(profile) {
+  editingProfileId = profile?.id ?? null;
+  $("#settings-modal").classList.add("editing");
+  const provider = profile?.provider ?? (state.provider === "openai" ? "openai" : "anthropic");
+  $("#cfg-name").value = profile?.name ?? "";
+  $("#cfg-provider").value = provider;
+  $("#cfg-model").value = profile?.model ?? (state.model || defaultModelFor(provider));
+  $("#cfg-baseurl").value = profile?.baseURL ?? "";
+  const key = $("#cfg-apikey");
+  key.value = "";
+  key.placeholder = profile?.hasKey ? "已配置，留空保持不变" : "粘贴 API key";
+  $("#cfg-edit-note").textContent = profile
+    ? "留空 API Key 可保留已保存的值。"
+    : "API Key 只保存在全局 ~/.node-agent/config.json。";
+  $("#profile-editor").classList.remove("hidden");
+  $("#cfg-name").focus();
+}
+
+async function openSettings(options = {}) {
+  $("#settings-modal").classList.remove("hidden");
+  $("#settings-modal").classList.remove("editing");
+  $("#profile-editor").classList.add("hidden");
+  editingProfileId = null;
+  $("#cfg-note").textContent = "";
+  let view;
+  try {
+    view = await loadApiProfiles();
+  } catch (err) {
+    toast("加载 API 配置失败: " + (err instanceof Error ? err.message : String(err)), true);
+    return;
+  }
+  if (options.create || !view.profiles.length) openProfileEditor(null);
+}
+
+/** Open the dialog automatically when the current project has no key. */
+function maybeOpenSettings() {
+  if (state.hasKey) {
+    settingsPrompted = false;
+    return;
+  }
+  if (settingsPrompted || state.busy) return;
+  settingsPrompted = true;
+  void openSettings();
+}
+
+async function selectProfile(scope, id) {
+  const r = await api("/api/api-profiles/select", { scope, id });
+  if (r.error) {
+    toast("切换失败: " + r.error, true);
+    await loadApiProfiles();
+    return;
+  }
+  await refreshState();
+  loadModelOptions();
+  await loadApiProfiles();
+  if (r.applyError) toast("已切换；应用失败: " + r.applyError, true);
+  else toast(scope === "project" ? "项目已切换到所选 API 配置" : "已更新全局默认 API 配置");
+}
+
+$("#settings").onclick = () => void openSettings();
+$("#cfg-close").onclick = () => {
+  $("#settings-modal").classList.add("hidden");
+  $("#settings-modal").classList.remove("editing");
+};
+$("#profile-new").onclick = () => openProfileEditor(null);
+$("#cfg-cancel").onclick = () => {
+  $("#profile-editor").classList.add("hidden");
+  $("#settings-modal").classList.remove("editing");
+  editingProfileId = null;
+};
+$("#cfg-project-profile").onchange = () => selectProfile("project", $("#cfg-project-profile").value || null);
+$("#cfg-default-profile").onchange = () => selectProfile("default", $("#cfg-default-profile").value || null);
+
+$("#cfg-provider").onchange = () => {
+  const provider = $("#cfg-provider").value;
+  const model = $("#cfg-model").value.trim();
+  const looksOpenai = /^(gpt-|o[134])/.test(model);
+  if (!model || (provider === "openai" && !looksOpenai) || (provider === "anthropic" && looksOpenai)) {
+    $("#cfg-model").value = defaultModelFor(provider);
+  }
+};
+
+$("#cfg-save").onclick = async () => {
+  const name = $("#cfg-name").value.trim();
+  const provider = $("#cfg-provider").value;
+  const model = $("#cfg-model").value.trim();
+  const baseURL = $("#cfg-baseurl").value.trim();
+  const apiKey = $("#cfg-apikey").value.trim();
+  if (!name) return toast("请填写配置名称", true);
+  if (!model) return toast("请填写模型名称", true);
+
+  const btn = $("#cfg-save");
+  btn.disabled = true;
+  try {
+    const r = await api("/api/api-profiles", {
+      id: editingProfileId ?? undefined,
+      name,
+      provider,
+      model,
+      baseURL,
+      apiKey,
+    });
+    if (r.error) return toast("保存失败: " + r.error, true);
+    $("#profile-editor").classList.add("hidden");
+    $("#settings-modal").classList.remove("editing");
+    editingProfileId = null;
+    await refreshState();
+    loadModelOptions();
+    await loadApiProfiles();
+    if (r.applyError) toast("已保存；应用失败: " + r.applyError, true);
+    else toast("已保存: " + (r.profile?.name ?? name));
+  } catch (err) {
+    toast("保存失败: " + (err instanceof Error ? err.message : String(err)), true);
+  } finally {
+    btn.disabled = false;
+  }
+};
+
 $("#new-session").onclick = async () => {
   if (state.busy) return toast("请先停止当前回合", true);
   await api("/api/new", {});
@@ -982,6 +1226,20 @@ document.addEventListener("keydown", (e) => {
     } else if (e.key === "Enter") {
       e.preventDefault();
       answerPermission("yes");
+    }
+  } else if (!$("#input-modal").classList.contains("hidden")) {
+    if (e.key === "Escape" || e.key === "Enter") {
+      e.preventDefault();
+      $(e.key === "Escape" ? "#input-cancel" : "#input-ok").click();
+    }
+  } else if (e.key === "Escape" && !$("#settings-modal").classList.contains("hidden")) {
+    e.preventDefault();
+    if (!$("#profile-editor").classList.contains("hidden")) {
+      $("#profile-editor").classList.add("hidden");
+      $("#settings-modal").classList.remove("editing");
+      editingProfileId = null;
+    } else {
+      $("#settings-modal").classList.add("hidden");
     }
   }
 });

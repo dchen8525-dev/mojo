@@ -6,6 +6,7 @@ import { McpManager, loadMcpConfig } from "../mcp.js";
 import { loadSlashCommands, type SlashCommand } from "../commands.js";
 import { configureLsp, disposeLsp, loadLspConfig } from "../lsp.js";
 import { backgroundManager } from "../tools/background.js";
+import { setModelOverride } from "../llm.js";
 import { createSession, loadSession, listSessions, renameSession, deleteSession, searchSessions, tagSession, type SessionMeta } from "../session.js";
 import type { MessageParam } from "../types.js";
 import { SseHub } from "./sse.js";
@@ -197,6 +198,9 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
         /* valid directory; chdir can still fail on exotic mounts */
       }
 
+      // A /model override belongs to the previous session; the new project's
+      // selected profile (or its config) must win on switch.
+      setModelOverride(null);
       const next = await buildProject(target, {
         session: nextSession,
         mode: project.permissions.mode,

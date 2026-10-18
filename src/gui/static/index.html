@@ -22,6 +22,7 @@
         <div class="side-label">任务</div>
         <div id="session-list" class="session-list"></div>
         <div class="side-foot">
+          <button id="settings" class="quit" title="API 设置">⚙ API 设置</button>
           <button id="quit" class="quit" title="退出">⏻ 退出</button>
         </div>
       </aside>
@@ -103,6 +104,73 @@
           <button data-decision="always">总是允许 <kbd>A</kbd></button>
           <button data-decision="no">拒绝一次 <kbd>N</kbd></button>
           <button data-decision="always_deny" class="danger">总是拒绝 <kbd>D</kbd></button>
+        </div>
+      </div>
+    </div>
+
+    <div id="settings-modal" class="modal hidden">
+      <div class="modal-card settings-card">
+        <div class="perm-head">
+          <span class="perm-desc">API 配置</span>
+          <span class="badge" id="cfg-status"></span>
+        </div>
+
+        <div class="settings-body">
+          <div class="settings-grid">
+            <label class="field">
+              <span>当前项目使用</span>
+              <select id="cfg-project-profile"></select>
+            </label>
+            <label class="field">
+              <span>全局默认</span>
+              <select id="cfg-default-profile"></select>
+            </label>
+          </div>
+
+          <div class="profile-list-head">
+            <span>配置列表</span>
+            <button id="profile-new" class="link-btn" type="button">＋ 新建配置</button>
+          </div>
+          <div id="profile-list" class="profile-list"></div>
+
+          <div id="profile-editor" class="profile-editor hidden">
+            <div class="settings-grid">
+              <label class="field">
+                <span>名称</span>
+                <input id="cfg-name" type="text" maxlength="60" placeholder="公司网关" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>Provider</span>
+                <select id="cfg-provider">
+                  <option value="anthropic">Anthropic</option>
+                  <option value="openai">OpenAI 兼容</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Model</span>
+                <input id="cfg-model" type="text" placeholder="claude-sonnet-4-5" autocomplete="off" spellcheck="false" />
+              </label>
+              <label class="field">
+                <span>Base URL <em>可选</em></span>
+                <input id="cfg-baseurl" type="text" placeholder="https://api.anthropic.com" autocomplete="off" spellcheck="false" />
+              </label>
+              <label class="field wide">
+                <span>API Key</span>
+                <input id="cfg-apikey" type="password" placeholder="粘贴 API key" autocomplete="off" />
+              </label>
+            </div>
+            <p class="settings-note" id="cfg-edit-note"></p>
+            <div class="profile-editor-actions">
+              <button id="cfg-save" class="primary" type="button">保存配置</button>
+              <button id="cfg-cancel" type="button">取消</button>
+            </div>
+          </div>
+
+          <p class="settings-note" id="cfg-note"></p>
+        </div>
+
+        <div class="perm-actions">
+          <button id="cfg-close" type="button">关闭</button>
         </div>
       </div>
     </div>

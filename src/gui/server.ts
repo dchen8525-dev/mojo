@@ -1,11 +1,20 @@
 import http from "node:http";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import type { AgentEvents } from "../agent.js";
 import { renderCommand, expandFileReferences } from "../commands.js";
 import { runAgentCommand } from "../agentCommands.js";
+import {
+  deleteApiProfile,
+  listApiProfiles,
+  resolveSettings,
+  saveApiProfile,
+  selectApiProfile,
+  setModelOverride,
+} from "../llm.js";
 import { toUiTranscript, type UiTurn } from "./transcript.js";
 import { SseHub } from "./sse.js";
 import { GuiRuntime, type PermissionDecision } from "./state.js";
@@ -17,6 +26,8 @@ export interface GuiServerOptions {
   hub: SseHub;
   runtime: GuiRuntime;
   token: string;
+  /** Home directory for config/profile storage (tests inject a temp dir). */
+  home?: string;
   /** Rebind the backend to another working directory. */
   switchProject?: (cwd: string, opts?: { resumeId?: string }) => Promise<SwitchResult>;
   /** Create a fresh session and point the agent at it (for /clear + "new"). */
@@ -102,6 +113,7 @@ async function readBody(req: http.IncomingMessage): Promise<Record<string, unkno
  */
 export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void> {
   const { project, hub, runtime, token } = opts;
+  const home = opts.home ?? os.homedir();
   const staticCache = new Map<string, Buffer>();
 
   async function cachedStatic(name: string): Promise<Buffer> {
@@ -212,6 +224,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
   }
 
   function stateSnapshot() {
+    const api = resolveSettings({ cwd: project.cwd, home });
     return {
       sessionId: project.agent.sessionId,
       cwd: project.agent.cwd,
@@ -225,11 +238,33 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       switching: runtime.switching,
       todos: project.agent.currentTodos(),
       cost: project.agent.costs.format(),
+      api: {
+        hasKey: !!api.apiKey,
+        baseURL: api.baseURL ?? "",
+        profile: api.profile ? { id: api.profile.id, name: api.profile.name } : null,
+      },
       transcript: toUiTranscript(project.agent.getMessages()),
       liveTurn: runtime.liveTurn,
       pendingPermissions: runtime.pendingPermissions(),
       customCommands: [...project.customCommands.values()].map((c) => ({ name: c.name, description: c.description })),
     };
+  }
+
+  /**
+   * Clear the session-level /model override and rebuild the backend from the
+   * currently selected profile (or legacy config). Used whenever the effective
+   * API configuration changes.
+   */
+  function applyResolvedSettings(): { applied?: { provider: string; model: string }; applyError?: string } {
+    setModelOverride(null);
+    try {
+      const s = resolveSettings({ cwd: project.cwd, home });
+      const r = project.agent.switchModel(`${s.provider}:${s.model}`);
+      hub.broadcast("settings_changed", { provider: r.provider, model: r.model });
+      return { applied: { provider: r.provider, model: r.model } };
+    } catch (err) {
+      return { applyError: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   return async function handler(req, res) {
@@ -289,6 +324,10 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
 
     if (method === "GET" && p === "/api/sessions") {
       return sendJson(res, 200, await opts.listSessions());
+    }
+
+    if (method === "GET" && p === "/api/api-profiles") {
+      return sendJson(res, 200, listApiProfiles(project.cwd, home));
     }
 
     if (method === "GET" && p === "/api/search") {
@@ -352,6 +391,76 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
         if (typeof body.planMode === "boolean") project.agent.planMode = body.planMode;
         if (body.mode === "default" || body.mode === "auto" || body.mode === "yolo") project.permissions.mode = body.mode;
         return sendJson(res, 200, { ok: true, planMode: project.agent.planMode, mode: project.permissions.mode });
+      }
+
+      if (p === "/api/api-profiles") {
+        const provider = body.provider === "openai" ? "openai" : body.provider === "anthropic" ? "anthropic" : null;
+        const name = typeof body.name === "string" ? body.name.trim() : "";
+        const model = typeof body.model === "string" ? body.model.trim() : "";
+        const baseURL = typeof body.baseURL === "string" ? body.baseURL.trim() : "";
+        const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
+        const id = typeof body.id === "string" && body.id ? body.id : undefined;
+        if (!provider) return sendJson(res, 400, { error: "provider must be anthropic or openai" });
+        if (!name) return sendJson(res, 400, { error: "missing name" });
+        if (!model) return sendJson(res, 400, { error: "missing model" });
+        if (baseURL && !/^https?:\/\//i.test(baseURL))
+          return sendJson(res, 400, { error: "baseURL must start with http:// or https://" });
+
+        let saved: Awaited<ReturnType<typeof saveApiProfile>>;
+        try {
+          saved = await saveApiProfile(
+            { id, name, provider, model, baseURL, ...(apiKey ? { apiKey } : {}) },
+            { cwd: project.cwd, home },
+          );
+        } catch (err) {
+          return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        }
+
+        const active = saved.view.activeProfileId === saved.profile.id;
+        const applied = active ? applyResolvedSettings() : {};
+        if (!active) hub.broadcast("settings_changed", {});
+        return sendJson(res, 200, {
+          ok: true,
+          profile: saved.view.profiles.find((p) => p.id === saved.profile.id) ?? null,
+          view: saved.view,
+          ...applied,
+        });
+      }
+
+      if (p === "/api/api-profiles/delete") {
+        const id = typeof body.id === "string" ? body.id : "";
+        if (!id) return sendJson(res, 400, { error: "missing id" });
+        const before = listApiProfiles(project.cwd, home);
+        let result: Awaited<ReturnType<typeof deleteApiProfile>>;
+        try {
+          result = await deleteApiProfile(id, { cwd: project.cwd, home });
+        } catch (err) {
+          return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        }
+        if (!result.deleted) return sendJson(res, 404, { error: "profile not found" });
+        const wasActive = before.activeProfileId === id;
+        const applied = wasActive ? applyResolvedSettings() : {};
+        if (!wasActive) hub.broadcast("settings_changed", {});
+        return sendJson(res, 200, { ok: true, view: result.view, ...applied });
+      }
+
+      if (p === "/api/api-profiles/select") {
+        const scope = body.scope === "project" ? "project" : body.scope === "default" ? "default" : null;
+        const id = typeof body.id === "string" && body.id ? body.id : null;
+        if (!scope) return sendJson(res, 400, { error: "scope must be project or default" });
+        let view: Awaited<ReturnType<typeof selectApiProfile>>;
+        try {
+          view = await selectApiProfile(project.cwd, scope, id, { home });
+        } catch (err) {
+          return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        }
+        const affectsProject = scope === "project" || !view.projectProfileId;
+        const applied = affectsProject ? applyResolvedSettings() : {};
+        if (!affectsProject) hub.broadcast("settings_changed", {});
+        const active = view.activeProfileId
+          ? (view.profiles.find((p) => p.id === view.activeProfileId) ?? null)
+          : null;
+        return sendJson(res, 200, { ok: true, view, profile: active, ...applied });
       }
 
       if (p === "/api/project") {
