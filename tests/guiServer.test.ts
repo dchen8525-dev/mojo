@@ -146,6 +146,14 @@ describe("gui server", () => {
     );
   });
 
+  it("serves the vendored marked build", async () => {
+    await withServer(async (gui) => {
+      const r = await req(gui.port, "/vendor/marked.min.js");
+      expect(r.status).toBe(200);
+      expect(r.text).toContain("marked");
+    });
+  });
+
   it("serves the app icon without a token", async () => {
     await withServer(async (gui) => {
       const r = await req(gui.port, "/icon.png");

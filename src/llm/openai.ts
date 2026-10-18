@@ -179,7 +179,7 @@ export class OpenAiBackend implements LLMBackend {
       }
       const id = tc.id || `tc_${Date.now()}_${toolUses.length}`;
       events?.onToolUseStart?.(tc.name, id);
-      const block: ToolUseBlock = { type: "tool_use", id, name: tc.name, input };
+      const block: ToolUseBlock = { type: "tool_use", id, name: tc.name, input, caller: { type: "direct" } };
       toolUses.push(block);
       content.push(block);
     }

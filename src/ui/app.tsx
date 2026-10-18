@@ -244,6 +244,11 @@ export function AgentApp({
 }) {
   const { exit } = useApp();
   const { stdout } = useStdout();
+  /**
+   * Ink 8 types stdout as a plain WritableStream, but inside a TTY it is a
+   * WriteStream and carries `columns`. Read it through a narrow cast.
+   */
+  const termColumns = () => (stdout as unknown as { columns?: number }).columns ?? 80;
   const [theme, setTheme] = useState<Theme>(initialTheme);
   const [items, setItems] = useState<TranscriptItem[]>([]);
   const [streamText, setStreamText] = useState("");
@@ -257,7 +262,7 @@ export function AgentApp({
   const [expandedAll, setExpandedAll] = useState(false);
   const [diffPage, setDiffPage] = useState(0);
   const [diffSplit, setDiffSplit] = useState(true);
-  const [termCols, setTermCols] = useState(() => stdout.columns ?? 80);
+  const [termCols, setTermCols] = useState(() => termColumns());
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historySel, setHistorySel] = useState(0);
   const historyRef = useRef<string[]>([]); // user prompts this session, newest last
@@ -288,7 +293,7 @@ export function AgentApp({
 
   // Keep split-diff column widths in sync with terminal resizes.
   useEffect(() => {
-    const onResize = () => setTermCols(stdout.columns ?? 80);
+    const onResize = () => setTermCols(termColumns());
     stdout.on("resize", onResize);
     return () => {
       stdout.off("resize", onResize);

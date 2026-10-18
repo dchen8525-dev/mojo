@@ -121,7 +121,10 @@ async function readStatic(name: string): Promise<Buffer> {
 
 function markedPath(): string {
   const req = createRequire(import.meta.url);
-  return req.resolve("marked/marked.min.js");
+  // marked 18+ ships only the ESM entry plus a UMD bundle (no marked.min.js).
+  // Serve the UMD build so a plain <script> tag still gets a `marked` global.
+  const pkgDir = path.dirname(req.resolve("marked/package.json"));
+  return path.join(pkgDir, "lib", "marked.umd.js");
 }
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
