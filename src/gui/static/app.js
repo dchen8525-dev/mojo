@@ -1133,6 +1133,8 @@ $("#settings").onclick = () => void openSettings();
 $("#cfg-close").onclick = () => {
   $("#settings-modal").classList.add("hidden");
   $("#settings-modal").classList.remove("editing");
+  $("#profile-editor").classList.add("hidden");
+  editingProfileId = null;
 };
 $("#profile-new").onclick = () => openProfileEditor(null);
 $("#cfg-cancel").onclick = () => {
