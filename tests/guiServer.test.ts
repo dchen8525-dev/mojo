@@ -5,6 +5,7 @@ import type { PermissionManager } from "../src/permissions.js";
 import { SseHub } from "../src/gui/sse.js";
 import { GuiRuntime } from "../src/gui/state.js";
 import { startGuiServer, type RunningGui } from "../src/gui/server.js";
+import type { SwitchResult } from "../src/gui/project.js";
 
 const TOKEN = "testtoken123";
 
@@ -39,6 +40,7 @@ async function withServer(
     tagSession: (id: string, tags: string[]) => Promise<string[] | null>;
     deleteSession: (id: string) => Promise<{ ok: boolean; error?: string; activeReplaced?: string }>;
     searchSessions: (q: string, o?: { regex?: boolean }) => Promise<unknown[]>;
+    switchProject: (cwd: string, opts?: { resumeId?: string }) => Promise<SwitchResult>;
   }> = {},
 ): Promise<void> {
   const hub = new SseHub();
@@ -46,15 +48,21 @@ async function withServer(
   const permissions = fakePermissions();
   const runtime = new GuiRuntime(hub);
   runtime.attach(agent, permissions);
+  const project = {
+    cwd: agent.cwd,
+    agent,
+    permissions,
+    hooks: { list: () => [] } as never,
+    customCommands: new Map(),
+    mcp: null,
+  };
   const gui = await startGuiServer(
     {
-      agent,
-      permissions,
+      project,
       hub,
       runtime,
-      customCommands: new Map(),
       token: TOKEN,
-      commandCtx: { mcp: null, hooks: { list: () => [] } as never },
+      switchProject: serverOverrides.switchProject ?? (async (cwd) => ({ ok: true, cwd, sessionId: agent.sessionId })),
       newSession: async () => ({ id: "new1" }),
       resumeSession: async () => null,
       listSessions: async () => [],
@@ -133,6 +141,57 @@ describe("gui server", () => {
       const r = await req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "hi" } });
       expect(r.status).toBe(409);
     });
+  });
+
+  it("/api/project rejects a missing cwd", async () => {
+    await withServer(async (gui) => {
+      const r = await req(gui.port, "/api/project", { method: "POST", token: TOKEN, body: {} });
+      expect(r.status).toBe(400);
+      expect(r.json.error).toBe("missing cwd");
+    });
+  });
+
+  it("/api/project returns 409 while busy", async () => {
+    await withServer(async (gui, runtime) => {
+      runtime.busy = true;
+      const r = await req(gui.port, "/api/project", { method: "POST", token: TOKEN, body: { cwd: "/tmp/other" } });
+      expect(r.status).toBe(409);
+    });
+  });
+
+  it("/api/project forwards the directory and returns the new cwd", async () => {
+    const calls: string[] = [];
+    await withServer(
+      async (gui) => {
+        const r = await req(gui.port, "/api/project", {
+          method: "POST",
+          token: TOKEN,
+          body: { cwd: " D:\\work\\other " },
+        });
+        expect(r.status).toBe(200);
+        expect(r.json).toEqual({ ok: true, cwd: "/tmp/new", sessionId: "sess2" });
+        expect(calls).toEqual(["D:\\work\\other"]);
+      },
+      {},
+      {
+        switchProject: async (cwd) => {
+          calls.push(cwd);
+          return { ok: true, cwd: "/tmp/new", sessionId: "sess2" };
+        },
+      },
+    );
+  });
+
+  it("/api/project surfaces a switch error", async () => {
+    await withServer(
+      async (gui) => {
+        const r = await req(gui.port, "/api/project", { method: "POST", token: TOKEN, body: { cwd: "/nope" } });
+        expect(r.status).toBe(400);
+        expect(r.json.error).toContain("directory not found");
+      },
+      {},
+      { switchProject: async (cwd) => ({ ok: false, error: `directory not found: ${cwd}` }) },
+    );
   });
 
   it("runs a chat turn and broadcasts SSE events", async () => {

@@ -366,6 +366,54 @@ button {
   color: var(--dim);
 }
 
+#topbar .crumb-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: min(52vw, 560px);
+  padding: 2px 7px;
+  margin-left: -7px;
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  color: var(--dim);
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s;
+}
+
+#topbar .crumb-btn:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+#topbar .crumb-btn #crumb-cwd {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#topbar .crumb-icon {
+  font-size: 11px;
+  color: var(--faint);
+  flex-shrink: 0;
+}
+
+#topbar .crumb-caret {
+  font-size: 9px;
+  line-height: 1;
+  color: var(--faint);
+  flex-shrink: 0;
+}
+
+#topbar .crumb-btn:hover .crumb-icon,
+#topbar .crumb-btn:hover .crumb-caret {
+  color: var(--accent);
+}
+
 #topbar .sp {
   margin-left: auto;
 }

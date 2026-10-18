@@ -3,28 +3,22 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import type { Agent } from "../agent.js";
 import type { AgentEvents } from "../agent.js";
-import type { PermissionManager } from "../permissions.js";
-import type { SlashCommand } from "../commands.js";
 import { renderCommand, expandFileReferences } from "../commands.js";
 import { runAgentCommand } from "../agentCommands.js";
 import { toUiTranscript, type UiTurn } from "./transcript.js";
 import { SseHub } from "./sse.js";
 import { GuiRuntime, type PermissionDecision } from "./state.js";
+import type { ProjectContext, SwitchResult } from "./project.js";
 
 export interface GuiServerOptions {
-  agent: Agent;
-  permissions: PermissionManager;
+  /** Mutable project context; replaced in place when the user switches projects. */
+  project: ProjectContext;
   hub: SseHub;
   runtime: GuiRuntime;
-  customCommands: Map<string, SlashCommand>;
   token: string;
-  /** Slash-command context (mcp/hooks live here). */
-  commandCtx: {
-    mcp: import("../mcp.js").McpManager | null;
-    hooks: import("../hooks.js").HookManager;
-  };
+  /** Rebind the backend to another working directory. */
+  switchProject?: (cwd: string, opts?: { resumeId?: string }) => Promise<SwitchResult>;
   /** Create a fresh session and point the agent at it (for /clear + "new"). */
   newSession: () => Promise<{ id: string }>;
   /** Resume a stored session into the agent. Returns an error string or null. */
@@ -107,7 +101,7 @@ async function readBody(req: http.IncomingMessage): Promise<Record<string, unkno
  * tests can drive it with an injected runtime without opening a socket.
  */
 export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void> {
-  const { agent, permissions, hub, runtime, customCommands, token } = opts;
+  const { project, hub, runtime, token } = opts;
   const staticCache = new Map<string, Buffer>();
 
   async function cachedStatic(name: string): Promise<Buffer> {
@@ -172,7 +166,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
 
     if (trimmed.startsWith("/")) {
       const [cmd] = trimmed.slice(1).split(/\s+/);
-      const custom = customCommands.get(cmd);
+      const custom = project.customCommands.get(cmd);
       if (custom) {
         const rest = trimmed.slice(1).split(/\s+/).slice(1);
         promptText = renderCommand(custom.template, rest);
@@ -180,12 +174,12 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       } else {
         // A built-in slash command sent to the chat box: run it as a command.
         const r = await runAgentCommand(trimmed, {
-          agent,
-          permissions,
-          mcp: opts.commandCtx.mcp,
-          hooks: opts.commandCtx.hooks,
-          customCommands,
-          cwd: agent.cwd,
+          agent: project.agent,
+          permissions: project.permissions,
+          mcp: project.mcp,
+          hooks: project.hooks,
+          customCommands: project.customCommands,
+          cwd: project.agent.cwd,
           notify: (m) => hub.broadcast("system", { text: m }),
         });
         if (r.quit) opts.onQuit();
@@ -194,7 +188,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       }
     }
 
-    const expanded = await expandFileReferences(promptText, agent.cwd);
+    const expanded = await expandFileReferences(promptText, project.agent.cwd);
     if (expanded.files.length) hub.broadcast("system", { text: `@ referenced: ${expanded.files.join(", ")}` });
 
     const turnId = ++runtime.turnId;
@@ -205,7 +199,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
     hub.broadcast("turn_start", { turnId, user: display, images: images?.length ?? 0 });
 
     try {
-      const finalText = await agent.chat(expanded.text, runtime.controller.signal, buildEvents(turn), images);
+      const finalText = await project.agent.chat(expanded.text, runtime.controller.signal, buildEvents(turn), images);
       hub.broadcast("turn_end", { turnId, text: finalText });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -219,21 +213,22 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
 
   function stateSnapshot() {
     return {
-      sessionId: agent.sessionId,
-      cwd: agent.cwd,
-      model: agent.model,
-      provider: agent.provider,
-      contextWindow: agent.contextWindow,
-      tokenEstimate: agent.tokenEstimate(),
-      planMode: agent.planMode,
-      mode: permissions.mode,
+      sessionId: project.agent.sessionId,
+      cwd: project.agent.cwd,
+      model: project.agent.model,
+      provider: project.agent.provider,
+      contextWindow: project.agent.contextWindow,
+      tokenEstimate: project.agent.tokenEstimate(),
+      planMode: project.agent.planMode,
+      mode: project.permissions.mode,
       busy: runtime.busy,
-      todos: agent.currentTodos(),
-      cost: agent.costs.format(),
-      transcript: toUiTranscript(agent.getMessages()),
+      switching: runtime.switching,
+      todos: project.agent.currentTodos(),
+      cost: project.agent.costs.format(),
+      transcript: toUiTranscript(project.agent.getMessages()),
       liveTurn: runtime.liveTurn,
       pendingPermissions: runtime.pendingPermissions(),
-      customCommands: [...customCommands.values()].map((c) => ({ name: c.name, description: c.description })),
+      customCommands: [...project.customCommands.values()].map((c) => ({ name: c.name, description: c.description })),
     };
   }
 
@@ -306,7 +301,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
 
     if (method === "GET" && p === "/api/models") {
       try {
-        return sendJson(res, 200, await agent.listModels());
+        return sendJson(res, 200, await project.agent.listModels());
       } catch (err) {
         return sendJson(res, 502, { error: err instanceof Error ? err.message : String(err) });
       }
@@ -316,7 +311,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       const body = await readBody(req);
 
       if (p === "/api/chat") {
-        if (runtime.busy) return sendJson(res, 409, { error: "busy" });
+        if (runtime.busy || runtime.switching) return sendJson(res, 409, { error: "busy" });
         const text = typeof body.text === "string" ? body.text : "";
         const images = Array.isArray(body.images) ? (body.images as import("../types.js").ImageBlockParam[]) : undefined;
         if (!text.trim() && !images?.length) return sendJson(res, 400, { error: "empty" });
@@ -341,12 +336,12 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       if (p === "/api/command") {
         const line = typeof body.line === "string" ? body.line : "";
         const r = await runAgentCommand(line, {
-          agent,
-          permissions,
-          mcp: opts.commandCtx.mcp,
-          hooks: opts.commandCtx.hooks,
-          customCommands,
-          cwd: agent.cwd,
+          agent: project.agent,
+          permissions: project.permissions,
+          mcp: project.mcp,
+          hooks: project.hooks,
+          customCommands: project.customCommands,
+          cwd: project.agent.cwd,
           notify: (m) => hub.broadcast("system", { text: m }),
         });
         if (r.quit) opts.onQuit();
@@ -354,9 +349,18 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       }
 
       if (p === "/api/settings") {
-        if (typeof body.planMode === "boolean") agent.planMode = body.planMode;
-        if (body.mode === "default" || body.mode === "auto" || body.mode === "yolo") permissions.mode = body.mode;
-        return sendJson(res, 200, { ok: true, planMode: agent.planMode, mode: permissions.mode });
+        if (typeof body.planMode === "boolean") project.agent.planMode = body.planMode;
+        if (body.mode === "default" || body.mode === "auto" || body.mode === "yolo") project.permissions.mode = body.mode;
+        return sendJson(res, 200, { ok: true, planMode: project.agent.planMode, mode: project.permissions.mode });
+      }
+
+      if (p === "/api/project") {
+        const cwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
+        if (!cwd) return sendJson(res, 400, { error: "missing cwd" });
+        if (!opts.switchProject) return sendJson(res, 501, { error: "not supported" });
+        if (runtime.busy || runtime.switching) return sendJson(res, 409, { error: "busy" });
+        const r = await opts.switchProject(cwd);
+        return sendJson(res, r.ok ? 200 : r.error === "busy" ? 409 : 400, r);
       }
 
       if (p === "/api/resume") {

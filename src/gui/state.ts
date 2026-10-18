@@ -15,6 +15,8 @@ export type PermissionDecision = "yes" | "no" | "always" | "always_deny";
  */
 export class GuiRuntime {
   busy = false;
+  /** True while the backend is rebinding to another working directory. */
+  switching = false;
   turnId = 0;
   controller: AbortController | null = null;
   /** In-flight turn, accumulated from events so a reconnecting tab can recover. */

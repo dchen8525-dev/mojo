@@ -469,6 +469,11 @@ function connectSSE() {
   });
   on("system", (d) => appendItem(makeSystemItem(d.text, d.kind, d.highlight)));
 
+  on("project_changed", async () => {
+    await refreshState();
+    loadSessions();
+  });
+
   on("permission_request", (d) => {
     state.perms.push(d);
     showPermission();
@@ -889,16 +894,19 @@ async function runSessionSearch() {
 }
 
 /* small text-input dialog (Electron has no window.prompt) */
-function promptText(title, value) {
+function promptText(title, value, maxLength = 80) {
   return new Promise((resolve) => {
     $("#input-title").textContent = title;
     const field = $("#input-field");
+    const prevMax = field.maxLength;
+    field.maxLength = maxLength;
     field.value = value ?? "";
     $("#input-modal").classList.remove("hidden");
     field.focus();
     field.select();
     const finish = (result) => {
       $("#input-modal").classList.add("hidden");
+      field.maxLength = prevMax;
       field.onkeydown = null;
       $("#input-ok").onclick = null;
       $("#input-cancel").onclick = null;
@@ -941,6 +949,25 @@ $("#new-session").onclick = async () => {
   await api("/api/new", {});
   await refreshState();
   loadSessions();
+};
+
+/* switch the working directory: native picker in Electron, path input in the browser */
+$("#open-project").onclick = async () => {
+  if (state.busy) return toast("请先停止当前回合", true);
+  const cur = $("#crumb-cwd").textContent || "";
+  let dir = null;
+  try {
+    if (window.mojo?.pickProject) dir = await window.mojo.pickProject(cur);
+    else dir = await promptText("项目目录（绝对路径或相对当前项目）", cur, 260);
+  } catch (err) {
+    return toast("打开目录失败: " + (err instanceof Error ? err.message : String(err)), true);
+  }
+  if (!dir) return;
+  const r = await api("/api/project", { cwd: dir });
+  if (r.error) return toast("切换失败: " + r.error, true);
+  await refreshState();
+  await loadSessions();
+  toast("已切换到 " + r.cwd);
 };
 
 /* ---------------- global keys ---------------- */

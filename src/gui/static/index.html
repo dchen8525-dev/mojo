@@ -29,7 +29,11 @@
       <main id="main">
         <div id="topbar">
           <span class="crumb brand-crumb">mojo</span>
-          <span class="crumb" id="crumb-cwd"></span>
+          <button class="crumb crumb-btn" id="open-project" title="切换项目目录">
+            <span class="crumb-icon">📁</span>
+            <span id="crumb-cwd"></span>
+            <span class="crumb-caret">▾</span>
+          </button>
           <span class="sp"></span>
           <span class="crumb" id="crumb-session"></span>
         </div>
@@ -106,7 +110,7 @@
     <div id="input-modal" class="modal hidden">
       <div class="modal-card narrow">
         <div id="input-title" class="input-title"></div>
-        <input id="input-field" type="text" maxlength="80" />
+        <input id="input-field" type="text" maxlength="260" />
         <div class="perm-actions">
           <button id="input-ok" class="primary">确定</button>
           <button id="input-cancel">取消</button>
