@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>mojo · UI 方案对比</title>
+<style>
+:root{
+  --bg:#f6f7f9;--card:#fff;--fg:#16181d;--dim:#5c6370;--faint:#8c939f;
+  --line:#e3e6eb;--accent:#4f46e5;
+  --mono:"Cascadia Code","Consolas",monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:14px/1.65 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:1320px;margin:0 auto;padding:44px 28px 80px}
+h1{margin:0 0 8px;font-size:28px;letter-spacing:-.02em}
+.lead{margin:0 0 6px;color:var(--dim)}
+.note{color:var(--faint);font-size:12.5px;margin-bottom:34px}
+.note code{font-family:var(--mono);font-size:12px;background:#eceef2;padding:1px 6px;border-radius:4px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(400px,1fr));gap:22px}
+.card{
+  background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden;
+  box-shadow:0 2px 10px rgba(22,24,29,.05);display:flex;flex-direction:column;
+  transition:box-shadow .18s,transform .18s;
+}
+.card:hover{box-shadow:0 14px 36px rgba(22,24,29,.12);transform:translateY(-2px)}
+.shot{position:relative;height:280px;overflow:hidden;border-bottom:1px solid var(--line);background:#eceef2}
+.shot iframe{width:1440px;height:900px;border:0;transform:scale(.48);transform-origin:0 0;pointer-events:none}
+.shot a{position:absolute;inset:0}
+.meta{padding:15px 18px 18px;display:flex;flex-direction:column;gap:8px;flex:1}
+.row{display:flex;align-items:baseline;gap:10px}
+.num{font-family:var(--mono);font-size:11px;color:var(--faint)}
+.name{font-size:16px;font-weight:700;letter-spacing:-.01em}
+.en{font-family:var(--mono);font-size:11.5px;color:var(--faint)}
+.desc{color:var(--dim);font-size:13px;margin:0}
+.sw{display:flex;gap:5px;margin-top:2px}
+.sw i{width:20px;height:20px;border-radius:5px;border:1px solid rgba(0,0,0,.07);display:block}
+.tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:auto;padding-top:10px}
+.tag{font-size:11px;color:var(--dim);background:#f1f3f7;border-radius:999px;padding:2px 10px}
+.open{
+  display:inline-flex;align-items:center;gap:6px;align-self:flex-start;margin-top:12px;
+  font-size:12.5px;font-weight:600;color:#fff;background:var(--fg);text-decoration:none;
+  border-radius:8px;padding:7px 14px;transition:.15s;
+}
+.open:hover{background:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>mojo · 5 个 UI 方案</h1>
+  <p class="lead">同一套 DOM 与功能面（侧栏会话 / 对话流 / 工具卡 / 卡片式输入框 / 权限弹窗），5 种完全不同的视觉语言。</p>
+  <p class="note">每个 demo 右下角有「欢迎页 / 对话 / 授权弹窗」切换器；工具卡可点击展开。文件位于 <code>ui-demos/</code>。</p>
+
+  <div class="grid">
+    <div class="card">
+      <div class="shot"><iframe src="01-porcelain.html" loading="lazy" scrolling="no"></iframe><a href="01-porcelain.html"></a></div>
+      <div class="meta">
+        <div class="row"><span class="num">01</span><span class="name">Porcelain</span><span class="en">纸感极简</span></div>
+        <div class="sw"><i style="background:#faf8f4"></i><i style="background:#1c1917"></i><i style="background:#b45309"></i><i style="background:#e7e2d8"></i></div>
+        <p class="desc">暖白纸底 + 发丝分隔线 + 衬线标题。用留白和排版层级替代边框和色块，最安静、最适合长时间阅读长回复。</p>
+        <div class="tags"><span class="tag">浅色</span><span class="tag">编辑排版</span><span class="tag">低刺激</span></div>
+        <a class="open" href="01-porcelain.html">打开预览 →</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="shot"><iframe src="02-midnight.html" loading="lazy" scrolling="no"></iframe><a href="02-midnight.html"></a></div>
+      <div class="meta">
+        <div class="row"><span class="num">02</span><span class="name">Midnight</span><span class="en">深色开发者向</span></div>
+        <div class="sw"><i style="background:#0b0d11"></i><i style="background:#151a22"></i><i style="background:#6ea8fe"></i><i style="background:#a78bfa"></i></div>
+        <p class="desc">深炭底 + 冷蓝/紫渐变 accent + 等宽字体主导。代码块、工具名、状态栏全部走 mono，终端气质与现代桌面感兼顾。</p>
+        <div class="tags"><span class="tag">深色</span><span class="tag">终端感</span><span class="tag">护眼</span></div>
+        <a class="open" href="02-midnight.html">打开预览 →</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="shot"><iframe src="03-aurora.html" loading="lazy" scrolling="no"></iframe><a href="03-aurora.html"></a></div>
+      <div class="meta">
+        <div class="row"><span class="num">03</span><span class="name">Aurora</span><span class="en">玻璃拟态</span></div>
+        <div class="sw"><i style="background:#a5b4fc"></i><i style="background:#f5b8e0"></i><i style="background:#9be9e0"></i><i style="background:#6d5cff"></i></div>
+        <p class="desc">极光渐变背景 + 毛玻璃面板 + 大圆角 + 柔和光晕。最有「现代 AI 产品」的气质，视觉表现力最强，也最讨喜。</p>
+        <div class="tags"><span class="tag">浅色</span><span class="tag">渐变</span><span class="tag">卡片浮层</span></div>
+        <a class="open" href="03-aurora.html">打开预览 →</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="shot"><iframe src="04-brutal.html" loading="lazy" scrolling="no"></iframe><a href="04-brutal.html"></a></div>
+      <div class="meta">
+        <div class="row"><span class="num">04</span><span class="name">Brutal</span><span class="en">新粗野主义</span></div>
+        <div class="sw"><i style="background:#ffe500"></i><i style="background:#2b5cff"></i><i style="background:#ff5cae"></i><i style="background:#0a0a0a"></i></div>
+        <p class="desc">2px 硬黑边 + 偏移实心阴影 + 无圆角 + 高饱和色块。个性最强、辨识度最高，交互反馈（按下位移）也最直观。</p>
+        <div class="tags"><span class="tag">高对比</span><span class="tag">强个性</span><span class="tag">硬边</span></div>
+        <a class="open" href="04-brutal.html">打开预览 →</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="shot"><iframe src="05-console.html" loading="lazy" scrolling="no"></iframe><a href="05-console.html"></a></div>
+      <div class="meta">
+        <div class="row"><span class="num">05</span><span class="name">Console</span><span class="en">三栏工作台</span></div>
+        <div class="sw"><i style="background:#0f141a"></i><i style="background:#1a222c"></i><i style="background:#3d8bfd"></i><i style="background:#2ecc71"></i></div>
+        <p class="desc">唯一改了布局的方案：左会话 / 中对话 / 右「运行上下文」——上下文占用环、工具调用时间线、成本、后台任务、生效权限规则。信息密度高，IDE 工具气质。</p>
+        <div class="tags"><span class="tag">深色</span><span class="tag">三栏</span><span class="tag">高密度</span></div>
+        <a class="open" href="05-console.html">打开预览 →</a>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

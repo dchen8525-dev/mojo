@@ -308,6 +308,7 @@ async function refreshState() {
   }
   state.liveTurn = s.liveTurn ?? null;
   mountLive();
+  updateWelcome();
   if (Array.isArray(s.customCommands)) customCmds = s.customCommands;
   // Re-show any prompts that arrived while we were disconnected.
   if (Array.isArray(s.pendingPermissions) && s.pendingPermissions.length) {
@@ -321,6 +322,8 @@ async function refreshState() {
 }
 
 function updateHeader(s) {
+  $("#crumb-cwd").textContent = s.cwd ?? "";
+  $("#crumb-session").textContent = s.sessionId ? `session ${s.sessionId}` : "";
   $("#model-input").placeholder = `${s.provider}:${s.model}`;
   $("#plan-toggle").checked = s.planMode;
   document.querySelectorAll("#mode-picker button").forEach((b) => b.classList.toggle("active", b.dataset.mode === s.mode));
@@ -565,6 +568,15 @@ async function send() {
 
 $("#send").onclick = send;
 $("#stop").onclick = () => api("/api/abort", {});
+
+/* welcome quick-start: fill the composer (don't auto-send — approval flow stays in the user's hands) */
+document.querySelectorAll("#welcome .hint").forEach((b) => {
+  b.onclick = () => {
+    input.value = b.dataset.prompt ?? "";
+    input.focus();
+    input.dispatchEvent(new Event("input"));
+  };
+});
 
 /* attachments */
 $("#attach").onclick = () => $("#file-input").click();
@@ -861,7 +873,7 @@ async function runSessionSearch() {
     item.appendChild(el("div", "s-title", (h.titleMatch ? "标题 · " : "") + (s.title || s.id) + (s.tags?.length ? "  " + s.tags.map((t) => "#" + t).join(" ") : "")));
     if (h.snippet) item.appendChild(el("div", "s-snippet", h.snippet));
     const meta = el("div", "s-meta");
-    meta.appendChild(el("span", "s-sub", h.matches ? `${h.matches} 条命中` : "标题命中"));
+    meta.appendChild(el("span", "s-sub", h.matches ? `${h.matches} 条命中` : h.titleMatch ? "标题命中" : "标签命中"));
     meta.appendChild(el("span", "s-time", relTime(s.updatedAt)));
     item.appendChild(meta);
     item.onclick = async () => {

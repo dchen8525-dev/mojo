@@ -30,17 +30,18 @@ export interface GuiServerOptions {
   /** Resume a stored session into the agent. Returns an error string or null. */
   resumeSession: (id: string) => Promise<string | null>;
   /** List sessions for the sidebar. */
-  listSessions: () => Promise<Array<{ id: string; cwd: string; updatedAt: string; model?: string; title?: string }>>;
+  listSessions: () => Promise<Array<{ id: string; cwd: string; updatedAt: string; model?: string; title?: string; tags?: string[] }>>;
   /** Full-text search over saved sessions (sidebar quick search). */
   searchSessions: (
     q: string,
     o?: { regex?: boolean },
   ) => Promise<
     Array<{
-      meta: { id: string; cwd: string; updatedAt: string; model?: string; title?: string };
+      meta: { id: string; cwd: string; updatedAt: string; model?: string; title?: string; tags?: string[] };
       matches: number;
       snippet: string;
       titleMatch: boolean;
+      tagMatch: boolean;
     }>
   >;
   /** Rename a stored session. Returns false when it does not exist. */
