@@ -39,6 +39,45 @@ export function isDangerousCommand(cmd: string): boolean {
   return DANGEROUS_PATTERNS.some((re) => re.test(cmd));
 }
 
+/** git subcommands that cannot mutate anything. */
+const READONLY_GIT = new Set([
+  "status", "log", "diff", "show", "blame", "rev-parse", "shortlog",
+  "describe", "ls-files", "reflog", "cat-file", "grep", "whatchanged", "config",
+]);
+
+/** Single-word programs whose plain invocation only reads. */
+const READONLY_PROGRAMS = new Set([
+  "ls", "dir", "pwd", "cat", "type", "head", "tail", "wc", "stat", "file",
+  "du", "df", "tree", "more", "findstr", "grep", "which", "where", "whoami",
+  "hostname", "date", "uname", "printenv", "echo",
+]);
+
+/**
+ * True when a command is unambiguously read-only and may skip the permission
+ * prompt. Deliberately conservative: anything compound (|, ;, &, &&, ||),
+ * redirecting (<, >), substituting ($(...), backticks, newlines) or matching a
+ * dangerous pattern disqualifies the whole command, as does any program not on
+ * the allowlist - interpreters like node/python are excluded entirely because
+ * their argument can run arbitrary code. `git` is handled per subcommand; a
+ * false "no" only costs a prompt.
+ */
+export function isReadOnlyCommand(cmd: string): boolean {
+  const command = cmd.trim();
+  if (!command || isDangerousCommand(command)) return false;
+  if (/[|;&<>`\n]|\$\(/.test(command)) return false;
+  const tokens = command.split(/\s+/);
+  if (tokens[0] === "git") {
+    let i = 1;
+    while (i < tokens.length && tokens[i].startsWith("-")) i++;
+    const sub = tokens[i];
+    if (!sub || !READONLY_GIT.has(sub)) return false;
+    // `git config x y` writes; only --get/--list forms are reads.
+    if (sub === "config") return /^--(get|list)/.test(tokens[i + 1] ?? "");
+    return true;
+  }
+  return READONLY_PROGRAMS.has(tokens[0].toLowerCase());
+}
+
 /**
  * PowerShell is the default interactive shell on modern Windows and many
  * users set it as their agent shell. Honor AGENT_SHELL / COMSPEC so bash
@@ -117,12 +156,16 @@ export const bashTool: Tool = {
     const timeout = Math.min(600_000, Math.max(1_000, num(input, "timeout_ms") ?? DEFAULT_TIMEOUT_MS));
     const maxOutput = Math.min(HARD_OUTPUT_CAP, Math.max(1_000, num(input, "max_output") ?? 30_000));
 
-    const ok = await ctx.askPermission(
-      `Run command${bool(input, "run_in_background") ? " in background" : ""}: ` +
-        `${command.length > 200 ? command.slice(0, 200) + "..." : command}` +
-        (isDangerousCommand(command) ? "  [matches a dangerous pattern]" : ""),
-      isDangerousCommand(command) ? "high" : "medium",
-    );
+    const dangerous = isDangerousCommand(command);
+    const readOnly = !dangerous && isReadOnlyCommand(command);
+    const ok =
+      readOnly ||
+      (await ctx.askPermission(
+        `Run command${bool(input, "run_in_background") ? " in background" : ""}: ` +
+          `${command.length > 200 ? command.slice(0, 200) + "..." : command}` +
+          (dangerous ? "  [matches a dangerous pattern]" : ""),
+        dangerous ? "high" : "medium",
+      ));
     if (!ok) return { content: "The user rejected this command. Do not retry it unchanged.", isError: true };
 
     let workdir = ctx.cwd;

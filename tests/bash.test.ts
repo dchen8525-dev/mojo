@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { bashTool, bashOutputTool, bashKillTool, isDangerousCommand, pickWin32Shell } from "../src/tools/bash.js";
+import { bashTool, bashOutputTool, bashKillTool, isDangerousCommand, isReadOnlyCommand, pickWin32Shell } from "../src/tools/bash.js";
 import { backgroundManager } from "../src/tools/background.js";
 import type { ToolContext } from "../src/types.js";
 
@@ -66,6 +66,69 @@ describe("isDangerousCommand (cross-shell patterns)", () => {
   });
 });
 
+describe("isReadOnlyCommand", () => {
+  it("allows known read-only programs and git subcommands", () => {
+    expect(isReadOnlyCommand("git status")).toBe(true);
+    expect(isReadOnlyCommand("git log --oneline -5")).toBe(true);
+    expect(isReadOnlyCommand("git --git-dir=.git diff")).toBe(true);
+    expect(isReadOnlyCommand("git config --get user.name")).toBe(true);
+    expect(isReadOnlyCommand("ls -la")).toBe(true);
+    expect(isReadOnlyCommand("pwd")).toBe(true);
+    expect(isReadOnlyCommand("cat package.json")).toBe(true);
+    expect(isReadOnlyCommand("DIR /b")).toBe(true);
+    expect(isReadOnlyCommand("echo hi")).toBe(true);
+  });
+
+  it("rejects mutating or unknown programs", () => {
+    expect(isReadOnlyCommand("git commit -m x")).toBe(false);
+    expect(isReadOnlyCommand("git push")).toBe(false);
+    expect(isReadOnlyCommand("git branch new-branch")).toBe(false);
+    expect(isReadOnlyCommand("git config user.name x")).toBe(false);
+    expect(isReadOnlyCommand("node -e \"console.log(1)\"")).toBe(false);
+    expect(isReadOnlyCommand("npm test")).toBe(false);
+    expect(isReadOnlyCommand("del marker.txt")).toBe(false);
+    expect(isReadOnlyCommand("rm -rf /tmp/x")).toBe(false); // dangerous beats everything
+  });
+
+  it("rejects compound, redirecting and substituting commands", () => {
+    expect(isReadOnlyCommand("git status && git log")).toBe(false);
+    expect(isReadOnlyCommand("ls; rm x")).toBe(false);
+    expect(isReadOnlyCommand("cat a | grep b")).toBe(false);
+    expect(isReadOnlyCommand("echo hi > out.txt")).toBe(false);
+    expect(isReadOnlyCommand("git log `cat rev`")).toBe(false);
+    expect(isReadOnlyCommand("git log $(cat rev)")).toBe(false);
+    expect(isReadOnlyCommand("git status\ngit log")).toBe(false);
+    expect(isReadOnlyCommand("")).toBe(false);
+  });
+});
+
+describe("bash tool permission skip", () => {
+  const ctx = (overrides: Partial<ToolContext> = {}): ToolContext => ({
+    cwd: process.cwd(),
+    askPermission: async () => {
+      throw new Error("read-only command must not prompt");
+    },
+    ...overrides,
+  });
+
+  it("runs a read-only command without asking permission", async () => {
+    const r = await bashTool.execute({ command: "echo readonly-skip" }, ctx());
+    expect(r.isError).toBeFalsy();
+    expect(r.content).toContain("readonly-skip");
+  });
+
+  it("still prompts for anything not classified read-only", async () => {
+    let asked = 0;
+    const r = await bashTool.execute(
+      { command: "echo compound && echo more" },
+      ctx({ askPermission: async () => (asked++, false) }),
+    );
+    expect(asked).toBe(1);
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("rejected");
+  });
+});
+
 describe("bash tool execution", () => {
   const ctx = (overrides: Partial<ToolContext> = {}): ToolContext => ({
     cwd: process.cwd(),
@@ -107,7 +170,8 @@ describe("bash tool execution", () => {
   });
 
   it("asks permission and reports rejection without running", async () => {
-    const r = await bashTool.execute({ command: "echo nope" }, ctx({ askPermission: async () => false }));
+    // Piped, so it is not classified read-only and still prompts.
+    const r = await bashTool.execute({ command: "echo nope | findstr nope" }, ctx({ askPermission: async () => false }));
     expect(r.isError).toBe(true);
     expect(r.content).toContain("rejected");
   });
