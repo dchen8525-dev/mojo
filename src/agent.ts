@@ -8,6 +8,8 @@ import { LLM, type Config, type StreamEvents } from "./llm.js";
 import { lookupModel } from "./llm/models.js";
 import type { SystemPrompt } from "./llm/types.js";
 import { getTool, tools, todoStore } from "./tools/index.js";
+import { planWaves, runWave } from "./scheduler.js";
+import { systemReminder } from "./reminder.js";
 import { exitPlanTool } from "./tools/exitPlan.js";
 import type { PermissionManager } from "./permissions.js";
 import type { HookManager } from "./hooks.js";
@@ -247,7 +249,7 @@ export class Agent {
     const memory = await renderMemory(this.cwd);
     const skills = renderSkillsBlock(await listSkills(this.cwd));
     const hookContext = this.sessionStartContext
-      ? `\n<hook_context event="SessionStart">\n${this.sessionStartContext}\n</hook_context>\n`
+      ? `\n${systemReminder(this.sessionStartContext, { event: "SessionStart" })}\n`
       : "";
     const planRules = this.planMode
       ? `
@@ -443,7 +445,7 @@ Rules:
     if (this.hooks) {
       const hr = await this.hooks.run("UserPromptSubmit", { cwd: this.cwd, session_id: this.sessionId, prompt }, undefined);
       if (hr.blocked) throw new Error(`prompt blocked by hook: ${hr.reason}`);
-      if (hr.context) prompt += `\n\n<hook_context>\n${hr.context}\n</hook_context>`;
+      if (hr.context) prompt += `\n\n${systemReminder(hr.context, { event: "UserPromptSubmit" })}`;
       if (hr.reason) events?.onHook?.("UserPromptSubmit", hr.reason);
     }
 
@@ -532,19 +534,20 @@ Rules:
         iterations++;
         continuations = 0;
 
-        // Run independent read-only tools concurrently; mutating tools stay
-        // sequential so file edits and shell commands never interleave.
+        // Wave scheduling: consecutive parallel-safe tools run concurrently
+        // (bounded by MAX_WAVE_CONCURRENCY); a mutating tool breaks the wave
+        // and runs alone, never overlapping anything else.
         const results: ToolResultBlockParam[] = new Array(turn.toolUses.length);
-        const parallel = turn.toolUses.map((tu, i) => ({ tu, i })).filter(({ tu }) => getTool(tu.name)?.parallelSafe);
-        const serial = turn.toolUses.map((tu, i) => ({ tu, i })).filter(({ tu }) => !getTool(tu.name)?.parallelSafe);
-
-        await Promise.all(
-          parallel.map(async ({ tu, i }) => {
-            results[i] = await this.runTool(tu, signal, events);
-          }),
+        const waves = planWaves(
+          turn.toolUses.map((tu) => tu.name),
+          (name) => !!getTool(name)?.parallelSafe,
         );
-        for (const { tu, i } of serial) {
-          results[i] = await this.runTool(tu, signal, events);
+        for (const wave of waves) {
+          await runWave(
+            wave.map((i) => async () => {
+              results[i] = await this.runTool(turn.toolUses[i], signal, events);
+            }),
+          );
         }
         this.messages.push({ role: "user", content: results });
       }
@@ -640,7 +643,7 @@ Rules:
           tool_response: result.content.slice(0, 8000),
         }, tu.name);
         if (hr.reason) events?.onHook?.("PostToolUse", hr.reason);
-        if (hr.context) result.content += `\n\n<hook_context>\n${hr.context}\n</hook_context>`;
+        if (hr.context) result.content += `\n\n${systemReminder(hr.context, { event: "PostToolUse" })}`;
       }
       return { type: "tool_result", tool_use_id: tu.id, content: result.content, is_error: result.isError };
     } catch (err) {

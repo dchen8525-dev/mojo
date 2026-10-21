@@ -187,22 +187,24 @@ beforeEach(() => {
 });
 
 describe("Agent.chat tool scheduling", () => {
-  it("runs parallel-safe tools concurrently and serial tools after them", async () => {
+  it("runs tools in waves: adjacent parallel calls overlap, mutating calls run alone", async () => {
     h.turns = [
       toolTurn([
         ["t_parallel", { n: 1 }],
         ["t_serial", { n: 1 }],
         ["t_parallel", { n: 2 }],
+        ["t_parallel", { n: 3 }],
         ["t_serial", { n: 2 }],
       ]),
       textTurn("done"),
     ];
     const out = await makeAgent().chat("go");
     expect(out).toBe("done");
-    // Overlapping start/end proves concurrency of the parallel pair.
-    expect(toolEvents.indexOf("p-start 2")).toBeLessThan(toolEvents.indexOf("p-end 1"));
-    // Serial tools run one at a time, after the parallel batch completes.
-    expect(toolEvents.indexOf("s-run 1")).toBeGreaterThan(toolEvents.indexOf("p-end 2"));
+    // Adjacent parallel tools overlap; a serial tool breaks the wave.
+    expect(toolEvents.indexOf("p-start 3")).toBeLessThan(toolEvents.indexOf("p-end 2"));
+    expect(toolEvents.indexOf("s-run 1")).toBeLessThan(toolEvents.indexOf("p-start 2"));
+    expect(toolEvents.indexOf("s-run 2")).toBeGreaterThan(toolEvents.indexOf("p-end 3"));
+    // Serial tools never overlap anything.
     expect(toolEvents.indexOf("s-run 2")).toBeGreaterThan(toolEvents.indexOf("s-run 1"));
   });
 
@@ -406,7 +408,7 @@ describe("Agent.chat hooks integration", () => {
     await agent.chat("go");
     await agent.chat("again");
     // Both turns see the hook context, not just the first.
-    expect(h.sentSystems.at(-2)).toContain('<hook_context event="SessionStart">');
+    expect(h.sentSystems.at(-2)).toContain('<system-reminder event="SessionStart">');
     expect(h.sentSystems.at(-2)).toContain("extra context");
     expect(h.sentSystems.at(-1)).toContain("extra context");
   });

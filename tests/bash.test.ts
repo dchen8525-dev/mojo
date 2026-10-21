@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { bashTool, bashOutputTool, bashKillTool, isDangerousCommand, isReadOnlyCommand, pickWin32Shell } from "../src/tools/bash.js";
+import { bashTool, bashOutputTool, bashKillTool, isDangerousCommand, isReadOnlyCommand, pickWin32Shell, defaultTimeoutMs, readOnlyBashTool } from "../src/tools/bash.js";
 import { backgroundManager } from "../src/tools/background.js";
 import type { ToolContext } from "../src/types.js";
 
@@ -269,5 +269,45 @@ describe("background tasks", () => {
     expect(r.isError).toBe(true);
     expect(r.content).toContain("rejected");
     backgroundManager.kill(id); // cleanup
+  });
+});
+
+describe("defaultTimeoutMs (graded policy)", () => {
+  it("read-only commands get the short default", () => {
+    expect(defaultTimeoutMs("git status")).toBe(30_000);
+    expect(defaultTimeoutMs("ls -la")).toBe(30_000);
+  });
+
+  it("build/test commands get a generous default", () => {
+    expect(defaultTimeoutMs("npm test")).toBe(300_000);
+    expect(defaultTimeoutMs("npx tsc --noEmit")).toBe(300_000);
+    expect(defaultTimeoutMs("cargo build --release")).toBe(300_000);
+  });
+
+  it("everything else keeps the standard default", () => {
+    expect(defaultTimeoutMs("node script.js")).toBe(120_000);
+  });
+});
+
+describe("readOnlyBashTool", () => {
+  const ctx = (cwd: string): ToolContext => ({
+    cwd,
+    askPermission: async () => {
+      throw new Error("research subagents must never prompt");
+    },
+  }) as unknown as ToolContext;
+
+  it("rejects commands that are not read-only without spawning anything", async () => {
+    for (const cmd of ["echo hi > out.txt", "node -e 1", "npm install", "rm -rf x", "cat a | findstr b"]) {
+      const r = await readOnlyBashTool.execute({ command: cmd }, ctx(process.cwd()));
+      expect(r.isError, cmd).toBe(true);
+      expect(r.content).toContain("read-only");
+    }
+  });
+
+  it("runs an allowed read-only command without prompting", async () => {
+    const r = await readOnlyBashTool.execute({ command: "echo hello-research" }, ctx(process.cwd()));
+    expect(r.isError).toBeFalsy();
+    expect(r.content).toContain("hello-research");
   });
 });

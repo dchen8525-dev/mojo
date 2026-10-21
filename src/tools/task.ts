@@ -7,7 +7,7 @@ import { grepTool } from "./grep.js";
 import { webSearchTool, webFetchTool } from "./web.js";
 import { writeFileTool, editFileTool } from "./write.js";
 import { multiEditTool } from "./multiEdit.js";
-import { bashTool } from "./bash.js";
+import { bashTool, readOnlyBashTool } from "./bash.js";
 import { describeError } from "./utils.js";
 import { boundedResult } from "../artifacts.js";
 
@@ -22,9 +22,10 @@ const SUB_MAX_ITERATIONS = 25;
 const SUB_MAX_CONCURRENCY = 4;
 const subSlots = new Semaphore(SUB_MAX_CONCURRENCY);
 
-// Read-only toolset: the research sub-agent explores, it never modifies. Web
-// tools are read-only too, so a research task can also consult docs.
-const researchTools: Tool[] = [readFileTool, globTool, grepTool, webSearchTool, webFetchTool];
+// Read-only toolset: the research sub-agent explores, it never modifies. The
+// bash wrapper only admits commands classified read-only (git log, ls, ...);
+// web tools are read-only too, so research can also consult docs.
+const researchTools: Tool[] = [readFileTool, globTool, grepTool, readOnlyBashTool, webSearchTool, webFetchTool];
 
 // Writable toolset for the coding sub-agent (implement a module, fix files).
 const workerTools: Tool[] = [
@@ -40,7 +41,7 @@ const workerTools: Tool[] = [
 const RESEARCH_SYSTEM_PROMPT = `You are a research subagent spawned by a coding agent. Your only job is to answer the assigned question about this codebase accurately and fast.
 
 Rules:
-- Use glob_files/grep/read_file to explore the codebase; web_search/web_fetch for external docs or unfamiliar errors. You have NO write or shell access - never try.
+- Use glob_files/grep/read_file to explore the codebase; bash (READ-ONLY commands only, e.g. git log/diff/status) for history and shell-visible facts; web_search/web_fetch for external docs or unfamiliar errors. You have NO write access - the shell rejects anything that is not read-only.
 - Prefer targeted searches over reading whole files. Batch independent tool calls.
 - Do not speculate: every claim must come from a file you actually read.
 - When you have the answer, stop exploring and write your final report.

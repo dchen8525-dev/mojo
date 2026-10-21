@@ -79,6 +79,20 @@ export function isReadOnlyCommand(cmd: string): boolean {
 }
 
 /**
+ * Commands known to run long (builds, test suites, compilers) get a generous
+ * default timeout so a slow `npm test` is not killed prematurely, while quick
+ * read-only commands fail fast instead of hanging for the full default.
+ * An explicit timeout_ms from the caller always wins.
+ */
+const LONG_RUNNING = /\b(npm|pnpm|yarn|npx|tsc|vite|webpack|make|cmake|cargo|gradle|mvn|pytest|go|dotnet|mvn)\b/;
+
+export function defaultTimeoutMs(command: string): number {
+  if (isReadOnlyCommand(command)) return 30_000;
+  if (LONG_RUNNING.test(command)) return 300_000;
+  return DEFAULT_TIMEOUT_MS;
+}
+
+/**
  * PowerShell is the default interactive shell on modern Windows and many
  * users set it as their agent shell. Honor AGENT_SHELL / COMSPEC so bash
  * syntax mistakes (e.g. `&&` in Windows PowerShell 5.1) fail loudly inside
@@ -153,7 +167,7 @@ export const bashTool: Tool = {
   },
   async execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const command = str(input, "command");
-    const timeout = Math.min(600_000, Math.max(1_000, num(input, "timeout_ms") ?? DEFAULT_TIMEOUT_MS));
+    const timeout = Math.min(600_000, Math.max(1_000, num(input, "timeout_ms") ?? defaultTimeoutMs(command)));
     const maxOutput = Math.min(HARD_OUTPUT_CAP, Math.max(1_000, num(input, "max_output") ?? 30_000));
 
     const dangerous = isDangerousCommand(command);
@@ -325,3 +339,43 @@ export const bashKillTool: Tool = {
   },
 };
 
+
+/**
+ * Shell access for read-only subagents (task tool research mode). Unlike the
+ * main bash tool, permission prompts cannot be relied on here (research mode
+ * auto-approves), so the read-only classification is a HARD gate: anything
+ * else is rejected before a process is ever spawned.
+ */
+export const readOnlyBashTool: Tool = {
+  name: "bash",
+  description:
+    "Run a READ-ONLY shell command and return its output. Only unambiguously read-only " +
+    "commands are allowed (ls, cat, head, grep, git status/log/diff/show, ...) - anything " +
+    "that writes files, mutates state, or is compound (| ; > &&) is rejected. Prefer " +
+    "read_file/glob_files/grep when they fit the job.",
+  isReadOnly: true,
+  parallelSafe: true,
+  inputSchema: {
+    type: "object",
+    properties: {
+      command: { type: "string", description: "A single read-only shell command." },
+      workdir: { type: "string", description: "Directory to run in (defaults to working directory)." },
+      max_output: { type: "number", description: "Truncate the returned output to this many characters (default 30000)." },
+    },
+    required: ["command"],
+  },
+  async execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const command = typeof input.command === "string" ? input.command.trim() : "";
+    if (!command) return { content: 'Error: missing required string parameter "command"', isError: true };
+    if (isDangerousCommand(command) || !isReadOnlyCommand(command)) {
+      return {
+        content:
+          `Rejected: this subagent may only run read-only shell commands, and ` +
+          `"${command.slice(0, 120)}" is not classified as read-only. ` +
+          `Use read_file/glob_files/grep instead.`,
+        isError: true,
+      };
+    }
+    return bashTool.execute(input, ctx);
+  },
+};
