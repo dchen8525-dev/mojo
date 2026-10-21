@@ -2,19 +2,26 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MessageParam } from "../src/types.js";
+import type { RetryInfo, StreamEvents } from "../src/llm/types.js";
 import { StreamInterrupted } from "../src/llm/types.js";
 
 // The facade is what retries; swap both backends for a scripted one so no
 // network or API key is involved.
 const h = vi.hoisted(() => {
-  const calls: Array<{ messages: MessageParam[]; signal?: AbortSignal }> = [];
+  const calls: Array<{ messages: MessageParam[]; signal?: AbortSignal; events?: StreamEvents }> = [];
   const script: Array<() => unknown> = [];
   function backend(provider: string) {
     return class {
       readonly provider = provider;
       model = "test-model";
-      async send(messages: MessageParam[], _system: string, _tools: unknown, signal?: AbortSignal) {
-        calls.push({ messages, signal });
+      async send(
+        messages: MessageParam[],
+        _system: string,
+        _tools: unknown,
+        signal?: AbortSignal,
+        events?: StreamEvents,
+      ) {
+        calls.push({ messages, signal, events });
         const next = script.shift();
         if (!next) throw new Error("unexpected backend call");
         return await next();
@@ -163,6 +170,35 @@ describe("LLM retry and stream resume", () => {
     expect(h.calls).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1);
     await expect(p).resolves.toMatchObject({ text: "ok" });
+  });
+
+  it("reports each retry, including the server-requested delay", async () => {
+    setScript(
+      () => { throw httpError(429, "2"); },
+      () => turn("ok"),
+    );
+    const seen: RetryInfo[] = [];
+    const p = makeLLM().send(messages, "S", [], undefined, { onRetry: (info) => seen.push(info) });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(seen).toEqual([{ attempt: 1, maxAttempts: 3, delayMs: 2000, status: 429, reason: "rate-limit" }]);
+    await vi.advanceTimersByTimeAsync(2000);
+    await expect(p).resolves.toMatchObject({ text: "ok" });
+    expect(seen).toHaveLength(1);
+  });
+
+  it("labels connection failures and stays silent for non-retriable errors", async () => {
+    setScript(
+      () => { throw connectionError(); },
+      () => { throw httpError(400); },
+    );
+    const seen: RetryInfo[] = [];
+    const p = makeLLM().send(messages, "S", [], undefined, { onRetry: (info) => seen.push(info) })
+      .catch((err: unknown) => err);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect(p).resolves.toMatchObject({ status: 400 });
+    expect(seen).toEqual([{ attempt: 1, maxAttempts: 3, delayMs: 1000, reason: "connection" }]);
   });
 
   it("gives up after three retries", async () => {

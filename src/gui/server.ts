@@ -311,6 +311,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       onCompacted: (before, after) => hub.broadcast("compacted", { before, after }),
       onHook: (event, message) => hub.broadcast("hook", { event, message }),
       onPlanApproved: () => hub.broadcast("plan_approved", {}),
+      onRetry: (info) => hub.broadcast("retry", info),
     };
   }
 

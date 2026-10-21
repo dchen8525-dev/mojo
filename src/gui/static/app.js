@@ -518,6 +518,17 @@ function connectSSE() {
   on("cost_warning", (d) => appendItem(makeSystemItem("⚠ " + d.message, "error")));
   on("compacting", () => appendItem(makeSystemItem("… 正在压缩上下文 …")));
   on("compacted", (d) => appendItem(makeSystemItem(`上下文: ${d.before.toLocaleString()} → ${d.after.toLocaleString()} tokens`)));
+  on("retry", (d) => {
+    const why =
+      d.reason === "rate-limit"
+        ? "限流"
+        : d.reason === "timeout"
+          ? "请求超时"
+          : d.reason === "server"
+            ? `服务端错误 ${d.status ?? ""}`.trim()
+            : "连接失败";
+    appendItem(makeSystemItem(`… ${Math.round(d.delayMs / 100) / 10} 秒后重试（${d.attempt}/${d.maxAttempts} · ${why}）`));
+  });
   on("hook", (d) => appendItem(makeSystemItem(`[hook ${d.event}] ${d.message}`)));
   on("plan_approved", () => {
     state.planMode = false;

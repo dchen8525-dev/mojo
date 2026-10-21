@@ -159,6 +159,11 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
     onCompacting: () => console.log(ANSI.warn("… compacting context …")),
     onCompacted: (before, after) =>
       console.log(ANSI.dim(`  context: ${before.toLocaleString()} → ${after.toLocaleString()} tokens`)),
+    onRetry: (info) => {
+      const why = info.reason === "server" ? `HTTP ${info.status}` : info.reason;
+      const secs = Math.round(info.delayMs / 100) / 10;
+      console.log(ANSI.warn(`… retrying in ${secs}s (${info.attempt}/${info.maxAttempts}, ${why})`));
+    },
   };
 
   const controller = new AbortController();

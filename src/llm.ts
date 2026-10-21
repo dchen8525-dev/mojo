@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { promises as fs, readFileSync } from "node:fs";
 import type { MessageParam, Tool, ContentBlock } from "./types.js";
-import type { AssistantTurn, LLMBackend, Provider, StreamEvents } from "./llm/types.js";
+import type { AssistantTurn, LLMBackend, Provider, RetryReason, StreamEvents } from "./llm/types.js";
 import { StreamInterrupted } from "./llm/types.js";
 import { AnthropicBackend } from "./llm/anthropic.js";
 import { OpenAiBackend } from "./llm/openai.js";
@@ -439,7 +439,11 @@ export class LLM {
   }
 
   /** Retry transient API failures (408 / 429 / 5xx / connection) with backoff. */
-  private static async withRetry<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  private static async withRetry<T>(
+    fn: () => Promise<T>,
+    signal?: AbortSignal,
+    events?: StreamEvents,
+  ): Promise<T> {
     const delays = [1000, 3000, 7000];
     let attempt = 0;
     for (;;) {
@@ -466,6 +470,15 @@ export class LLM {
           const ms = Number.isFinite(secs) ? secs * 1000 : Date.parse(ra) - Date.now();
           if (Number.isFinite(ms) && ms >= 0) wait = Math.min(ms, 30_000);
         }
+        const reason: RetryReason =
+          status === 429 ? "rate-limit" : status === 408 ? "timeout" : status !== undefined ? "server" : "connection";
+        events?.onRetry?.({
+          attempt: attempt + 1,
+          maxAttempts: delays.length,
+          delayMs: wait,
+          ...(status !== undefined ? { status } : {}),
+          reason,
+        });
         await LLM.abortableSleep(wait, signal);
         if (signal?.aborted) throw err;
         attempt++;
@@ -535,7 +548,11 @@ export class LLM {
       }
 
       try {
-        const turn = await LLM.withRetry(() => this.backend.send(resumedMessages, system, tools, signal, events), signal);
+        const turn = await LLM.withRetry(
+          () => this.backend.send(resumedMessages, system, tools, signal, events),
+          signal,
+          events,
+        );
         if (!partial) return turn;
         const text = LLM.mergeText(partial, turn.text);
         return {
