@@ -36,6 +36,14 @@ const MAX_TOOL_ITERATIONS = 40;
 const MAX_CONTINUATIONS = 3; // auto-resume cap after output hits the token limit
 export const COMPACT_RATIO = 0.75; // compact when estimate exceeds this share of the model's window
 const COMPACT_TARGET_RATIO = 0.5; // aim to land here so we don't re-compact next turn
+/**
+ * Microcompact: a prune-only pass (no LLM call) that fires before the full
+ * compaction threshold, collapsing old tool output with a narrower protection
+ * window than compact()'s stage 1. Often this alone buys enough headroom to
+ * skip the expensive summary entirely.
+ */
+export const MICROCOMPACT_RATIO = 0.7;
+const MICRO_PRUNE_PROTECT_LAST = 6;
 
 export interface AgentEvents extends StreamEvents {
   /** A new model round begins (one response + the tools it requests). 1-based. */
@@ -440,6 +448,15 @@ Rules:
         // history here, before the next model round.
         this.drainSteer();
         events?.onRoundStart?.(iterations + 1);
+        if (this.tokenEstimate() > this.llm.contextWindow * MICROCOMPACT_RATIO) {
+          const before = this.tokenEstimate();
+          const pruned = pruneOldToolResults(this.messages, MICRO_PRUNE_PROTECT_LAST);
+          if (pruned.changed) {
+            this.messages = pruned.messages;
+            this.tokens.invalidate();
+            events?.onCompacted?.(before, this.tokenEstimate());
+          }
+        }
         if (this.tokenEstimate() > this.llm.contextWindow * COMPACT_RATIO) await this.compact(events, signal);
 
         const sent = this.messages.length;

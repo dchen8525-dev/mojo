@@ -282,6 +282,60 @@ describe("Agent.compactNow (LLM-summary compaction)", () => {
   });
 });
 
+describe("Agent microcompact (prune-only pass at 0.70)", () => {
+  it("prunes stale tool results without a summarizer call and protects the last 6", async () => {
+    // 30k (old tool_result) + ~39k (6 filler msgs) + 2.5k (recent tool_result)
+    // ≈ 72k tokens: above MICROCOMPACT_RATIO 0.70, below COMPACT_RATIO 0.75.
+    const filler = "x".repeat(23_000);
+    const messages: MessageParam[] = [
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "old", content: "y".repeat(120_000) } as ContentBlock] },
+      { role: "assistant", content: "done with the tool" },
+      { role: "user", content: `q1 ${filler}` },
+      { role: "assistant", content: `a1 ${filler}` },
+      { role: "user", content: `q2 ${filler}` },
+      { role: "assistant", content: `a2 ${filler}` },
+      // Last 6 messages are protected: this big recent result must survive.
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "new", content: "z".repeat(10_000) } as ContentBlock] },
+      { role: "assistant", content: `a3 ${filler}` },
+      { role: "user", content: `q3 ${filler}` },
+      { role: "assistant", content: `a4 ${filler}` },
+    ];
+    h.turns = [textTurn("ok")];
+    const agent = makeAgent(undefined, messages);
+    const before = agent.tokenEstimate();
+    expect(before).toBeGreaterThan(70_000);
+    expect(before).toBeLessThan(75_000);
+
+    const compacted: Array<[number, number]> = [];
+    await agent.chat("continue", undefined, { onCompacted: (b, a) => compacted.push([b, a]) });
+
+    expect(h.calls).toBe(1); // one send only - no summarizer LLM call happened
+    const sent = h.sentMessages[0];
+    const oldResult = (sent[0].content as Array<Record<string, unknown>>)[0];
+    const oldText = String(oldResult.content);
+    expect(oldText.length).toBeLessThan(120_000);
+    expect(oldText).toContain("chars of stale tool output pruned");
+    // The protected recent tool result is untouched.
+    const newResult = (sent[6].content as Array<Record<string, unknown>>)[0];
+    expect(String(newResult.content)).toHaveLength(10_000);
+    // No compaction summary message was prepended.
+    expect(JSON.stringify(sent)).not.toContain("<context_compaction>");
+    expect(compacted).toHaveLength(1);
+    expect(compacted[0][0]).toBeGreaterThan(before);
+    expect(compacted[0][0]).toBeLessThan(75_000);
+    expect(compacted[0][1]).toBeLessThan(70_000);
+  });
+
+  it("does not prune when the estimate is below the microcompact threshold", async () => {
+    h.turns = [textTurn("ok")];
+    const agent = makeAgent();
+    const compacted: Array<[number, number]> = [];
+    await agent.chat("hello", undefined, { onCompacted: (b, a) => compacted.push([b, a]) });
+    expect(compacted).toEqual([]);
+    expect(agent.tokenEstimate()).toBeLessThan(70_000);
+  });
+});
+
 describe("Agent.chat hooks integration", () => {
   let dir: string;
 
