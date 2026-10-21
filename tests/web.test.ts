@@ -1,6 +1,30 @@
 import { describe, expect, it, vi } from "vitest";
-import { htmlToText, parseBing, parseDuckDuckGo, webFetchTool, webSearchTool } from "../src/tools/web.js";
+import {
+  assertPublicUrl,
+  htmlToText,
+  isBlockedAddress,
+  parseBing,
+  parseDuckDuckGo,
+  webFetchTool,
+  webSearchTool,
+} from "../src/tools/web.js";
 import type { ToolContext } from "../src/types.js";
+
+// Keep SSRF validation hermetic: every name resolves to a public address,
+// except *.internal.example which stands in for a private network target.
+vi.mock("node:dns", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:dns")>();
+  return {
+    ...actual,
+    promises: {
+      ...actual.promises,
+      lookup: async (hostname: string) =>
+        String(hostname).includes("internal.example")
+          ? [{ address: "192.168.1.10", family: 4 }]
+          : [{ address: "93.184.216.34", family: 4 }],
+    },
+  };
+});
 
 const ctx: ToolContext = { cwd: process.cwd(), askPermission: async () => true };
 
@@ -150,6 +174,137 @@ describe("web tool guards", () => {
       const r = await webFetchTool.execute({ url: "https://example.com/missing" }, ctx);
       expect(r.isError).toBe(true);
       expect(r.content).toContain("404");
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+});
+
+describe("SSRF guard", () => {
+  it("classifies private and special-use addresses", () => {
+    for (const ip of [
+      "127.0.0.1",
+      "10.1.2.3",
+      "172.16.0.1",
+      "172.31.255.255",
+      "192.168.1.1",
+      "169.254.169.254",
+      "100.64.0.1",
+      "0.0.0.0",
+      "224.0.0.1",
+      "255.255.255.255",
+      "::1",
+      "::",
+      "fc00::1",
+      "fd12:3456::1",
+      "fe80::1",
+      "ff02::1",
+      "::ffff:127.0.0.1",
+      "::ffff:7f00:1",
+      "2001:db8::1",
+    ]) {
+      expect(isBlockedAddress(ip), ip).toBe(true);
+    }
+    for (const ip of ["8.8.8.8", "1.1.1.1", "93.184.216.34", "172.32.0.1", "2606:4700:4700::1111"]) {
+      expect(isBlockedAddress(ip), ip).toBe(false);
+    }
+  });
+
+  it("accepts public URLs and rejects local names and schemes", async () => {
+    await expect(assertPublicUrl("https://example.com/a")).resolves.toBeInstanceOf(URL);
+    for (const url of [
+      "file:///etc/passwd",
+      "ftp://example.com/x",
+      "http://localhost/",
+      "http://foo.localhost/",
+      "http://printer.local/",
+      "http://metadata.google.internal/",
+      "http://127.0.0.1/",
+      "http://[::1]/",
+    ]) {
+      await expect(assertPublicUrl(url), url).rejects.toThrow();
+    }
+  });
+
+  it("rejects names that resolve to a private address", async () => {
+    await expect(assertPublicUrl("https://db.internal.example/x")).rejects.toThrow(
+      /resolves to a local\/private address/,
+    );
+  });
+
+  it("web_fetch refuses local targets without calling fetch", async () => {
+    const orig = globalThis.fetch;
+    const spy = vi.fn();
+    globalThis.fetch = spy as never;
+    try {
+      for (const url of [
+        "http://localhost:3000/",
+        "http://127.0.0.1/",
+        "http://10.0.0.5/",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://192.168.0.1/",
+        "http://[::1]/",
+        "http://printer.local/",
+      ]) {
+        const r = await webFetchTool.execute({ url }, ctx);
+        expect(r.isError, url).toBe(true);
+      }
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+
+  it("web_fetch follows public redirects and reports the final URL", async () => {
+    const orig = globalThis.fetch;
+    const calls: string[] = [];
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      calls.push(String(input));
+      if (String(input) === "https://example.com/start") {
+        return new Response(null, { status: 302, headers: { location: "/final" } });
+      }
+      return new Response("<html><head><title>Moved</title></head><body>arrived</body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      });
+    }) as never;
+    try {
+      const r = await webFetchTool.execute({ url: "https://example.com/start" }, ctx);
+      expect(r.isError).toBeFalsy();
+      expect(r.content).toContain("arrived");
+      expect(r.content).toContain("Source: https://example.com/final");
+      expect(calls).toEqual(["https://example.com/start", "https://example.com/final"]);
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+
+  it("web_fetch refuses a redirect into the private network", async () => {
+    const orig = globalThis.fetch;
+    const spy = vi.fn(
+      async () =>
+        new Response(null, { status: 302, headers: { location: "http://169.254.169.254/latest/meta-data/" } }),
+    );
+    globalThis.fetch = spy as never;
+    try {
+      const r = await webFetchTool.execute({ url: "https://example.com/start" }, ctx);
+      expect(r.isError).toBe(true);
+      expect(r.content).toMatch(/private/i);
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+
+  it("web_fetch stops after too many redirects", async () => {
+    const orig = globalThis.fetch;
+    globalThis.fetch = vi.fn(
+      async () => new Response(null, { status: 302, headers: { location: "https://example.com/loop" } }),
+    ) as never;
+    try {
+      const r = await webFetchTool.execute({ url: "https://example.com/loop" }, ctx);
+      expect(r.isError).toBe(true);
+      expect(r.content).toContain("too many redirects");
     } finally {
       globalThis.fetch = orig;
     }
