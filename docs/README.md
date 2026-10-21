@@ -20,3 +20,4 @@
 | [tool-wave-scheduler.md](tool-wave-scheduler.md) | 3395af1 | 工具调用的波次并发调度 |
 | [system-reminder-channel.md](system-reminder-channel.md) | 3395af1 | 元通知统一 `<system-reminder>` 通道 |
 | [tool-search-deferred-catalog.md](tool-search-deferred-catalog.md) | 9b72828 | tool_search 延迟工具目录 |
+| [background-subagents.md](background-subagents.md) | 2026-10-21 | 后台子代理（分离运行 + 完成提醒） |

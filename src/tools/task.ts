@@ -8,8 +8,9 @@ import { webSearchTool, webFetchTool } from "./web.js";
 import { writeFileTool, editFileTool } from "./write.js";
 import { multiEditTool } from "./multiEdit.js";
 import { bashTool, readOnlyBashTool } from "./bash.js";
-import { describeError } from "./utils.js";
+import { describeError, bool } from "./utils.js";
 import { boundedResult } from "../artifacts.js";
+import { subagentTasks } from "../taskRegistry.js";
 
 const SUB_MAX_ITERATIONS = 25;
 
@@ -101,6 +102,13 @@ export const taskTool: Tool = {
         enum: ["research", "worker"],
         description: '"research" = read-only exploration (default); "worker" = may edit files and run commands.',
       },
+      run_in_background: {
+        type: "boolean",
+        description:
+          "Run detached: returns a task id immediately and the report is delivered automatically " +
+          "at a later round boundary (or poll with task_output). Use for slow research that the " +
+          "parent need not wait for.",
+      },
     },
     required: ["description", "prompt"],
   },
@@ -130,102 +138,187 @@ export const taskTool: Tool = {
       if (!ok) return { content: "The user declined to start this writing subagent.", isError: true };
     }
 
-    const llm = new LLM({ cwd: ctx.cwd });
-    const messages: MessageParam[] = [{ role: "user", content: prompt }];
-    let report = "";
-    let iterations = 0;
-    let toolCalls = 0;
     // A plan-mode research subagent must stay read-only even if the parent
     // forgets to pass mode: "research".
     const forceResearch = ctx.planMode;
     const subTools = forceResearch ? researchTools : tools;
     const subSystem = forceResearch ? RESEARCH_SYSTEM_PROMPT : system;
-    const kind = forceResearch ? "research" : worker ? "worker" : "research";
+    const kind: "research" | "worker" = forceResearch ? "research" : worker ? "worker" : "research";
+    const label = String(input.description ?? "task");
+
+    if (bool(input, "run_in_background")) {
+      const id = subagentTasks.start(label, kind, async () => {
+        // Detached runs outlive the parent turn, so they do NOT inherit its
+        // abort signal. Concurrency slots are still respected.
+        const release = await subSlots.acquire();
+        try {
+          return await runSubagent(input, ctx, label, kind, subTools, subSystem, worker, undefined);
+        } finally {
+          release();
+        }
+      });
+      return {
+        content:
+          `Started background ${kind} subagent ${id} ("${label}"). It runs detached - ` +
+          `continue with other work; its report is delivered automatically at the next ` +
+          `round boundary, or check on it with task_output {id: "${id}"}.`,
+      };
+    }
 
     // Take a concurrency slot only after consent, so a prompt the user has not
     // answered yet never occupies a running slot.
     const release = await subSlots.acquire();
     try {
-      while (iterations < SUB_MAX_ITERATIONS) {
-        if (ctx.signal?.aborted) return { content: "Subagent was interrupted.", isError: true };
-        iterations++;
-
-        const turn = await llm.send(messages, subSystem, subTools, ctx.signal);
-        ctx.reportUsage?.({
-          input: turn.inputTokens,
-          output: turn.outputTokens,
-          cacheRead: turn.cacheReadTokens,
-          cacheWrite: turn.cacheWriteTokens,
-        });
-        messages.push({ role: "assistant", content: turn.content });
-        if (turn.text) report = turn.text;
-
-        if (turn.toolUses.length === 0) break;
-        toolCalls += turn.toolUses.length;
-
-        const results = [];
-        for (const tu of turn.toolUses) {
-          const tool = subTools.find((t) => t.name === tu.name);
-          const inputPreview = JSON.stringify(tu.input).slice(0, 160);
-          if (!tool) {
-            const msg = `Unknown tool "${tu.name}" - you only have: ${subTools.map((t) => t.name).join(", ")}.`;
-            results.push({
-              type: "tool_result" as const,
-              tool_use_id: tu.id,
-              content: msg,
-              is_error: true,
-            });
-            ctx.onSubTool?.(tu.name, inputPreview, false, msg.slice(0, 200), iterations);
-            continue;
-          }
-          try {
-            const r = await tool.execute(tu.input as Record<string, unknown>, {
-              cwd: ctx.cwd,
-              signal: ctx.signal,
-              checkpoint: ctx.checkpoint,
-              reportUsage: ctx.reportUsage,
-              // Worker writes/shell go through the USER's normal approval flow
-              // (tagged so the prompt says who is asking); research tools never
-              // prompt anyway.
-              askPermission: worker
-                ? (desc, risk, preview) => ctx.askPermission(`[subagent ${String(input.description ?? "worker")}] ${desc}`, risk, preview)
-                : async () => true,
-            });
-            results.push({ type: "tool_result" as const, tool_use_id: tu.id, content: r.content, is_error: r.isError });
-            ctx.onSubTool?.(tu.name, inputPreview, !r.isError, r.content.slice(0, 200), iterations);
-          } catch (err) {
-            const msg = `Tool crashed: ${describeError(err)}`;
-            results.push({
-              type: "tool_result" as const,
-              tool_use_id: tu.id,
-              content: msg,
-              is_error: true,
-            });
-            ctx.onSubTool?.(tu.name, inputPreview, false, msg.slice(0, 200), iterations);
-          }
-        }
-        messages.push({ role: "user", content: results });
-      }
-
-      if (iterations >= SUB_MAX_ITERATIONS) {
-        report += "\n\n[subagent hit its iteration limit - findings may be partial]";
-      }
-      if (!report.trim()) {
-        return { content: "Subagent finished without producing a report.", isError: true };
-      }
-      return {
-        content: await boundedResult(
-          `[${kind} subagent "${String(input.description ?? "task")}" finished after ${toolCalls} tool calls]\n\n${report}`,
-          20_000,
-          "subagent-report",
-        ),
-      };
+      const report = await runSubagent(input, ctx, label, kind, subTools, subSystem, worker, ctx.signal);
+      return { content: report };
     } catch (err) {
       const msg = describeError(err);
       if (msg === "aborted") return { content: "Subagent was interrupted.", isError: true };
-      return { content: `Subagent failed: ${msg}`, isError: true };
+      return { content: msg, isError: true };
     } finally {
       release();
     }
+  },
+};
+
+/** The subagent loop shared by foreground and detached runs; resolves to the report. */
+async function runSubagent(
+  input: Record<string, unknown>,
+  ctx: ToolContext,
+  label: string,
+  kind: "research" | "worker",
+  subTools: Tool[],
+  subSystem: string,
+  worker: boolean,
+  signal: AbortSignal | undefined,
+): Promise<string> {
+  const prompt = String(input.prompt);
+  const llm = new LLM({ cwd: ctx.cwd });
+  const messages: MessageParam[] = [{ role: "user", content: prompt }];
+  let report = "";
+  let iterations = 0;
+  let toolCalls = 0;
+
+  try {
+    while (iterations < SUB_MAX_ITERATIONS) {
+      if (signal?.aborted) throw new Error("aborted");
+      iterations++;
+
+      const turn = await llm.send(messages, subSystem, subTools, signal);
+      ctx.reportUsage?.({
+        input: turn.inputTokens,
+        output: turn.outputTokens,
+        cacheRead: turn.cacheReadTokens,
+        cacheWrite: turn.cacheWriteTokens,
+      });
+      messages.push({ role: "assistant", content: turn.content });
+      if (turn.text) report = turn.text;
+
+      if (turn.toolUses.length === 0) break;
+      toolCalls += turn.toolUses.length;
+
+      const results = [];
+      for (const tu of turn.toolUses) {
+        const tool = subTools.find((t) => t.name === tu.name);
+        const inputPreview = JSON.stringify(tu.input).slice(0, 160);
+        if (!tool) {
+          const msg = `Unknown tool "${tu.name}" - you only have: ${subTools.map((t) => t.name).join(", ")}.`;
+          results.push({
+            type: "tool_result" as const,
+            tool_use_id: tu.id,
+            content: msg,
+            is_error: true,
+          });
+          ctx.onSubTool?.(tu.name, inputPreview, false, msg.slice(0, 200), iterations);
+          continue;
+        }
+        try {
+          const r = await tool.execute(tu.input as Record<string, unknown>, {
+            cwd: ctx.cwd,
+            signal,
+            checkpoint: ctx.checkpoint,
+            reportUsage: ctx.reportUsage,
+            // Worker writes/shell go through the USER's normal approval flow
+            // (tagged so the prompt says who is asking); research tools never
+            // prompt anyway.
+            askPermission: worker
+              ? (desc, risk, preview) => ctx.askPermission(`[subagent ${label}] ${desc}`, risk, preview)
+              : async () => true,
+          });
+          results.push({ type: "tool_result" as const, tool_use_id: tu.id, content: r.content, is_error: r.isError });
+          ctx.onSubTool?.(tu.name, inputPreview, !r.isError, r.content.slice(0, 200), iterations);
+        } catch (err) {
+          const msg = `Tool crashed: ${describeError(err)}`;
+          results.push({
+            type: "tool_result" as const,
+            tool_use_id: tu.id,
+            content: msg,
+            is_error: true,
+          });
+          ctx.onSubTool?.(tu.name, inputPreview, false, msg.slice(0, 200), iterations);
+        }
+      }
+      messages.push({ role: "user", content: results });
+    }
+
+    if (iterations >= SUB_MAX_ITERATIONS) {
+      report += "\n\n[subagent hit its iteration limit - findings may be partial]";
+    }
+    if (!report.trim()) {
+      throw new Error("Subagent finished without producing a report.");
+    }
+    return await boundedResult(
+      `[${kind} subagent "${label}" finished after ${toolCalls} tool calls]\n\n${report}`,
+      20_000,
+      "subagent-report",
+    );
+  } catch (err) {
+    const msg = describeError(err);
+    if (msg === "aborted") throw new Error("aborted");
+    throw new Error(`Subagent failed: ${msg}`);
+  }
+}
+
+export const taskOutputTool: Tool = {
+  name: "task_output",
+  description:
+    "Check background subagents started with task + run_in_background. With id: returns the " +
+    "task's status and its report once finished. Without id: lists all tasks with their ids " +
+    "and statuses.",
+  isReadOnly: true,
+  parallelSafe: true,
+  inputSchema: {
+    type: "object",
+    properties: {
+      id: { type: "string", description: "A task id from the task tool (e.g. \"sub-1\"). Omit to list all tasks." },
+    },
+  },
+  async execute(input: Record<string, unknown>): Promise<ToolResult> {
+    const id = typeof input.id === "string" ? input.id.trim() : "";
+    if (!id) {
+      const all = subagentTasks.list();
+      if (!all.length) return { content: "No background subagents have been started." };
+      return {
+        content: all
+          .map(
+            (t) =>
+              `- ${t.id} [${t.status}] "${t.description}" (${t.kind}, started ${Math.round((Date.now() - t.startedAt) / 1000)}s ago)` +
+              (t.status === "running" ? "" : " - report available, pass its id"),
+          )
+          .join("\n"),
+      };
+    }
+    const t = subagentTasks.get(id);
+    if (!t) {
+      const ids = subagentTasks.list().map((x) => x.id).join(", ");
+      return { content: `Unknown task "${id}".${ids ? ` Known tasks: ${ids}.` : " No tasks have been started."}`, isError: true };
+    }
+    if (t.status === "running") {
+      return { content: `${t.id} ("${t.description}") is still running (${Math.round((Date.now() - t.startedAt) / 1000)}s). Its report will be delivered automatically when it finishes.` };
+    }
+    return {
+      content: await boundedResult(`Background task ${t.id} [${t.status}] "${t.description}":\n\n${t.report}`, 20_000, "subagent-report"),
+      isError: t.status === "failed",
+    };
   },
 };

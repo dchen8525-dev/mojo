@@ -5,7 +5,7 @@ import { bashTool, bashOutputTool, bashKillTool } from "./bash.js";
 import { globTool } from "./glob.js";
 import { grepTool } from "./grep.js";
 import { todoWriteTool } from "./todo.js";
-import { taskTool } from "./task.js";
+import { taskTool, taskOutputTool } from "./task.js";
 import { getDiagnosticsTool } from "../lsp.js";
 import { gitStatusTool, gitCommitTool, gitPrTool, gitDiffTool } from "./git.js";
 import { webSearchTool, webFetchTool } from "./web.js";
@@ -19,6 +19,7 @@ export const tools: Tool[] = [
   grepTool,
   todoWriteTool,
   taskTool,
+  taskOutputTool,
   bashTool,
   bashOutputTool,
   bashKillTool,

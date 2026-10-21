@@ -10,6 +10,7 @@ import type { SystemPrompt } from "./llm/types.js";
 import { getTool, tools, todoStore, isExposed } from "./tools/index.js";
 import { planWaves, runWave } from "./scheduler.js";
 import { systemReminder } from "./reminder.js";
+import { subagentTasks } from "./taskRegistry.js";
 import { exitPlanTool } from "./tools/exitPlan.js";
 import type { PermissionManager } from "./permissions.js";
 import type { HookManager } from "./hooks.js";
@@ -119,6 +120,19 @@ export class Agent {
       this.messages.push({ role: "user", content });
     }
     return true;
+  }
+
+  /** Deliver finished background subagent reports as a system-reminder user message. */
+  private drainBackgroundTasks(): void {
+    for (const t of subagentTasks.drainCompleted()) {
+      const head =
+        t.report.length > 4_000 ? t.report.slice(0, 4_000) + "\n[... full report: task_output {id: \"" + t.id + "\"}]" : t.report;
+      const body =
+        t.status === "failed"
+          ? `Background task ${t.id} ("${t.description}") FAILED: ${t.report}`
+          : `Background task ${t.id} ("${t.description}") finished:\n\n${head}`;
+      this.messages.push({ role: "user", content: systemReminder(body, { event: "BackgroundTaskComplete" }) });
+    }
   }
 
   /** Plan mode: only read-only tools + exit_plan are offered until the user approves a plan. */
@@ -464,6 +478,9 @@ Rules:
         // Steering: user input that arrived while tools were running joins the
         // history here, before the next model round.
         this.drainSteer();
+        // Background subagents that finished since the last round deliver
+        // their reports here, so the model sees them without polling.
+        this.drainBackgroundTasks();
         events?.onRoundStart?.(iterations + 1);
         if (this.tokenEstimate() > this.llm.contextWindow * MICROCOMPACT_RATIO) {
           const before = this.tokenEstimate();

@@ -103,6 +103,7 @@ vi.mock("../src/skills.js", async (importOriginal) => {
 
 const { Agent } = await import("../src/agent.js");
 const { registerTool, unregisterToolsByPrefix, todoStore } = await import("../src/tools/index.js");
+const { subagentTasks } = await import("../src/taskRegistry.js");
 const { HookManager } = await import("../src/hooks.js");
 
 const permissions = { check: async () => true } as never;
@@ -255,6 +256,30 @@ describe("Agent.chat deferred tools / tool_search", () => {
     // After select: exposure the tool is listed and runs.
     expect(h.sentTools[2]).toContain("t_deferred");
     expect(JSON.stringify(h.sentMessages[3].at(-1))).toContain("secret-work");
+  });
+});
+
+describe("Agent.chat background task delivery", () => {
+  afterEach(() => {
+    subagentTasks.reset();
+  });
+
+  it("delivers finished background task reports as a system-reminder", async () => {
+    const id = subagentTasks.start("survey", "research", async () => "BG-REPORT-CONTENT");
+    await subagentTasks.whenDone(id);
+    h.turns = [textTurn("a")];
+    const agent = makeAgent();
+    await agent.chat("go");
+    // The reminder joined the history before the first model call.
+    const first = JSON.stringify(h.sentMessages[0]);
+    expect(first).toContain("BackgroundTaskComplete");
+    expect(first).toContain("BG-REPORT-CONTENT");
+    // Delivered once: the follow-up turn's history contains the same single
+    // reminder, with no duplicate injected.
+    h.turns.push(textTurn("b"));
+    await agent.chat("again");
+    const count = (s: string) => (s.match(/BackgroundTaskComplete/g) ?? []).length;
+    expect(count(JSON.stringify(h.sentMessages.at(-1)))).toBe(1);
   });
 });
 
