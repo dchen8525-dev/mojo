@@ -11,6 +11,7 @@ import { gitStatusTool, gitCommitTool, gitPrTool, gitDiffTool } from "./git.js";
 import { webSearchTool, webFetchTool } from "./web.js";
 import { multiEditTool } from "./multiEdit.js";
 import { skillTool } from "./skill.js";
+import { toolSearchTool } from "./toolSearch.js";
 
 export const tools: Tool[] = [
   readFileTool,
@@ -32,9 +33,32 @@ export const tools: Tool[] = [
   webSearchTool,
   webFetchTool,
   skillTool,
+  toolSearchTool,
 ];
 
 const byName = new Map(tools.map((t) => [t.name, t]));
+
+/**
+ * Deferred tools that tool_search has exposed for this process. Exposure is
+ * in-memory by design: a resumed session starts lean and re-discovers via
+ * tool_search instead of paying for the full catalog every turn.
+ */
+const exposedDeferred = new Set<string>();
+
+export function exposeTool(name: string): boolean {
+  const t = byName.get(name);
+  if (!t?.deferred) return false;
+  exposedDeferred.add(name);
+  return true;
+}
+
+export function isExposed(name: string): boolean {
+  return exposedDeferred.has(name);
+}
+
+export function deferredTools(): Tool[] {
+  return tools.filter((t) => t.deferred && !exposedDeferred.has(t.name));
+}
 
 export function getTool(name: string): Tool | undefined {
   return byName.get(name);
@@ -55,6 +79,7 @@ export function unregisterToolsByPrefix(prefix: string): number {
     if (name.startsWith(prefix)) {
       const tool = byName.get(name)!;
       byName.delete(name);
+      exposedDeferred.delete(name);
       const i = tools.indexOf(tool);
       if (i >= 0) tools.splice(i, 1);
       removed++;

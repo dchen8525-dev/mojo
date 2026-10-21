@@ -7,13 +7,19 @@ import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { registerTool, unregisterToolsByPrefix } from "./tools/index.js";
 import { boundedResult } from "./artifacts.js";
 
+/**
+ * An MCP server exposing more than this many tools has them marked deferred:
+ * they leave the model's tool list and are discovered via tool_search, so a
+ * 40-tool server costs one search tool instead of 40 schemas per request.
+ */
+export const MCP_DEFER_TOOLS = 12;
+
 export interface McpServerConfig {
   command: string;
   args?: string[];
   env?: Record<string, string>;
   /** Restrict which tools are exposed: allowlist of remote tool names. */
-  enabledTools?: string[];
-  disabledTools?: string[];
+  enabledTools?: string[];  disabledTools?: string[];
   /** Kept in the config file but not connected (GUI toggle). */
   disabled?: boolean;
 }
@@ -199,13 +205,18 @@ function flattenContent(content: Array<{ type: string; text?: string; data?: str
 }
 
 /** Wrap one remote MCP tool as a local Tool. */
-function wrapTool(server: ConnectedServer, remote: { name: string; description?: string; inputSchema?: unknown }): Tool {
+function wrapTool(
+  server: ConnectedServer,
+  remote: { name: string; description?: string; inputSchema?: unknown },
+  deferred: boolean,
+): Tool {
   const localName = `${server.prefix}${safe(remote.name)}`;
   return {
     name: localName,
     description:
       `[MCP:${server.name}] ` + (remote.description || "No description provided by the MCP server."),
     isReadOnly: false, // MCP servers can do anything; treat as needing permission
+    deferred,
     inputSchema: (remote.inputSchema as Tool["inputSchema"]) ?? { type: "object", properties: {} },
     async execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
       const ok = await ctx.askPermission(
@@ -263,8 +274,11 @@ export class McpManager {
       });
 
       let registered = 0;
+      // A server with many tools would dominate every request's tool list;
+      // its tools become deferred and are discovered via tool_search instead.
+      const defer = filtered.length > MCP_DEFER_TOOLS;
       for (const rt of filtered) {
-        if (registerTool(wrapTool({ name, client, transport, prefix }, rt))) registered++;
+        if (registerTool(wrapTool({ name, client, transport, prefix }, rt, defer))) registered++;
       }
 
       this.servers.set(name, { name, client, transport, prefix });

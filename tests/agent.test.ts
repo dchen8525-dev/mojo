@@ -1,8 +1,7 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ContentBlock, MessageParam, ToolUseBlock } from "../src/types.js";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";import type { ContentBlock, MessageParam, ToolUseBlock } from "../src/types.js";
 
 // Scripted fake LLM: each send() pops the next canned turn.
 const h = vi.hoisted(() => ({
@@ -103,7 +102,7 @@ vi.mock("../src/skills.js", async (importOriginal) => {
 });
 
 const { Agent } = await import("../src/agent.js");
-const { registerTool, todoStore } = await import("../src/tools/index.js");
+const { registerTool, unregisterToolsByPrefix, todoStore } = await import("../src/tools/index.js");
 const { HookManager } = await import("../src/hooks.js");
 
 const permissions = { check: async () => true } as never;
@@ -221,6 +220,41 @@ describe("Agent.chat tool scheduling", () => {
     const results = lastSentContent() as Array<{ tool_use_id: string; content: string }>;
     expect(results.map((r) => r.tool_use_id)).toEqual(["tu0", "tu1", "tu2"]);
     expect(results.map((r) => r.content)).toEqual(["P1", "S9", "P2"]);
+  });
+});
+
+describe("Agent.chat deferred tools / tool_search", () => {
+  afterEach(() => {
+    unregisterToolsByPrefix("t_deferred");
+  });
+
+  it("hides deferred tools until tool_search exposes them", async () => {
+    registerTool({
+      name: "t_deferred",
+      description: "hidden tool for testing",
+      isReadOnly: true,
+      deferred: true,
+      inputSchema: { type: "object", properties: {} },
+      async execute() {
+        return { content: "secret-work" };
+      },
+    });
+    h.turns = [
+      toolTurn([["t_deferred", {}]]),
+      toolTurn([["tool_search", { query: "select:t_deferred" }]]),
+      toolTurn([["t_deferred", {}]]),
+      textTurn("done"),
+    ];
+    const out = await makeAgent().chat("go");
+    expect(out).toBe("done");
+    // Before exposure: absent from the tool list, calling it is refused.
+    expect(h.sentTools[0]).not.toContain("t_deferred");
+    expect(h.sentTools[0]).toContain("tool_search");
+    expect(JSON.stringify(h.sentMessages[1].at(-1))).toContain("Call tool_search");
+    expect(h.sentTools[1]).not.toContain("t_deferred");
+    // After select: exposure the tool is listed and runs.
+    expect(h.sentTools[2]).toContain("t_deferred");
+    expect(JSON.stringify(h.sentMessages[3].at(-1))).toContain("secret-work");
   });
 });
 

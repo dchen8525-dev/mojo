@@ -7,7 +7,7 @@ import { validateToolInput } from "./types.js";
 import { LLM, type Config, type StreamEvents } from "./llm.js";
 import { lookupModel } from "./llm/models.js";
 import type { SystemPrompt } from "./llm/types.js";
-import { getTool, tools, todoStore } from "./tools/index.js";
+import { getTool, tools, todoStore, isExposed } from "./tools/index.js";
 import { planWaves, runWave } from "./scheduler.js";
 import { systemReminder } from "./reminder.js";
 import { exitPlanTool } from "./tools/exitPlan.js";
@@ -477,7 +477,11 @@ Rules:
         if (this.tokenEstimate() > this.llm.contextWindow * COMPACT_RATIO) await this.compact(events, signal);
 
         const sent = this.messages.length;
-        const activeTools = this.planMode ? [...tools.filter((t) => t.isReadOnly), exitPlanTool] : tools;
+        // Deferred tools (bulky MCP servers) stay out of the tool list until
+        // tool_search exposes them; the search tool itself is always visible.
+        const activeTools = this.planMode
+          ? [...tools.filter((t) => t.isReadOnly), exitPlanTool]
+          : tools.filter((t) => !t.deferred || isExposed(t.name));
         const turn = await this.llm.send(this.messages, await this.systemPrompt(), activeTools, signal, events);
         this.tokens.setAnchor(sent, turn.inputTokens, turn.outputTokens);
         events?.onUsage?.(turn.inputTokens, turn.outputTokens);
@@ -594,6 +598,14 @@ Rules:
     events?.onToolStart?.(tu.id, tu.name, preview, tu.input as Record<string, unknown>);
     if (!tool) {
       return { type: "tool_result", tool_use_id: tu.id, content: `Unknown tool "${tu.name}".`, is_error: true };
+    }
+    if (tool.deferred && !isExposed(tool.name)) {
+      return {
+        type: "tool_result",
+        tool_use_id: tu.id,
+        content: `"${tu.name}" is a deferred tool. Call tool_search with matching keywords to expose it, then retry.`,
+        is_error: true,
+      };
     }
     const invalid = validateToolInput(tool.inputSchema, tu.input as Record<string, unknown>);
     if (invalid) {

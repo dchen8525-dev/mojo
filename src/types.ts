@@ -51,6 +51,11 @@ export interface Tool {
   isReadOnly: boolean;
   /** Safe to run concurrently with other parallel-safe tools in the same turn (read-only, no shared state). */
   parallelSafe?: boolean;
+  /**
+   * Hidden from the model's tool list; discoverable via tool_search, which
+   * exposes matches so they become callable. Used for bulky MCP servers.
+   */
+  deferred?: boolean;
   execute: (input: Record<string, unknown>, ctx: ToolContext) => Promise<ToolResult>;
 }
 
