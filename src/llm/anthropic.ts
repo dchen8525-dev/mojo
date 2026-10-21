@@ -1,8 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { MessageParam, ContentBlock, ToolUseBlock, Tool } from "../types.js";
 import { toAnthropicTool } from "../types.js";
-import type { AssistantTurn, LLMBackend, Provider, StreamEvents } from "./types.js";
-import { StreamInterrupted } from "./types.js";
+import type { AssistantTurn, LLMBackend, Provider, StreamEvents, SystemPrompt } from "./types.js";
+import { StreamInterrupted, normalizeSystem } from "./types.js";
 import { lookupModel } from "./models.js";
 import { withIdleTimeout } from "./idle.js";
 
@@ -48,7 +48,7 @@ export class AnthropicBackend implements LLMBackend {
 
   async send(
     messages: MessageParam[],
-    system: string,
+    system: string | SystemPrompt,
     tools: Tool[],
     signal?: AbortSignal,
     events?: StreamEvents,
@@ -61,11 +61,19 @@ export class AnthropicBackend implements LLMBackend {
     if (signal?.aborted) ac.abort();
     else signal?.addEventListener("abort", onOuterAbort, { once: true });
 
+    // The stable part carries the cache breakpoint; the volatile tail (date,
+    // git status) sits after it so per-turn changes never invalidate the
+    // cached prefix.
+    const { stable, volatile } = normalizeSystem(system);
+    const systemBlocks: Anthropic.Messages.TextBlockParam[] = [];
+    if (stable) systemBlocks.push({ type: "text", text: stable, cache_control: CACHE_CONTROL });
+    if (volatile) systemBlocks.push({ type: "text", text: volatile });
+
     const stream = this.client.messages.stream(
       {
         model: this.model,
         max_tokens: lookupModel(this.model).maxOutput,
-        system: [{ type: "text" as const, text: system, cache_control: CACHE_CONTROL }],
+        system: systemBlocks,
         messages: cachedMessages(messages),
         tools: cachedTools(tools),
         // Opt-in extended thinking (AGENT_THINKING=1). Off by default so

@@ -6,6 +6,7 @@ import type { ContentBlock, ImageBlockParam, MessageParam, ToolResultBlockParam,
 import { validateToolInput } from "./types.js";
 import { LLM, type Config, type StreamEvents } from "./llm.js";
 import { lookupModel } from "./llm/models.js";
+import type { SystemPrompt } from "./llm/types.js";
 import { getTool, tools, todoStore } from "./tools/index.js";
 import { exitPlanTool } from "./tools/exitPlan.js";
 import type { PermissionManager } from "./permissions.js";
@@ -79,7 +80,7 @@ export class Agent {
   /** stdout of SessionStart hooks; injected into the system prompt for the whole session. */
   private sessionStartContext = "";
   /** Built once per user turn; invalidated when plan mode changes. */
-  private systemPromptCache: string | null = null;
+  private systemPromptCache: SystemPrompt | null = null;
   private plan = false;
   /** True between chat() entry and exit; steer() only queues while it holds. */
   private turnRunning = false;
@@ -210,12 +211,17 @@ export class Agent {
   }
 
   /** Per-turn cache: the tool loop calls this on every iteration. */
-  private async systemPrompt(): Promise<string> {
+  private async systemPrompt(): Promise<SystemPrompt> {
     if (this.systemPromptCache === null) this.systemPromptCache = await this.buildSystemPrompt();
     return this.systemPromptCache;
   }
 
-  private async buildSystemPrompt(): Promise<string> {
+  /**
+   * Split into a cache-stable prefix (instructions, memory, skills, rules)
+   * and a volatile tail (date, git status) so provider prompt caching keeps
+   * hitting across turns even though the workspace state changes.
+   */
+  private async buildSystemPrompt(): Promise<SystemPrompt> {
     let gitStatus = "(not a git repo)";
     try {
       gitStatus = execSync("git status --short --branch", {
@@ -251,13 +257,11 @@ PLAN MODE is active. You may ONLY explore and plan - the user has NOT approved a
 - When your understanding is solid, call exit_plan with a complete, concrete plan: the goal, ordered steps naming exact files, risks/trade-offs, and how the result will be verified.
 - If the user rejects the plan, ask what to adjust, revise, and call exit_plan again. Do not start executing without approval.`
       : "";
-    return `You are an interactive coding agent, similar to Claude Code, running in a terminal.
+    const stable = `You are an interactive coding agent, similar to Claude Code, running in a terminal.
 
 Environment:
 - Working directory: ${this.cwd}
 - Platform: ${os.platform()} ${os.arch()}
-- Today: ${new Date().toISOString().slice(0, 10)}
-- Git status:\n${gitStatus}
 ${projectInstructions}${memory}${skills}${hookContext}
 Rules:
 1. Use tools to do the work; never pretend to have run something. If a tool fails, read the error, adjust, and retry - do not give up after one failure.
@@ -270,6 +274,12 @@ Rules:
 8. When the user's request is done, stop calling tools and give a short summary. Do not invent extra work.
 9. Never commit, push, delete files, or touch credentials unless the user explicitly asks. When they do, use git_status to check state and git_commit / git_pr for those operations instead of raw bash git - they enforce branch and secret safety and show you what will change.
 10. Be concise in replies: results and decisions, not narration.${planRules}`;
+    const volatile =
+      `<session_status>\n` +
+      `- Today: ${new Date().toISOString().slice(0, 10)}\n` +
+      `- Git status:\n${gitStatus}\n` +
+      `</session_status>`;
+    return { stable, volatile };
   }
 
   /**

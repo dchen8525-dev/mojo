@@ -63,12 +63,27 @@ export class StreamIdleError extends Error {
 
 export type Provider = "anthropic" | "openai";
 
+/**
+ * System prompt split for prompt caching. `stable` rarely changes within a
+ * session (instructions, memory, skills) and is the cacheable prefix;
+ * `volatile` is per-turn status (date, git state) that must not invalidate it.
+ * A plain string means everything is stable.
+ */
+export interface SystemPrompt {
+  stable: string;
+  volatile?: string;
+}
+
+export function normalizeSystem(system: string | SystemPrompt): Required<SystemPrompt> {
+  return typeof system === "string" ? { stable: system, volatile: "" } : { stable: system.stable, volatile: system.volatile ?? "" };
+}
+
 export interface LLMBackend {
   readonly provider: Provider;
   model: string;
   send(
     messages: MessageParam[],
-    system: string,
+    system: string | SystemPrompt,
     tools: Tool[],
     signal?: AbortSignal,
     events?: StreamEvents,

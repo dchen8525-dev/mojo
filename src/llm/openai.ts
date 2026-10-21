@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import type { MessageParam, ContentBlock, ToolUseBlock, Tool } from "../types.js";
-import type { AssistantTurn, LLMBackend, Provider, StreamEvents } from "./types.js";
-import { StreamInterrupted } from "./types.js";
+import type { AssistantTurn, LLMBackend, Provider, StreamEvents, SystemPrompt } from "./types.js";
+import { StreamInterrupted, normalizeSystem } from "./types.js";
 import { lookupModel } from "./models.js";
 import { withIdleTimeout } from "./idle.js";
 
@@ -91,7 +91,7 @@ export class OpenAiBackend implements LLMBackend {
 
   async send(
     messages: MessageParam[],
-    system: string,
+    system: string | SystemPrompt,
     tools: Tool[],
     signal?: AbortSignal,
     events?: StreamEvents,
@@ -104,7 +104,9 @@ export class OpenAiBackend implements LLMBackend {
     if (signal?.aborted) ac.abort();
     else signal?.addEventListener("abort", onOuterAbort, { once: true });
 
-    const chatMessages: ChatMsg[] = [{ role: "system", content: system }, ...toOpenAiMessages(messages)];
+    const { stable, volatile } = normalizeSystem(system);
+    const systemText = volatile ? `${stable}\n\n${volatile}` : stable;
+    const chatMessages: ChatMsg[] = [{ role: "system", content: systemText }, ...toOpenAiMessages(messages)];
     const info = lookupModel(this.model);
 
     const params: Record<string, unknown> = {

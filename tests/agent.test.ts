@@ -30,11 +30,13 @@ vi.mock("../src/llm.js", () => ({
     get contextWindow() {
       return 100_000;
     }
-    async send(messages: MessageParam[], system?: string, toolList?: Array<{ name: string }>) {
+    async send(messages: MessageParam[], system?: string | { stable: string; volatile?: string }, toolList?: Array<{ name: string }>) {
       h.onSend?.();
       h.sentMessages.push(structuredClone(messages));
       h.sentTools.push((toolList ?? []).map((t) => t.name));
-      h.sentSystems.push(system ?? "");
+      const sys =
+        typeof system === "string" || !system ? (system ?? "") : `${system.stable}\n${system.volatile ?? ""}`;
+      h.sentSystems.push(sys);
       const t = h.turns[h.calls++];
       if (!t) throw new Error("fake LLM ran out of scripted turns");
       const toolUses = t.content.filter(

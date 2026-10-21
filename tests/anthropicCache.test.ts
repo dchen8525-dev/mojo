@@ -72,4 +72,19 @@ describe("Anthropic prompt caching", () => {
     expect(h.params!.tools).toEqual([]);
     expect(h.params!.messages).toEqual([]);
   });
+
+  it("splits the system prompt: breakpoint on the stable part, none on the volatile tail", async () => {
+    const backend = new AnthropicBackend({ apiKey: "sk-test", model: "claude-sonnet-4-5" });
+    await backend.send([], { stable: "STABLE RULES", volatile: "<session_status>git</session_status>" }, []);
+    expect(h.params!.system).toEqual([
+      { type: "text", text: "STABLE RULES", cache_control: { type: "ephemeral" } },
+      { type: "text", text: "<session_status>git</session_status>" },
+    ]);
+  });
+
+  it("omits empty system blocks", async () => {
+    const backend = new AnthropicBackend({ apiKey: "sk-test" });
+    await backend.send([], { stable: "", volatile: "V" }, []);
+    expect(h.params!.system).toEqual([{ type: "text", text: "V" }]);
+  });
 });

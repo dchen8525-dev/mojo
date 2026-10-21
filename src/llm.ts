@@ -2,7 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { readFileSync } from "node:fs";
 import type { MessageParam, Tool, ContentBlock } from "./types.js";
-import type { AssistantTurn, LLMBackend, Provider, RetryReason, StreamEvents } from "./llm/types.js";
+import type { AssistantTurn, LLMBackend, Provider, RetryReason, StreamEvents, SystemPrompt } from "./llm/types.js";
 import { StreamInterrupted } from "./llm/types.js";
 import { AnthropicBackend } from "./llm/anthropic.js";
 import { OpenAiBackend } from "./llm/openai.js";
@@ -357,7 +357,7 @@ export class LLM {
    */
   async send(
     messages: MessageParam[],
-    system: string,
+    system: string | SystemPrompt,
     tools: Tool[],
     signal?: AbortSignal,
     events?: StreamEvents,
