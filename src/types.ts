@@ -1,4 +1,5 @@
 import type Anthropic from "@anthropic-ai/sdk";
+import type { FileStateStore } from "./fileState.js";
 
 export type MessageParam = Anthropic.Messages.MessageParam;
 export type ContentBlock = Anthropic.Messages.ContentBlock;
@@ -36,6 +37,11 @@ export interface ToolContext {
   planMode?: boolean;
   /** Called by exit_plan when the user approves the plan; the agent leaves plan mode. */
   approvePlan?: () => void;
+  /**
+   * Per-session read/write record. When present, edit_file/write_file refuse
+   * files that were never read or changed on disk after the read.
+   */
+  fileState?: FileStateStore;
 }
 
 export interface Tool {

@@ -11,6 +11,7 @@ import { exitPlanTool } from "./tools/exitPlan.js";
 import type { PermissionManager } from "./permissions.js";
 import type { HookManager } from "./hooks.js";
 import { TokenCounter } from "./tokens.js";
+import { FileStateStore } from "./fileState.js";
 import { CheckpointStore } from "./checkpoint.js";
 import { CostTracker } from "./cost.js";
 import { logUsage } from "./usage.js";
@@ -68,6 +69,8 @@ export class Agent {
   private lastPersistedModel = "";
   private tokens = new TokenCounter();
   private checkpoints: CheckpointStore;
+  /** Files this session's model has read; gates write_file/edit_file freshness. */
+  private fileState = new FileStateStore();
   readonly costs: CostTracker;
   cwd: string;
   sessionId: string;
@@ -609,6 +612,7 @@ Rules:
         reportUsage: (usage) => this.costs.record(`${this.llm.provider}:${this.llm.model}`, usage),
         onSubTool: (n, p, ok, r, round) => events?.onSubTool?.(tu.id, n, p, ok, r, round),
         planMode: this.planMode,
+        fileState: this.fileState,
         approvePlan: () => {
           this.planMode = false;
           events?.onPlanApproved?.();
@@ -670,6 +674,8 @@ Rules:
   async resetSession(sessionId: string, history?: MessageParam[], modelSpec?: string, todos: TodoItem[] = []) {
     this.sessionId = sessionId;
     this.checkpoints = new CheckpointStore(sessionId);
+    // A session start has no model context yet, so no file counts as read.
+    this.fileState.clear();
     this.messages = history ?? [];
     this.persisted = this.messages.length;
     this.lastPersistedModel = modelSpec ?? "";

@@ -3,6 +3,7 @@ import path from "node:path";
 import type { Tool, ToolContext, ToolResult } from "../types.js";
 import { relPath, resolvePath, str, truncate, describeError } from "./utils.js";
 import { diagnosticsHint } from "../lsp.js";
+import { editGuardMessage } from "../fileState.js";
 import { applyEdits, diffStats, findAll, findFuzzyEdits, nearestMiss, renderDiff, type Edit } from "./editMatch.js";
 
 export const writeFileTool: Tool = {
@@ -29,6 +30,13 @@ export const writeFileTool: Tool = {
         .then(() => true)
         .catch(() => false);
 
+      if (existed) {
+        // Overwriting is only allowed for files whose full contents the model
+        // has seen, and only while the on-disk copy still matches that read.
+        const blocked = await ctx.fileState?.check(abs, true);
+        if (blocked) return { content: editGuardMessage(ctx.cwd, abs, blocked), isError: true };
+      }
+
       const ok = await ctx.askPermission(
         `${existed ? "Overwrite" : "Create"} file ${relPath(ctx.cwd, abs)} ` +
           `(${content.split("\n").length} lines, ${content.length} chars)`,
@@ -39,6 +47,7 @@ export const writeFileTool: Tool = {
       await ctx.checkpoint?.(abs, "write_file");
       await fs.mkdir(path.dirname(abs), { recursive: true });
       await fs.writeFile(abs, content, "utf8");
+      await ctx.fileState?.recordCurrent(abs);
       const hint = await diagnosticsHint(ctx.cwd, abs, content);
       return { content: `${existed ? "Wrote" : "Created"} ${relPath(ctx.cwd, abs)} (${content.length} chars)${hint}` };
     } catch (err) {
@@ -73,6 +82,9 @@ export const editFileTool: Tool = {
       const oldString = str(input, "old_string");
       const newString = typeof input.new_string === "string" ? (input.new_string as string) : "";
       const replaceAll = input.replace_all === true;
+
+      const blocked = await ctx.fileState?.check(abs);
+      if (blocked) return { content: editGuardMessage(ctx.cwd, abs, blocked), isError: true };
 
       const original = await fs.readFile(abs, "utf8");
 
@@ -126,6 +138,7 @@ export const editFileTool: Tool = {
 
       await ctx.checkpoint?.(abs, "edit_file");
       await fs.writeFile(abs, updated, "utf8");
+      await ctx.fileState?.recordCurrent(abs);
       const hint = await diagnosticsHint(ctx.cwd, abs, updated);
       return {
         content: truncate(

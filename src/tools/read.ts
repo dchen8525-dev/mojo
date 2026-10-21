@@ -54,6 +54,7 @@ export const readFileTool: Tool = {
       const offset = Math.max(0, num(input, "offset") ?? 0);
       const limit = Math.min(MAX_LINES, Math.max(1, num(input, "limit") ?? all.length));
       const slice = all.slice(offset, offset + limit);
+      ctx.fileState?.record(abs, stat, offset === 0 && offset + slice.length >= all.length);
       const width = String(offset + slice.length).length;
       const body = slice
         .map((line, i) => `${String(offset + i + 1).padStart(width)}\t${line}`)
