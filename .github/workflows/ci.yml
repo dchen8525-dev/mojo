@@ -15,7 +15,7 @@ jobs:
         # Windows matters: mojo targets Windows terminals (PowerShell shell
         # handling, CRLF, ANSI probing), so the suite must stay green there.
         os: [ubuntu-latest, windows-latest]
-        node: [20.x, 22.x]
+        node: [20.x, 22.x, 24.x]
     env:
       # No test launches Electron; skip its ~100MB binary download.
       ELECTRON_SKIP_BINARY_DOWNLOAD: 1
@@ -29,6 +29,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Lint
+        run: npm run lint
 
       - name: Type-check and build
         run: npm run build
