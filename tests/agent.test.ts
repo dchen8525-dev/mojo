@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ContentBlock, MessageParam, ToolUseBlock } from "../src/types.js";
 
 // Scripted fake LLM: each send() pops the next canned turn.
@@ -16,6 +16,7 @@ const h = vi.hoisted(() => ({
   sentMessages: [] as MessageParam[][],
   sentTools: [] as string[][],
   sentSystems: [] as string[],
+  savedTodos: [] as Array<{ id: string; todos: unknown }>,
 }));
 
 vi.mock("../src/llm.js", () => ({
@@ -67,6 +68,10 @@ vi.mock("../src/session.js", () => ({
   searchSessions: async () => [],
   renderSessionMarkdown: () => "",
   forkSession: async () => ({ id: "fork0000", meta: { id: "fork0000", cwd: "", startedAt: "", updatedAt: "" } }),
+  saveTodos: async (id: string, todos: unknown) => {
+    h.savedTodos.push({ id, todos });
+    return true;
+  },
 }));
 
 // Keep tests from reading/writing the real repo's memory.md.
@@ -82,7 +87,7 @@ vi.mock("../src/usage.js", () => ({
 }));
 
 const { Agent } = await import("../src/agent.js");
-const { registerTool } = await import("../src/tools/index.js");
+const { registerTool, todoStore } = await import("../src/tools/index.js");
 const { HookManager } = await import("../src/hooks.js");
 
 const permissions = { check: async () => true } as never;
@@ -491,5 +496,59 @@ describe("Agent.fork", () => {
     const agent = makeAgent(undefined, [{ role: "user", content: "q1" }]);
     expect(await agent.fork(1)).toBeNull();
     expect(agent.sessionId).toBe("test-session"); // unchanged
+  });
+});
+
+describe("todo list lifecycle", () => {
+  const items = [
+    { id: "1", content: "first", status: "completed" as const },
+    { id: "2", content: "second", status: "in_progress" as const },
+  ];
+
+  beforeEach(() => {
+    todoStore.items = [];
+  });
+  afterEach(() => {
+    todoStore.items = [];
+  });
+
+  it("restores the plan handed to a session start", async () => {
+    const agent = makeAgent();
+    await agent.startSession("startup", undefined, items);
+    expect(agent.currentTodos()).toEqual(items);
+  });
+
+  it("drops the previous job's plan when a session starts without one", async () => {
+    todoStore.items = [...items];
+    const agent = makeAgent();
+    await agent.startSession("startup");
+    expect(agent.currentTodos()).toEqual([]);
+  });
+
+  it("restores the plan handed to resetSession", async () => {
+    const agent = makeAgent();
+    todoStore.items = [...items];
+    await agent.resetSession("another-session", undefined, undefined, items);
+    expect(agent.currentTodos()).toEqual(items);
+  });
+
+  it("persists a successful todo_write to the session", async () => {
+    const agent = makeAgent();
+    h.turns = [toolTurn([["todo_write", { todos: items }]]), textTurn("done")];
+    h.savedTodos = [];
+    await agent.chat("plan");
+    expect(h.savedTodos).toEqual([{ id: "test-session", todos: items }]);
+  });
+
+  it("keeps the plan across a fork, which continues the same job", async () => {
+    const history: MessageParam[] = [
+      { role: "user", content: "q1" },
+      { role: "assistant", content: "a1" },
+    ];
+    const agent = makeAgent(undefined, history);
+    todoStore.items = [...items];
+    await agent.fork(2);
+    expect(agent.sessionId).toBe("fork0000");
+    expect(agent.currentTodos()).toEqual(items);
   });
 });

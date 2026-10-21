@@ -36,6 +36,23 @@ describe("createSession / loadSession", () => {
     expect(loaded?.meta.cwd).toBe("D:\\proj");
   });
 
+  it("sees metadata and message changes immediately despite the parse cache", async () => {
+    const { id } = await session.createSession("cache");
+    expect((await session.loadSession(id))?.messages).toHaveLength(0); // warm the cache
+
+    await session.appendMessages(id, [{ role: "user", content: "one" }]);
+    expect((await session.loadSession(id))?.messages).toHaveLength(1);
+
+    await session.renameSession(id, "Renamed");
+    expect((await session.listSessions()).find((m) => m.id === id)?.title).toBe("Renamed");
+
+    await session.tagSession(id, ["alpha"]);
+    expect((await session.listSessions()).find((m) => m.id === id)?.tags).toEqual(["alpha"]);
+
+    await session.deleteSession(id);
+    expect(await session.loadSession(id)).toBeNull();
+  });
+
   it("updatedAt reflects the file mtime, not creation time", async () => {
     const { id } = await session.createSession("x");
     await new Promise((r) => setTimeout(r, 1100)); // mtime granularity
@@ -291,5 +308,55 @@ describe("renderSessionMarkdown", () => {
     ]);
     expect(out).toContain("(error)");
     expect(out).toContain("42");
+  });
+});
+
+describe("todo persistence", () => {
+  const items = [
+    { id: "1", content: "plan", status: "in_progress" as const },
+    { id: "2", content: "done", status: "completed" as const },
+  ];
+
+  it("saves todos into the meta header and reloads them", async () => {
+    const { id } = await session.createSession("todos");
+    expect(await session.saveTodos(id, items)).toBe(true);
+    expect((await session.loadSession(id))?.meta.todos).toEqual(items);
+
+    // Rewriting the header again must replace the list, not duplicate it.
+    expect(await session.saveTodos(id, [items[0]])).toBe(true);
+    expect((await session.loadSession(id))?.meta.todos).toEqual([items[0]]);
+  });
+
+  it("clears todos from the header when given an empty list", async () => {
+    const { id } = await session.createSession("todos");
+    await session.saveTodos(id, items);
+    await session.saveTodos(id, []);
+    expect((await session.loadSession(id))?.meta.todos).toBeUndefined();
+  });
+
+  it("drops malformed todo entries instead of failing", async () => {
+    const { id } = await session.createSession("todos");
+    await session.saveTodos(id, [
+      { id: "ok", content: "kept", status: "pending" },
+      { id: 1, content: "bad" },
+      { id: "unknown", content: "status falls back", status: "strange" },
+    ] as never);
+    expect((await session.loadSession(id))?.meta.todos).toEqual([
+      { id: "ok", content: "kept", status: "pending" },
+      { id: "unknown", content: "status falls back", status: "pending" },
+    ]);
+  });
+
+  it("carries todos into a fork", async () => {
+    const fork = await session.forkSession("D:\\proj", [{ role: "user", content: "hi" }], {
+      fromId: "abc123",
+      todos: items,
+    });
+    expect(fork.meta.todos).toEqual(items);
+    expect((await session.loadSession(fork.id))?.meta.todos).toEqual(items);
+  });
+
+  it("returns false for a missing session", async () => {
+    expect(await session.saveTodos("deadbeef", items)).toBe(false);
   });
 });

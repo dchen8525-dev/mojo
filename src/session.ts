@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import type { MessageParam } from "./types.js";
+import { sanitizeTodos, type TodoItem } from "./tools/todo.js";
 
 const SESSION_DIR = path.join(os.homedir(), ".node-agent", "sessions");
 
@@ -20,6 +21,8 @@ export interface SessionMeta {
   tags?: string[];
   /** Session id this one was branched from (set by /fork). */
   forkedFrom?: string;
+  /** Latest todo plan, so the GUI panel survives a restart or session switch. */
+  todos?: TodoItem[];
 }
 
 function fileFor(id: string) {
@@ -28,6 +31,23 @@ function fileFor(id: string) {
 
 /** Session ids are hex; public entry points reject anything path-like. */
 const ID_RE = /^[0-9a-f]{4,64}$/;
+
+/**
+ * Parsed sessions keyed by file path, validated against mtime + size. The GUI
+ * lists and searches sessions far more often than they change; re-parsing
+ * every file on each call used to dominate those requests.
+ */
+interface CacheEntry {
+  mtimeMs: number;
+  size: number;
+  parsed: ParsedSession | null;
+}
+const PARSE_CACHE_MAX = 32;
+const parseCache = new Map<string, CacheEntry>();
+
+function invalidateSession(id: string): void {
+  if (ID_RE.test(id)) parseCache.delete(fileFor(id));
+}
 
 export async function createSession(cwd: string): Promise<{ id: string; meta: SessionMeta }> {
   const id = crypto.randomBytes(4).toString("hex");
@@ -41,6 +61,7 @@ export async function createSession(cwd: string): Promise<{ id: string; meta: Se
 export async function appendMessages(id: string, messages: MessageParam[]) {
   const lines = messages.map((m) => JSON.stringify({ type: "message", message: m })).join("\n");
   if (lines) await fs.appendFile(fileFor(id), lines + "\n", "utf8");
+  invalidateSession(id);
 }
 
 /**
@@ -60,50 +81,20 @@ export async function rewriteMessages(id: string, messages: MessageParam[]) {
   if (!metaLine) return;
   const lines = messages.map((m) => JSON.stringify({ type: "message", message: m })).join("\n");
   await fs.writeFile(file, metaLine + "\n" + (lines ? lines + "\n" : ""), "utf8");
+  invalidateSession(id);
 }
 
 /** Append a model marker; the last one in the file is the session's model. */
 export async function appendModel(id: string, model: string) {
   await fs.appendFile(fileFor(id), JSON.stringify({ type: "model", model }) + "\n");
+  invalidateSession(id);
 }
 
 /**
- * Set (or clear, with an empty title) a session's display name by rewriting
- * its meta header line. Returns false when the session does not exist.
+ * Rewrite a session's meta header through `mutate`. `updatedAt` is derived from
+ * the file's mtime, so it is stripped from the stored header.
  */
-export async function renameSession(id: string, title: string): Promise<boolean> {
-  if (!ID_RE.test(id)) return false;
-  const file = fileFor(id);
-  let raw: string;
-  try {
-    raw = await fs.readFile(file, "utf8");
-  } catch {
-    return false;
-  }
-  const lines = raw.split("\n");
-  const idx = lines.findIndex((l) => l.trim().startsWith('{"type":"meta"'));
-  if (idx === -1) return false;
-  let meta: SessionMeta;
-  try {
-    meta = JSON.parse(lines[idx]);
-  } catch {
-    return false;
-  }
-  const clean = title.trim().slice(0, 80);
-  if (clean) meta.title = clean;
-  else delete meta.title;
-  delete (meta as { updatedAt?: string }).updatedAt; // not part of the stored header
-  lines[idx] = JSON.stringify({ type: "meta", ...meta });
-  await fs.writeFile(file, lines.join("\n"), "utf8");
-  return true;
-}
-
-/**
- * Replace a session's tags. Tags are trimmed, deduped, capped at 24 chars and
- * 8 per session; an empty list removes the field. Returns the stored tags, or
- * null when the session does not exist / its meta line is corrupt.
- */
-export async function tagSession(id: string, tags: string[]): Promise<string[] | null> {
+async function updateMeta(id: string, mutate: (meta: SessionMeta) => void): Promise<SessionMeta | null> {
   if (!ID_RE.test(id)) return null;
   const file = fileFor(id);
   let raw: string;
@@ -121,13 +112,53 @@ export async function tagSession(id: string, tags: string[]): Promise<string[] |
   } catch {
     return null;
   }
-  const clean = [...new Set(tags.map((t) => t.trim().slice(0, 24)).filter(Boolean))].slice(0, 8);
-  if (clean.length) meta.tags = clean;
-  else delete meta.tags;
-  delete (meta as { updatedAt?: string }).updatedAt; // not part of the stored header
+  delete (meta as { updatedAt?: string }).updatedAt;
+  mutate(meta);
   lines[idx] = JSON.stringify({ type: "meta", ...meta });
   await fs.writeFile(file, lines.join("\n"), "utf8");
-  return clean;
+  invalidateSession(id);
+  return meta;
+}
+
+/** Persist the current todo plan in the session header (an empty list clears it). */
+export async function saveTodos(id: string, todos: TodoItem[]): Promise<boolean> {
+  const clean = sanitizeTodos(todos) ?? [];
+  try {
+    const meta = await updateMeta(id, (m) => {
+      if (clean.length) m.todos = clean;
+      else delete m.todos;
+    });
+    return meta !== null;
+  } catch {
+    return false; // a failed metadata write must not fail the tool call
+  }
+}
+
+/**
+ * Set (or clear, with an empty title) a session's display name by rewriting
+ * its meta header line. Returns false when the session does not exist.
+ */
+export async function renameSession(id: string, title: string): Promise<boolean> {
+  const clean = title.trim().slice(0, 80);
+  const meta = await updateMeta(id, (m) => {
+    if (clean) m.title = clean;
+    else delete m.title;
+  });
+  return meta !== null;
+}
+
+/**
+ * Replace a session's tags. Tags are trimmed, deduped, capped at 24 chars and
+ * 8 per session; an empty list removes the field. Returns the stored tags, or
+ * null when the session does not exist / its meta line is corrupt.
+ */
+export async function tagSession(id: string, tags: string[]): Promise<string[] | null> {
+  const clean = [...new Set(tags.map((t) => t.trim().slice(0, 24)).filter(Boolean))].slice(0, 8);
+  const meta = await updateMeta(id, (m) => {
+    if (clean.length) m.tags = clean;
+    else delete m.tags;
+  });
+  return meta ? clean : null;
 }
 
 /**
@@ -138,12 +169,13 @@ export async function tagSession(id: string, tags: string[]): Promise<string[] |
 export async function forkSession(
   cwd: string,
   messages: MessageParam[],
-  opts: { title?: string; fromId?: string } = {},
+  opts: { title?: string; fromId?: string; todos?: TodoItem[] } = {},
 ): Promise<{ id: string; meta: SessionMeta }> {
   const { id } = await createSession(cwd);
   const clean = opts.title?.trim().slice(0, 80);
-  if (clean || opts.fromId) {
-    // Rewrite the meta header once, carrying both fields, before any appends.
+  const todos = sanitizeTodos(opts.todos ?? []) ?? [];
+  if (clean || opts.fromId || todos.length) {
+    // Rewrite the meta header once, carrying all fields, before any appends.
     const file = fileFor(id);
     const raw = await fs.readFile(file, "utf8");
     const lines = raw.split("\n");
@@ -152,18 +184,20 @@ export async function forkSession(
       const meta = JSON.parse(lines[idx]) as SessionMeta;
       if (clean) meta.title = clean;
       if (opts.fromId) meta.forkedFrom = opts.fromId;
+      if (todos.length) meta.todos = todos;
       lines[idx] = JSON.stringify({ type: "meta", ...meta });
       await fs.writeFile(file, lines.join("\n"), "utf8");
     }
   }
   if (messages.length) await appendMessages(id, messages);
   const now = new Date().toISOString();
-  return { id, meta: { id, cwd, startedAt: now, updatedAt: now, ...(clean ? { title: clean } : {}), ...(opts.fromId ? { forkedFrom: opts.fromId } : {}) } };
+  return { id, meta: { id, cwd, startedAt: now, updatedAt: now, ...(clean ? { title: clean } : {}), ...(opts.fromId ? { forkedFrom: opts.fromId } : {}), ...(todos.length ? { todos } : {}) } };
 }
 
 /** Delete a session file. Returns false when it did not exist. */
 export async function deleteSession(id: string): Promise<boolean> {
   if (!ID_RE.test(id)) return false;
+  invalidateSession(id);
   try {
     await fs.unlink(fileFor(id));
     return true;
@@ -180,21 +214,35 @@ interface ParsedSession {
 
 /** Single-pass parse of a session file; updatedAt comes from the file mtime. */
 async function parseSessionFile(full: string): Promise<ParsedSession | null> {
+  let stat;
+  try {
+    stat = await fs.stat(full);
+  } catch {
+    parseCache.delete(full);
+    return null;
+  }
+  const cached = parseCache.get(full);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    parseCache.delete(full); // LRU touch
+    parseCache.set(full, cached);
+    return cached.parsed;
+  }
+
   let raw: string;
-  let mtimeMs: number;
   try {
     raw = await fs.readFile(full, "utf8");
-    mtimeMs = (await fs.stat(full)).mtimeMs;
   } catch {
     return null;
   }
+  const mtimeMs = stat.mtimeMs;
   let meta: SessionMeta | null = null;
   const messages: MessageParam[] = [];
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     try {
       const obj = JSON.parse(line);
-      if (obj.type === "meta")
+      if (obj.type === "meta") {
+        const todos = sanitizeTodos(obj.todos);
         meta = {
           id: obj.id,
           cwd: obj.cwd,
@@ -203,14 +251,24 @@ async function parseSessionFile(full: string): Promise<ParsedSession | null> {
           ...(typeof obj.title === "string" && obj.title ? { title: obj.title } : {}),
           ...(Array.isArray(obj.tags) ? { tags: obj.tags.filter((t: unknown) => typeof t === "string" && t.trim()).slice(0, 8) } : {}),
           ...(typeof obj.forkedFrom === "string" && obj.forkedFrom ? { forkedFrom: obj.forkedFrom } : {}),
+          ...(todos?.length ? { todos } : {}),
         };
-      else if (obj.type === "model" && meta) meta.model = obj.model; // last marker wins
+      } else if (obj.type === "model" && meta) meta.model = obj.model; // last marker wins
       else if (obj.type === "message" && meta) messages.push(obj.message);
     } catch {
       /* skip corrupt line */
     }
   }
-  return meta ? { meta, messages } : null;
+
+  const parsed = meta ? { meta, messages } : null;
+  parseCache.delete(full);
+  parseCache.set(full, { mtimeMs, size: stat.size, parsed });
+  while (parseCache.size > PARSE_CACHE_MAX) {
+    const oldest = parseCache.keys().next().value;
+    if (oldest === undefined) break;
+    parseCache.delete(oldest);
+  }
+  return parsed;
 }
 
 export async function loadSession(id: string): Promise<ParsedSession | null> {

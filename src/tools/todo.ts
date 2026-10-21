@@ -9,6 +9,20 @@ export interface TodoItem {
 /** Shared store so the CLI can render the current plan. */
 export const todoStore: { items: TodoItem[] } = { items: [] };
 
+/** Validate and normalize a todo list from the model or a session file. */
+export function sanitizeTodos(raw: unknown): TodoItem[] | null {
+  if (!Array.isArray(raw)) return null;
+  const items: TodoItem[] = [];
+  for (const t of raw) {
+    if (!t || typeof t !== "object") continue;
+    const o = t as Record<string, unknown>;
+    if (typeof o.id !== "string" || typeof o.content !== "string") continue;
+    const status = o.status === "in_progress" || o.status === "completed" ? o.status : "pending";
+    items.push({ id: o.id, content: o.content, status });
+  }
+  return items;
+}
+
 export const todoWriteTool: Tool = {
   name: "todo_write",
   description:
@@ -35,15 +49,8 @@ export const todoWriteTool: Tool = {
     required: ["todos"],
   },
   async execute(input: Record<string, unknown>, _ctx: ToolContext): Promise<ToolResult> {
-    const raw = input.todos;
-    if (!Array.isArray(raw)) return { content: "Error: todos must be an array", isError: true };
-    const items: TodoItem[] = [];
-    for (const t of raw) {
-      const o = t as Record<string, unknown>;
-      if (typeof o.id !== "string" || typeof o.content !== "string") continue;
-      const status = o.status === "in_progress" || o.status === "completed" ? o.status : "pending";
-      items.push({ id: o.id, content: o.content, status });
-    }
+    const items = sanitizeTodos(input.todos);
+    if (!items) return { content: "Error: todos must be an array", isError: true };
     todoStore.items = items;
     const done = items.filter((i) => i.status === "completed").length;
     return { content: `Todo list updated: ${done}/${items.length} completed.` };
