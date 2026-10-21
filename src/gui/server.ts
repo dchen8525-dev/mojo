@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import type { AgentEvents } from "../agent.js";
 import { renderCommand, expandFileReferences } from "../commands.js";
-import { runAgentCommand } from "../agentCommands.js";
+import { runAgentCommand, type CommandResult } from "../agentCommands.js";
 import {
   deleteApiProfile,
   listApiProfiles,
@@ -19,6 +19,19 @@ import { toUiTranscript, type UiTurn } from "./transcript.js";
 import { SseHub } from "./sse.js";
 import { GuiRuntime, type PermissionDecision } from "./state.js";
 import { resolveProjectDir, type ProjectContext, type SwitchResult } from "./project.js";
+import { listRecentProjects } from "./recentProjects.js";
+import { backgroundManager } from "../tools/background.js";
+import {
+  deleteMcpServer,
+  loadMcpConfigScoped,
+  normalizeMcpConfig,
+  saveMcpServer,
+  type McpScope,
+  type McpServerConfig,
+  type McpServerStatus,
+} from "../mcp.js";
+import type { RuleScope } from "../permissions.js";
+import { USAGE_FILE, aggregateUsage, flushUsage, readUsageLog } from "../usage.js";
 
 export interface GuiServerOptions {
   /** Mutable project context; replaced in place when the user switches projects. */
@@ -55,6 +68,12 @@ export interface GuiServerOptions {
   tagSession: (id: string, tags: string[]) => Promise<string[] | null>;
   /** Delete a stored session; replaces the agent's session when it was active. */
   deleteSession: (id: string) => Promise<{ ok: boolean; error?: string; activeReplaced?: string }>;
+  /** Re-read MCP config and reconnect every server (GUI management). */
+  reloadMcp?: () => Promise<McpServerStatus[]>;
+  /** True when the backend was started with --no-mcp. */
+  mcpDisabled?: boolean;
+  /** Usage ledger path override (tests point this at a temp file). */
+  usageFile?: string;
   /** Called after /quit or the shutdown button. */
   onQuit: () => void;
 }
@@ -63,6 +82,14 @@ const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
+};
+
+/** The page has no inline scripts, so scripts can be locked to same-origin. */
+const SECURITY_HEADERS: Record<string, string> = {
+  "content-security-policy":
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "no-referrer",
 };
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -87,6 +114,11 @@ async function readStatic(name: string): Promise<Buffer> {
 function markedPath(): string {
   const req = createRequire(import.meta.url);
   return req.resolve("marked/marked.min.js");
+}
+
+function purifyPath(): string {
+  const req = createRequire(import.meta.url);
+  return req.resolve("dompurify/purify.min.js");
 }
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
@@ -147,6 +179,102 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
     return req.headers["x-agent-token"] === token || url.searchParams.get("token") === token;
   }
 
+  async function usageSnapshot() {
+    await flushUsage();
+    const entries = await readUsageLog(opts.usageFile);
+    const totals = {
+      usd: 0,
+      requests: entries.length,
+      sessions: new Set(entries.map((e) => e.s).filter(Boolean)).size,
+      days: new Set(entries.map((e) => e.t.slice(0, 10))).size,
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      unpriced: 0,
+    };
+    for (const e of entries) {
+      totals.usd += e.u ?? 0;
+      totals.input += e.i;
+      totals.output += e.o;
+      totals.cacheRead += e.cr ?? 0;
+      totals.cacheWrite += e.cw ?? 0;
+      if (!e.p) totals.unpriced += 1;
+    }
+    const inputSide = totals.input + totals.cacheRead + totals.cacheWrite;
+    const titleById = new Map<string, string>();
+    try {
+      for (const s of await opts.listSessions()) if (s.title) titleById.set(s.id, s.title);
+    } catch {
+      /* titles are decoration; totals still render */
+    }
+    const sessionCost = project.agent.costs.snapshot();
+    const sessionRequests = Object.values(sessionCost.byModel).reduce((n, m) => n + m.requests, 0);
+    return {
+      totals: { ...totals, cacheShare: inputSide ? totals.cacheRead / inputSide : 0 },
+      byModel: aggregateUsage(entries, "model"),
+      byDay: aggregateUsage(entries, "day"),
+      bySession: aggregateUsage(entries, "session").map((row) => ({ ...row, title: titleById.get(row.key) ?? null })),
+      session: {
+        usd: sessionCost.totalUsd,
+        requests: sessionRequests,
+        budgetUsd: project.agent.costs.budgetUsd,
+      },
+      ledger: opts.usageFile ?? USAGE_FILE,
+    };
+  }
+
+  async function mcpSnapshot() {
+    const scoped = await loadMcpConfigScoped(project.cwd, home);
+    const statusByName = new Map((project.mcp?.statuses ?? []).map((s) => [s.name, s]));
+    const projectNames = new Set(Object.keys(scoped.project));
+    const servers: Array<{
+      name: string;
+      scope: McpScope;
+      command: string;
+      args: string[];
+      env: Record<string, string>;
+      enabledTools: string[];
+      disabledTools: string[];
+      disabled: boolean;
+      shadowed: boolean;
+      status: "connected" | "failed" | "stopped" | "disabled";
+      toolCount: number;
+      error: string | null;
+    }> = [];
+    const add = (scope: McpScope, configs: Record<string, McpServerConfig>) => {
+      for (const [name, cfg] of Object.entries(configs)) {
+        const status = statusByName.get(name);
+        servers.push({
+          name,
+          scope,
+          command: cfg.command,
+          args: cfg.args ?? [],
+          env: cfg.env ?? {},
+          enabledTools: cfg.enabledTools ?? [],
+          disabledTools: cfg.disabledTools ?? [],
+          disabled: !!cfg.disabled,
+          shadowed: scope === "global" && projectNames.has(name),
+          status: cfg.disabled || opts.mcpDisabled ? "disabled" : status ? (status.connected ? "connected" : "failed") : "stopped",
+          toolCount: status?.toolCount ?? 0,
+          error: status?.error ?? null,
+        });
+      }
+    };
+    add("project", scoped.project);
+    add("global", scoped.global);
+    servers.sort((a, b) => a.name.localeCompare(b.name) || (a.scope === "project" ? -1 : 1));
+    return { servers, disabled: !!opts.mcpDisabled };
+  }
+
+  function permissionSnapshot() {
+    return {
+      mode: project.permissions.mode,
+      global: [...(project.permissions.getRules?.() ?? [])],
+      project: [...(project.permissions.getProjectRules?.() ?? [])],
+    };
+  }
+
   function buildEvents(turn: UiTurn): AgentEvents {
     return {
       onTextDelta: (d) => {
@@ -186,6 +314,73 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
     };
   }
 
+  /**
+   * Run a built-in slash command under the command-busy flag. /resume is
+   * special-cased: the shared implementation only resets the session, while
+   * the GUI must rebind the whole project (cwd, MCP, LSP, permissions).
+   */
+  async function runCommand(line: string): Promise<CommandResult> {
+    const [cmd, ...rest] = line.slice(1).split(/\s+/);
+    let sessionChanged = false;
+    let sidebarChanged = false;
+    const controller = new AbortController();
+    runtime.commandBusy = true;
+    runtime.commandController = controller;
+    hub.broadcast("command_start", { command: cmd });
+
+    let result: CommandResult;
+    try {
+      if (cmd === "resume") {
+        const id = rest[0] ?? "";
+        if (!id) {
+          result = { kind: "error", text: "usage: /resume <id>" };
+        } else {
+          const err = await opts.resumeSession(id);
+          result = err
+            ? { kind: "error", text: `resume failed: ${err}` }
+            : { kind: "ok", text: `resumed ${id} (${project.agent.provider}:${project.agent.model})` };
+          if (!err) {
+            sessionChanged = true;
+            sidebarChanged = true;
+          }
+        }
+      } else {
+        result = await runAgentCommand(line, {
+          agent: project.agent,
+          permissions: project.permissions,
+          mcp: project.mcp,
+          hooks: project.hooks,
+          customCommands: project.customCommands,
+          cwd: project.agent.cwd,
+          notify: (m) => hub.broadcast("system", { text: m }),
+          signal: controller.signal,
+        });
+        if (cmd === "clear" || cmd === "fork") {
+          sessionChanged = true;
+          sidebarChanged = true;
+        } else if (cmd === "rename" || cmd === "tag") {
+          sidebarChanged = true;
+        }
+      }
+    } catch (err) {
+      result = { kind: "error", text: err instanceof Error ? err.message : String(err) };
+    } finally {
+      runtime.commandBusy = false;
+      runtime.commandController = null;
+    }
+
+    hub.broadcast("command_end", {
+      command: cmd,
+      sessionChanged,
+      sidebarChanged,
+      text: result.text,
+      kind: result.kind,
+      highlight: result.highlight,
+      quit: !!result.quit,
+    });
+    return result;
+  }
+
   /** Mirror of the Ink onSubmit dispatch: custom command / slash command / prompt. */
   async function handleChat(text: string, images?: import("../types.js").ImageBlockParam[]): Promise<void> {
     const trimmed = text.trim();
@@ -201,17 +396,8 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
         display = `${trimmed}  (/${cmd})`;
       } else {
         // A built-in slash command sent to the chat box: run it as a command.
-        const r = await runAgentCommand(trimmed, {
-          agent: project.agent,
-          permissions: project.permissions,
-          mcp: project.mcp,
-          hooks: project.hooks,
-          customCommands: project.customCommands,
-          cwd: project.agent.cwd,
-          notify: (m) => hub.broadcast("system", { text: m }),
-        });
+        const r = await runCommand(trimmed);
         if (r.quit) opts.onQuit();
-        if (r.text) hub.broadcast("system", { text: r.text, kind: r.kind, highlight: r.highlight });
         return;
       }
     }
@@ -250,7 +436,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       tokenEstimate: project.agent.tokenEstimate(),
       planMode: project.agent.planMode,
       mode: project.permissions.mode,
-      busy: runtime.busy,
+      busy: runtime.busy || runtime.commandBusy,
       switching: runtime.switching,
       todos: project.agent.currentTodos(),
       cost: project.agent.costs.format(),
@@ -291,19 +477,20 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
     // ---- static (no token needed; carries no secrets) ----
     try {
       if (method === "GET" && (p === "/" || p === "/index.html")) {
-        res.writeHead(200, { "content-type": MIME[".html"] });
+        res.writeHead(200, { "content-type": MIME[".html"], ...SECURITY_HEADERS });
         res.end(await cachedStatic("index.html"));
         return;
       }
       if (method === "GET" && (p === "/app.js" || p === "/style.css")) {
         const name = p.slice(1);
-        res.writeHead(200, { "content-type": MIME[path.extname(name)] ?? "text/plain" });
+        res.writeHead(200, { "content-type": MIME[path.extname(name)] ?? "text/plain", "x-content-type-options": "nosniff" });
         res.end(await cachedStatic(name));
         return;
       }
-      if (method === "GET" && p === "/vendor/marked.min.js") {
-        res.writeHead(200, { "content-type": MIME[".js"] });
-        res.end(await fs.readFile(markedPath()));
+      if (method === "GET" && (p === "/vendor/marked.min.js" || p === "/vendor/purify.min.js")) {
+        const file = p.endsWith("purify.min.js") ? purifyPath() : markedPath();
+        res.writeHead(200, { "content-type": MIME[".js"], "x-content-type-options": "nosniff" });
+        res.end(await fs.readFile(file));
         return;
       }
     } catch (err) {
@@ -342,6 +529,22 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       return sendJson(res, 200, await opts.listSessions());
     }
 
+    if (method === "GET" && p === "/api/recent-projects") {
+      return sendJson(res, 200, await listRecentProjects(home));
+    }
+
+    if (method === "GET" && p === "/api/background") {
+      const tasks = backgroundManager.list().map((t) => ({
+        id: t.id,
+        command: t.command,
+        startedAt: new Date(t.startedAt).toISOString(),
+        running: !t.done,
+        exitCode: t.exitCode,
+        killed: t.killed,
+      }));
+      return sendJson(res, 200, { tasks, running: tasks.filter((t) => t.running).length });
+    }
+
     if (method === "GET" && p === "/api/api-profiles") {
       return sendJson(res, 200, listApiProfiles(project.cwd, home));
     }
@@ -372,6 +575,26 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       }
     }
 
+    if (method === "GET" && p === "/api/usage") {
+      try {
+        return sendJson(res, 200, await usageSnapshot());
+      } catch (err) {
+        return sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+
+    if (method === "GET" && p === "/api/mcp") {
+      try {
+        return sendJson(res, 200, await mcpSnapshot());
+      } catch (err) {
+        return sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+
+    if (method === "GET" && p === "/api/permissions") {
+      return sendJson(res, 200, permissionSnapshot());
+    }
+
     if (method === "GET" && p === "/api/search") {
       const url = new URL(req.url ?? "", "http://localhost");
       const q = (url.searchParams.get("q") ?? "").trim();
@@ -392,7 +615,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       const body = await readBody(req);
 
       if (p === "/api/chat") {
-        if (runtime.busy || runtime.switching) return sendJson(res, 409, { error: "busy" });
+        if (runtime.busy || runtime.commandBusy || runtime.switching) return sendJson(res, 409, { error: "busy" });
         const text = typeof body.text === "string" ? body.text : "";
         const images = Array.isArray(body.images) ? (body.images as import("../types.js").ImageBlockParam[]) : undefined;
         if (!text.trim() && !images?.length) return sendJson(res, 400, { error: "empty" });
@@ -403,6 +626,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
 
       if (p === "/api/abort") {
         runtime.controller?.abort();
+        runtime.commandController?.abort();
         runtime.flushPermissions(); // never leave a turn hung on a prompt
         return sendJson(res, 200, { ok: true });
       }
@@ -415,6 +639,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       }
 
       if (p === "/api/command") {
+        if (runtime.busy || runtime.commandBusy || runtime.switching) return sendJson(res, 409, { error: "busy" });
         const line = typeof body.line === "string" ? body.line : "";
         const r = await runAgentCommand(line, {
           agent: project.agent,
@@ -436,7 +661,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       }
 
       if (p === "/api/api-profiles") {
-        if (runtime.busy || runtime.switching) return sendJson(res, 409, { error: "busy" });
+        if (runtime.busy || runtime.commandBusy || runtime.switching) return sendJson(res, 409, { error: "busy" });
         const provider = body.provider === "openai" ? "openai" : body.provider === "anthropic" ? "anthropic" : null;
         const name = typeof body.name === "string" ? body.name.trim() : "";
         const model = typeof body.model === "string" ? body.model.trim() : "";
@@ -471,7 +696,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       }
 
       if (p === "/api/api-profiles/delete") {
-        if (runtime.busy || runtime.switching) return sendJson(res, 409, { error: "busy" });
+        if (runtime.busy || runtime.commandBusy || runtime.switching) return sendJson(res, 409, { error: "busy" });
         const id = typeof body.id === "string" ? body.id : "";
         if (!id) return sendJson(res, 400, { error: "missing id" });
         const before = listApiProfiles(project.cwd, home);
@@ -489,7 +714,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       }
 
       if (p === "/api/api-profiles/select") {
-        if (runtime.busy || runtime.switching) return sendJson(res, 409, { error: "busy" });
+        if (runtime.busy || runtime.commandBusy || runtime.switching) return sendJson(res, 409, { error: "busy" });
         const scope = body.scope === "project" ? "project" : body.scope === "default" ? "default" : null;
         const id = typeof body.id === "string" && body.id ? body.id : null;
         if (!scope) return sendJson(res, 400, { error: "scope must be project or default" });
@@ -508,22 +733,126 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
         return sendJson(res, 200, { ok: true, view, profile: active, ...applied });
       }
 
+      if (p === "/api/background/kill") {
+        const id = typeof body.id === "string" ? body.id : "";
+        if (!id) return sendJson(res, 400, { error: "missing id" });
+        if (!backgroundManager.get(id)) return sendJson(res, 404, { error: "task not found" });
+        return sendJson(res, 200, { ok: true, killed: backgroundManager.kill(id) });
+      }
+
+      if (p === "/api/usage/budget") {
+        const usd = body.usd;
+        if (usd !== null && (typeof usd !== "number" || !Number.isFinite(usd) || usd <= 0)) {
+          return sendJson(res, 400, { error: "usd must be a positive number or null" });
+        }
+        project.agent.costs.budgetUsd = usd as number | null;
+        return sendJson(res, 200, { ok: true, budgetUsd: project.agent.costs.budgetUsd });
+      }
+
+      if (p === "/api/mcp/save") {
+        if (runtime.busy || runtime.commandBusy || runtime.switching) return sendJson(res, 409, { error: "busy" });
+        if (opts.mcpDisabled) return sendJson(res, 400, { error: "MCP is disabled for this run (--no-mcp)" });
+        const name = typeof body.name === "string" ? body.name.trim() : "";
+        const scope: McpScope | null = body.scope === "project" ? "project" : body.scope === "global" ? "global" : null;
+        if (!name) return sendJson(res, 400, { error: "missing name" });
+        if (!scope) return sendJson(res, 400, { error: "scope must be global or project" });
+        try {
+          await saveMcpServer(project.cwd, scope, name, body.config, home);
+        } catch (err) {
+          return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        }
+        let reloadError: string | null = null;
+        try {
+          await opts.reloadMcp?.();
+        } catch (err) {
+          reloadError = err instanceof Error ? err.message : String(err);
+        }
+        return sendJson(res, 200, { ok: true, reloadError, ...(await mcpSnapshot()) });
+      }
+
+      if (p === "/api/mcp/delete") {
+        if (runtime.busy || runtime.commandBusy || runtime.switching) return sendJson(res, 409, { error: "busy" });
+        if (opts.mcpDisabled) return sendJson(res, 400, { error: "MCP is disabled for this run (--no-mcp)" });
+        const name = typeof body.name === "string" ? body.name.trim() : "";
+        const scope: McpScope | null = body.scope === "project" ? "project" : body.scope === "global" ? "global" : null;
+        if (!name) return sendJson(res, 400, { error: "missing name" });
+        if (!scope) return sendJson(res, 400, { error: "scope must be global or project" });
+        let deleted: boolean;
+        try {
+          deleted = await deleteMcpServer(project.cwd, scope, name, home);
+        } catch (err) {
+          return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        }
+        if (!deleted) return sendJson(res, 404, { error: "server not found in that scope" });
+        let reloadError: string | null = null;
+        try {
+          await opts.reloadMcp?.();
+        } catch (err) {
+          reloadError = err instanceof Error ? err.message : String(err);
+        }
+        return sendJson(res, 200, { ok: true, reloadError, ...(await mcpSnapshot()) });
+      }
+
+      if (p === "/api/mcp/reload") {
+        if (runtime.busy || runtime.commandBusy || runtime.switching) return sendJson(res, 409, { error: "busy" });
+        if (opts.mcpDisabled) return sendJson(res, 400, { error: "MCP is disabled for this run (--no-mcp)" });
+        if (!opts.reloadMcp) return sendJson(res, 501, { error: "not supported" });
+        let reloadError: string | null = null;
+        try {
+          await opts.reloadMcp();
+        } catch (err) {
+          reloadError = err instanceof Error ? err.message : String(err);
+        }
+        return sendJson(res, 200, { ok: true, reloadError, ...(await mcpSnapshot()) });
+      }
+
+      if (p === "/api/permissions/add") {
+        const scope: RuleScope | null = body.scope === "project" ? "project" : body.scope === "global" ? "global" : null;
+        const match = typeof body.match === "string" ? body.match : "";
+        const decision = body.decision === "allow" || body.decision === "deny" ? body.decision : null;
+        if (!scope) return sendJson(res, 400, { error: "scope must be global or project" });
+        if (!decision) return sendJson(res, 400, { error: "decision must be allow or deny" });
+        try {
+          await project.permissions.addRule(scope, match, decision);
+        } catch (err) {
+          return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        }
+        return sendJson(res, 200, { ok: true, ...permissionSnapshot() });
+      }
+
+      if (p === "/api/permissions/delete") {
+        const scope: RuleScope | null = body.scope === "project" ? "project" : body.scope === "global" ? "global" : null;
+        const index = typeof body.index === "number" ? body.index : Number.NaN;
+        if (!scope) return sendJson(res, 400, { error: "scope must be global or project" });
+        if (!Number.isInteger(index)) return sendJson(res, 400, { error: "missing rule index" });
+        let removed;
+        try {
+          removed = await project.permissions.removeRule(scope, index);
+        } catch (err) {
+          return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        }
+        if (!removed) return sendJson(res, 404, { error: "rule not found" });
+        return sendJson(res, 200, { ok: true, ...permissionSnapshot() });
+      }
+
       if (p === "/api/project") {
         const cwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
         if (!cwd) return sendJson(res, 400, { error: "missing cwd" });
         if (!opts.switchProject) return sendJson(res, 501, { error: "not supported" });
-        if (runtime.busy || runtime.switching) return sendJson(res, 409, { error: "busy" });
+        if (runtime.busy || runtime.commandBusy || runtime.switching) return sendJson(res, 409, { error: "busy" });
         const r = await opts.switchProject(cwd);
         return sendJson(res, r.ok ? 200 : r.error === "busy" ? 409 : 400, r);
       }
 
       if (p === "/api/resume") {
+        if (runtime.busy || runtime.commandBusy || runtime.switching) return sendJson(res, 409, { error: "busy" });
         const id = typeof body.id === "string" ? body.id : "";
         const err = await opts.resumeSession(id);
         return sendJson(res, err ? 404 : 200, err ? { error: err } : { ok: true });
       }
 
       if (p === "/api/new") {
+        if (runtime.busy || runtime.commandBusy || runtime.switching) return sendJson(res, 409, { error: "busy" });
         const s = await opts.newSession();
         return sendJson(res, 200, { ok: true, sessionId: s.id });
       }
@@ -543,6 +872,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       }
 
       if (p === "/api/session/delete") {
+        if (runtime.commandBusy || runtime.switching) return sendJson(res, 409, { error: "busy" });
         const id = typeof body.id === "string" ? body.id : "";
         const r = await opts.deleteSession(id);
         return sendJson(res, r.ok ? 200 : 404, r);

@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { Agent } from "../agent.js";
 import { PermissionManager, type Mode } from "../permissions.js";
 import { HookManager } from "../hooks.js";
-import { McpManager, loadMcpConfig } from "../mcp.js";
+import { McpManager, loadMcpConfig, type McpServerStatus } from "../mcp.js";
 import { loadSlashCommands, type SlashCommand } from "../commands.js";
 import { configureLsp, disposeLsp, loadLspConfig } from "../lsp.js";
 import { backgroundManager } from "../tools/background.js";
@@ -13,6 +13,7 @@ import { SseHub } from "./sse.js";
 import { GuiRuntime } from "./state.js";
 import { startGuiServer, type RunningGui } from "./server.js";
 import { resolveProjectDir, samePath, type ProjectContext, type SwitchResult } from "./project.js";
+import { rememberRecentProject } from "./recentProjects.js";
 
 export interface GuiStartOptions {
   /** Working directory (the project the agent operates on). */
@@ -40,11 +41,13 @@ interface SessionSeed {
   id: string;
   messages?: MessageParam[];
   model?: string;
+  todos?: SessionMeta["todos"];
 }
 
 interface BuildOptions {
   session: SessionSeed;
   mode: Mode;
+  plan: boolean;
   noMcp: boolean;
   noLsp: boolean;
   askPermission: PermissionManager["askUser"];
@@ -59,6 +62,7 @@ async function seedSession(cwd: string, resumeId?: string): Promise<SessionSeed>
       id: loaded.meta.id,
       messages: loaded.messages.length ? loaded.messages : undefined,
       model: loaded.meta.model,
+      todos: loaded.meta.todos,
     };
   }
   const created = await createSession(cwd);
@@ -103,6 +107,7 @@ async function buildProject(cwd: string, opts: BuildOptions): Promise<ProjectCon
   // ---- agent ----
   const { session } = opts;
   const agent = new Agent(cwd, session.id, permissions, session.messages, session.model, hooks);
+  agent.planMode = opts.plan;
   if (session.model) {
     try {
       agent.switchModel(session.model);
@@ -110,7 +115,7 @@ async function buildProject(cwd: string, opts: BuildOptions): Promise<ProjectCon
       /* no key for that provider - keep the model resolved from config/env */
     }
   }
-  await agent.startSession(session.messages?.length ? "resume" : "startup");
+  await agent.startSession(session.messages?.length ? "resume" : "startup", undefined, session.todos);
 
   return { cwd, agent, permissions, hooks, customCommands, mcp };
 }
@@ -143,11 +148,13 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
   const project = await buildProject(cwd, {
     session,
     mode,
+    plan: !!opts.plan,
     noMcp,
     noLsp,
     askPermission: (desc, risk, preview) => runtime.askPermission(desc, risk, preview),
   });
   runtime.attach(project.agent, project.permissions);
+  await rememberRecentProject(cwd);
   // A stuck permission prompt with no client to answer it would hang the turn
   // forever; when the last tab/window closes, deny outstanding prompts.
   hub.onEmpty = () => runtime.flushPermissions();
@@ -174,6 +181,7 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
       return { ok: true, cwd: project.cwd, sessionId: project.agent.sessionId };
     }
 
+    const keepPlan = project.agent.planMode;
     runtime.switching = true;
     try {
       // Prepare the target session before tearing anything down, so a missing
@@ -204,6 +212,7 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
       const next = await buildProject(target, {
         session: nextSession,
         mode: project.permissions.mode,
+        plan: keepPlan,
         noMcp,
         noLsp,
         askPermission: (desc, risk, preview) => runtime.askPermission(desc, risk, preview),
@@ -211,6 +220,7 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
       // Keep the same object identity: the HTTP handler holds this reference.
       Object.assign(project, next);
       runtime.attach(project.agent, project.permissions);
+      await rememberRecentProject(target);
       hub.broadcast("project_changed", {
         cwd: project.cwd,
         sessionId: project.agent.sessionId,
@@ -225,6 +235,22 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
     }
   }
 
+  async function reloadMcp(): Promise<McpServerStatus[]> {
+    if (noMcp) return [];
+    try {
+      await project.mcp?.shutdown();
+    } catch {
+      /* best effort - a stuck server must not block reconfiguration */
+    }
+    project.mcp = null;
+    const configs = await loadMcpConfig(project.cwd);
+    if (!Object.keys(configs).length) return [];
+    const manager = new McpManager();
+    const statuses = await manager.connectAll(configs);
+    project.mcp = manager;
+    return statuses;
+  }
+
   const gui = await startGuiServer(
     {
       project,
@@ -232,6 +258,8 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
       runtime,
       token,
       switchProject,
+      reloadMcp,
+      mcpDisabled: noMcp,
       newSession: async () => {
         const s = await createSession(project.cwd);
         await project.agent.resetSession(s.id);
@@ -250,7 +278,7 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
           const r = await switchProject(target, { resumeId: id });
           return r.ok ? null : r.error;
         }
-        await project.agent.resetSession(loaded.meta.id, loaded.messages, loaded.meta.model);
+        await project.agent.resetSession(loaded.meta.id, loaded.messages, loaded.meta.model, loaded.meta.todos);
         if (loaded.meta.model) {
           try {
             project.agent.switchModel(loaded.meta.model);

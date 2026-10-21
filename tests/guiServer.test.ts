@@ -9,6 +9,9 @@ import { SseHub } from "../src/gui/sse.js";
 import { GuiRuntime } from "../src/gui/state.js";
 import { startGuiServer, type RunningGui } from "../src/gui/server.js";
 import type { SwitchResult } from "../src/gui/project.js";
+import { rememberRecentProject } from "../src/gui/recentProjects.js";
+import { backgroundManager } from "../src/tools/background.js";
+import type { McpServerStatus } from "../src/mcp.js";
 
 const TOKEN = "testtoken123";
 
@@ -44,12 +47,17 @@ async function withServer(
     deleteSession: (id: string) => Promise<{ ok: boolean; error?: string; activeReplaced?: string }>;
     searchSessions: (q: string, o?: { regex?: boolean }) => Promise<unknown[]>;
     switchProject: (cwd: string, opts?: { resumeId?: string }) => Promise<SwitchResult>;
+    resumeSession: (id: string) => Promise<string | null>;
     home: string;
+    permissions: PermissionManager;
+    reloadMcp: () => Promise<McpServerStatus[]>;
+    mcpDisabled: boolean;
+    usageFile: string;
   }> = {},
 ): Promise<void> {
   const hub = new SseHub();
   const agent = fakeAgent(agentOverrides);
-  const permissions = fakePermissions();
+  const permissions = serverOverrides.permissions ?? fakePermissions();
   const runtime = new GuiRuntime(hub);
   runtime.attach(agent, permissions);
   const project = {
@@ -67,9 +75,12 @@ async function withServer(
       runtime,
       token: TOKEN,
       home: serverOverrides.home,
+      reloadMcp: serverOverrides.reloadMcp,
+      mcpDisabled: serverOverrides.mcpDisabled,
+      usageFile: serverOverrides.usageFile,
       switchProject: serverOverrides.switchProject ?? (async (cwd) => ({ ok: true, cwd, sessionId: agent.sessionId })),
       newSession: async () => ({ id: "new1" }),
-      resumeSession: async () => null,
+      resumeSession: serverOverrides.resumeSession ?? (async () => null),
       listSessions: async () => [],
       searchSessions: serverOverrides.searchSessions ?? (async () => []),
       tagSession: serverOverrides.tagSession ?? (async () => null),
@@ -86,7 +97,11 @@ async function withServer(
   }
 }
 
-function req(port: number, path: string, opts: { method?: string; token?: string; body?: unknown } = {}): Promise<{ status: number; json: any; text: string }> {
+function req(
+  port: number,
+  path: string,
+  opts: { method?: string; token?: string; body?: unknown } = {},
+): Promise<{ status: number; json: any; text: string; headers: http.IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     const headers: Record<string, string> = {};
     if (opts.token) headers["x-agent-token"] = opts.token;
@@ -105,7 +120,7 @@ function req(port: number, path: string, opts: { method?: string; token?: string
         } catch {
           /* not json */
         }
-        resolve({ status: res.statusCode ?? 0, json, text: data });
+        resolve({ status: res.statusCode ?? 0, json, text: data, headers: res.headers });
       });
     });
     r.on("error", reject);
@@ -137,6 +152,20 @@ describe("gui server", () => {
       const r = await req(gui.port, "/");
       expect(r.status).toBe(200);
       expect(r.text).toContain("<!doctype html>");
+    });
+  });
+
+  it("serves the sanitizer bundle and a strict CSP on the page", async () => {
+    await withServer(async (gui) => {
+      const page = await req(gui.port, "/");
+      expect(page.status).toBe(200);
+      expect(page.text).toContain("/vendor/purify.min.js");
+      expect(String(page.headers["content-security-policy"])).toContain("script-src 'self'");
+      expect(page.headers["x-content-type-options"]).toBe("nosniff");
+
+      const purify = await req(gui.port, "/vendor/purify.min.js");
+      expect(purify.status).toBe(200);
+      expect(purify.text).toContain("DOMPurify");
     });
   });
 
@@ -497,6 +526,82 @@ describe("gui server", () => {
     );
   });
 
+  it("composer /resume goes through resumeSession and reports command flags", async () => {
+    const calls: string[] = [];
+    await withServer(
+      async (gui) => {
+        const sse = collectSse(gui.port, 2);
+        await sse.ready;
+        const r = await req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "/resume other" } });
+        expect(r.status).toBe(202);
+        const events = await sse.done;
+        expect(calls).toEqual(["other"]);
+        expect(events.map((e) => e.event)).toEqual(["command_start", "command_end"]);
+        expect(events[1].data).toMatchObject({
+          command: "resume",
+          sessionChanged: true,
+          sidebarChanged: true,
+          kind: "ok",
+        });
+        expect(events[1].data.text).toContain("resumed other");
+      },
+      {},
+      {
+        resumeSession: async (id) => {
+          calls.push(id);
+          return null;
+        },
+      },
+    );
+  });
+
+  it("composer /resume reports a failed switch without a session change", async () => {
+    await withServer(
+      async (gui) => {
+        const sse = collectSse(gui.port, 2);
+        await sse.ready;
+        await req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "/resume missing" } });
+        const events = await sse.done;
+        expect(events[1].data).toMatchObject({ command: "resume", sessionChanged: false, kind: "error" });
+        expect(events[1].data.text).toContain("resume failed: session not found");
+      },
+      {},
+      { resumeSession: async () => "session not found" },
+    );
+  });
+
+  it("marks the runtime busy while a command runs and rejects concurrent mutations", async () => {
+    await withServer(async (gui, runtime, agent) => {
+      let release!: () => void;
+      (agent as unknown as { review: () => Promise<string> }).review = () =>
+        new Promise<string>((resolve) => (release = () => resolve("done")));
+      const sse = collectSse(gui.port, 3); // command_start + progress + command_end
+      await sse.ready;
+      const start = await req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "/review" } });
+      expect(start.status).toBe(202);
+      expect(runtime.commandBusy).toBe(true);
+
+      const state = await req(gui.port, "/api/state", { token: TOKEN });
+      expect(state.json.busy).toBe(true);
+      const chat = await req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "hi" } });
+      expect(chat.status).toBe(409);
+      const project = await req(gui.port, "/api/project", { method: "POST", token: TOKEN, body: { cwd: "/tmp/x" } });
+      expect(project.status).toBe(409);
+      const resume = await req(gui.port, "/api/resume", { method: "POST", token: TOKEN, body: { id: "x" } });
+      expect(resume.status).toBe(409);
+      const fresh = await req(gui.port, "/api/new", { method: "POST", token: TOKEN, body: {} });
+      expect(fresh.status).toBe(409);
+
+      release();
+      const events = await sse.done;
+      const end = events.find((e) => e.event === "command_end")!;
+      expect(end.data).toMatchObject({ command: "review", kind: "ok", text: "done" });
+      expect(runtime.commandBusy).toBe(false);
+      const after = await req(gui.port, "/api/state", { token: TOKEN });
+      expect(after.json.busy).toBe(false);
+    });
+  });
+
   it("permission round-trip resolves the parked promise", async () => {
     await withServer(async (gui, runtime) => {
       const sse = collectSse(gui.port, 1);
@@ -601,6 +706,258 @@ describe("gui server", () => {
             : [];
         },
       },
+    );
+  });
+
+  it("lists background tasks and kills them by id", async () => {
+    const task = await backgroundManager.start(`node -e "setTimeout(() => {}, 30000)"`, process.cwd());
+    try {
+      await withServer(async (gui) => {
+        const before = await req(gui.port, "/api/background", { token: TOKEN });
+        expect(before.status).toBe(200);
+        const row = before.json.tasks.find((t: { id: string }) => t.id === task.id);
+        expect(row).toMatchObject({ id: task.id, running: true });
+        expect(row.command).toContain("setTimeout");
+        // Internal child-process handles must not leak into the JSON payload.
+        expect(row.child).toBeUndefined();
+
+        const killed = await req(gui.port, "/api/background/kill", {
+          method: "POST",
+          token: TOKEN,
+          body: { id: task.id },
+        });
+        expect(killed.status).toBe(200);
+        expect(killed.json).toEqual({ ok: true, killed: true });
+
+        const unknown = await req(gui.port, "/api/background/kill", {
+          method: "POST",
+          token: TOKEN,
+          body: { id: "nope" },
+        });
+        expect(unknown.status).toBe(404);
+      });
+    } finally {
+      backgroundManager.killAll();
+    }
+  });
+
+  it("GET /api/recent-projects returns the persisted list", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "mojo-gui-home-"));
+    const project = await fs.mkdtemp(path.join(os.tmpdir(), "mojo-gui-proj-"));
+    try {
+      await rememberRecentProject(project, home);
+      await withServer(
+        async (gui) => {
+          const r = await req(gui.port, "/api/recent-projects", { token: TOKEN });
+          expect(r.status).toBe(200);
+          expect(r.json[0].path).toBe(await fs.realpath(project));
+        },
+        {},
+        { home },
+      );
+    } finally {
+      await fs.rm(home, { recursive: true, force: true });
+      await fs.rm(project, { recursive: true, force: true });
+    }
+  });
+
+  it("aggregates the usage ledger and updates the session budget", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "mojo-gui-usage-"));
+    const usageFile = path.join(dir, "usage.jsonl");
+    const entries = [
+      { t: "2026-10-20T10:00:00.000Z", s: "s1", m: "anthropic:claude-sonnet-4-5", u: 0.25, p: true, i: 1000, o: 200, cr: 800, cw: 100 },
+      { t: "2026-10-21T10:00:00.000Z", s: "s2", m: "openai:gpt-4o", u: 0.05, p: true, i: 500, o: 100 },
+      { t: "2026-10-21T11:00:00.000Z", s: "s2", m: "unknown:model", u: 0, p: false, i: 50, o: 10 },
+    ];
+    await fs.writeFile(usageFile, entries.map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+    const costs = {
+      format: () => "",
+      budgetUsd: 5,
+      snapshot: () => ({
+        byModel: { "anthropic:claude-sonnet-4-5": { requests: 1 } },
+        totalUsd: 0.25,
+        totalInput: 1000,
+        totalOutput: 200,
+        budgetUsd: 5,
+      }),
+    };
+    try {
+      await withServer(
+        async (gui, _runtime, agent) => {
+          const r = await req(gui.port, "/api/usage", { token: TOKEN });
+          expect(r.status).toBe(200);
+          expect(r.json.totals).toMatchObject({
+            requests: 3,
+            sessions: 2,
+            days: 2,
+            input: 1550,
+            output: 310,
+            cacheRead: 800,
+            cacheWrite: 100,
+            unpriced: 1,
+          });
+          expect(r.json.totals.usd).toBeCloseTo(0.3);
+          expect(r.json.totals.cacheShare).toBeCloseTo(800 / 2450);
+          expect(r.json.byModel[0].key).toBe("anthropic:claude-sonnet-4-5");
+          expect(r.json.byDay.find((d: { key: string }) => d.key === "2026-10-21").requests).toBe(2);
+          expect(r.json.bySession[0].key).toBe("s1");
+          expect(r.json.session).toEqual({ usd: 0.25, requests: 1, budgetUsd: 5 });
+          expect(r.json.ledger).toBe(usageFile);
+
+          const set = await req(gui.port, "/api/usage/budget", { token: TOKEN, method: "POST", body: { usd: 12.5 } });
+          expect(set.status).toBe(200);
+          expect(set.json.budgetUsd).toBe(12.5);
+          expect((agent.costs as unknown as { budgetUsd: number | null }).budgetUsd).toBe(12.5);
+
+          const clear = await req(gui.port, "/api/usage/budget", { token: TOKEN, method: "POST", body: { usd: null } });
+          expect(clear.status).toBe(200);
+          expect(clear.json.budgetUsd).toBeNull();
+
+          const bad = await req(gui.port, "/api/usage/budget", { token: TOKEN, method: "POST", body: { usd: -1 } });
+          expect(bad.status).toBe(400);
+        },
+        { costs },
+        { usageFile },
+      );
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("manages MCP server configs and reconnects after each change", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "mojo-gui-mcp-"));
+    const cwd = path.join(root, "project");
+    const home = path.join(root, "home");
+    await fs.mkdir(cwd, { recursive: true });
+    await fs.mkdir(home, { recursive: true });
+    let reloads = 0;
+    const reloadMcp = async (): Promise<McpServerStatus[]> => {
+      reloads++;
+      return [];
+    };
+    try {
+      await withServer(
+        async (gui) => {
+          const empty = await req(gui.port, "/api/mcp", { token: TOKEN });
+          expect(empty.status).toBe(200);
+          expect(empty.json).toEqual({ servers: [], disabled: false });
+
+          const save = await req(gui.port, "/api/mcp/save", {
+            token: TOKEN,
+            method: "POST",
+            body: {
+              name: "fs",
+              scope: "global",
+              config: { command: "npx", args: ["-y", "server-fs"], env: { TOKEN: "secret" } },
+            },
+          });
+          expect(save.status).toBe(200);
+          expect(reloads).toBe(1);
+          expect(save.json.servers).toEqual([
+            expect.objectContaining({ name: "fs", scope: "global", status: "stopped", env: { TOKEN: "secret" } }),
+          ]);
+          const file = path.join(home, ".node-agent", "mcp.json");
+          expect(JSON.parse(await fs.readFile(file, "utf8")).mcpServers.fs.command).toBe("npx");
+
+          const reload = await req(gui.port, "/api/mcp/reload", { token: TOKEN, method: "POST", body: {} });
+          expect(reload.status).toBe(200);
+          expect(reloads).toBe(2);
+
+          const bad = await req(gui.port, "/api/mcp/save", {
+            token: TOKEN,
+            method: "POST",
+            body: { name: "bad name", scope: "global", config: { command: "x" } },
+          });
+          expect(bad.status).toBe(400);
+          expect(reloads).toBe(2);
+
+          const del = await req(gui.port, "/api/mcp/delete", {
+            token: TOKEN,
+            method: "POST",
+            body: { name: "fs", scope: "global" },
+          });
+          expect(del.status).toBe(200);
+          expect(del.json.servers).toEqual([]);
+          expect(reloads).toBe(3);
+
+          const missing = await req(gui.port, "/api/mcp/delete", {
+            token: TOKEN,
+            method: "POST",
+            body: { name: "fs", scope: "global" },
+          });
+          expect(missing.status).toBe(404);
+        },
+        { cwd },
+        { home, reloadMcp },
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("adds and removes permission rules through the API", async () => {
+    const global: Array<{ match: string; decision: "allow" | "deny" }> = [];
+    const projectRules: Array<{ match: string; decision: "allow" | "deny" }> = [];
+    const permissions = {
+      mode: "default",
+      getRules: () => global,
+      getProjectRules: () => projectRules,
+      addRule: async (scope: "global" | "project", match: string, decision: "allow" | "deny") => {
+        const rule = { match, decision };
+        (scope === "global" ? global : projectRules).push(rule);
+        return rule;
+      },
+      removeRule: async (scope: "global" | "project", index: number) =>
+        (scope === "global" ? global : projectRules).splice(index, 1)[0] ?? null,
+      clearRules: async () => ({ global: 0, project: 0 }),
+      check: async () => true,
+    } as unknown as PermissionManager;
+
+    await withServer(
+      async (gui) => {
+        const addProject = await req(gui.port, "/api/permissions/add", {
+          token: TOKEN,
+          method: "POST",
+          body: { scope: "project", match: "npm *", decision: "allow" },
+        });
+        expect(addProject.status).toBe(200);
+        expect(addProject.json.project).toEqual([{ match: "npm *", decision: "allow" }]);
+
+        const addGlobal = await req(gui.port, "/api/permissions/add", {
+          token: TOKEN,
+          method: "POST",
+          body: { scope: "global", match: "git push", decision: "deny" },
+        });
+        expect(addGlobal.status).toBe(200);
+        expect(addGlobal.json.global).toEqual([{ match: "git push", decision: "deny" }]);
+
+        const list = await req(gui.port, "/api/permissions", { token: TOKEN });
+        expect(list.json).toMatchObject({ mode: "default", global: [{ match: "git push" }], project: [{ match: "npm *" }] });
+
+        const del = await req(gui.port, "/api/permissions/delete", {
+          token: TOKEN,
+          method: "POST",
+          body: { scope: "project", index: 0 },
+        });
+        expect(del.status).toBe(200);
+        expect(del.json.project).toEqual([]);
+
+        const missing = await req(gui.port, "/api/permissions/delete", {
+          token: TOKEN,
+          method: "POST",
+          body: { scope: "project", index: 0 },
+        });
+        expect(missing.status).toBe(404);
+
+        const bad = await req(gui.port, "/api/permissions/add", {
+          token: TOKEN,
+          method: "POST",
+          body: { scope: "nope", match: "x", decision: "allow" },
+        });
+        expect(bad.status).toBe(400);
+      },
+      {},
+      { permissions },
     );
   });
 });

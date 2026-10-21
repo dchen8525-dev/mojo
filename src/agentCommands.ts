@@ -40,6 +40,8 @@ export interface CommandContext {
   cwd: string;
   /** Progress messages (long-running commands like /review and /compact). */
   notify?: (message: string) => void;
+  /** Aborts long-running commands when the host UI stops the command. */
+  signal?: AbortSignal;
 }
 
 /** Names of the built-in commands (for /help listings and the GUI palette). */
@@ -95,7 +97,7 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
         };
       if (rest[0] === "list") {
         try {
-          const ids = await agent.listModels();
+          const ids = await agent.listModels(ctx.signal);
           return {
             kind: "ok",
             text: ids.length ? `endpoint models (${ids.length}):\n${ids.slice(0, 60).join("\n")}` : "endpoint returned no models",
@@ -134,7 +136,7 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
     }
     case "compact": {
       const before = agent.tokenEstimate();
-      const did = await agent.compactNow({ onCompacting: () => notify("… compacting context …") });
+      const did = await agent.compactNow({ onCompacting: () => notify("… compacting context …") }, ctx.signal);
       return {
         kind: "ok",
         text: did
@@ -155,7 +157,7 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       }
       notify(`… reviewing ${target ? `${target}...HEAD` : "uncommitted changes"} …`);
       try {
-        const review = await agent.review(target, focus);
+        const review = await agent.review(target, focus, ctx.signal);
         return { kind: "ok", text: review };
       } catch (err) {
         return { kind: "error", text: `review failed: ${err instanceof Error ? err.message : String(err)}` };
@@ -304,7 +306,7 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       if (!rest[0]) return { kind: "error", text: "usage: /resume <id>" };
       const loaded = await loadSession(rest[0]);
       if (!loaded) return { kind: "error", text: "session not found" };
-      await agent.resetSession(loaded.meta.id, loaded.messages, loaded.meta.model);
+      await agent.resetSession(loaded.meta.id, loaded.messages, loaded.meta.model, loaded.meta.todos);
       if (loaded.meta.model) {
         try {
           const r = agent.switchModel(loaded.meta.model);
