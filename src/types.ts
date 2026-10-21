@@ -15,16 +15,24 @@ export interface ToolResult {
 
 export type Risk = "low" | "medium" | "high";
 
+/** Handle returned by a checkpoint capture, finalized after the write lands. */
+export interface CheckpointHandle {
+  finalize: () => Promise<void>;
+}
+
 export interface ToolContext {
   cwd: string;
+  /** Session that owns this tool call; used to route background-task notifications. */
+  sessionId?: string;
   signal?: AbortSignal;
   /** Ask the user to approve an operation. Returns true if allowed. */
   askPermission: (description: string, risk: Risk, preview?: string) => Promise<boolean>;
   /**
    * Copy the file's current content to the session checkpoint store before it
-   * is modified (enables /undo). Best-effort: must never throw or block.
+   * is modified (enables /undo). Best-effort: must never throw or block. The
+   * returned handle records the post-edit hash when finalize() is called.
    */
-  checkpoint?: (absPath: string, label: string) => Promise<void>;
+  checkpoint?: (absPath: string, label: string) => Promise<CheckpointHandle | void>;
   /** Report LLM token usage incurred by this tool (e.g. subagents) to the session cost tracker. */
   reportUsage?: (usage: { input: number; output: number; cacheRead?: number; cacheWrite?: number }) => void;
   /**

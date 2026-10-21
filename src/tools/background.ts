@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { promises as fs } from "node:fs";
-import { openSync, readFileSync, closeSync } from "node:fs";
+import { openSync, readFileSync, closeSync, statSync, readSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pickWin32Shell } from "./bash.js";
@@ -17,10 +17,15 @@ export interface BackgroundTask {
   command: string;
   logFile: string;
   startedAt: number;
+  /** Session that started the task; completions are delivered back to it. */
+  owner: string;
   child: ChildProcessWithoutNullStreams;
   done: boolean;
+  endedAt: number | null;
   exitCode: number | null;
   killed: boolean;
+  /** True once the completion reminder has been handed to the agent. */
+  delivered: boolean;
   closePromise: Promise<void>;
 }
 
@@ -45,9 +50,10 @@ export function killTree(child: { pid?: number }, isWin: boolean): void {
 
 class BackgroundManager {
   private tasks = new Map<string, BackgroundTask>();
+  private completed: BackgroundTask[] = [];
   private next = 1;
 
-  async start(command: string, cwd: string): Promise<BackgroundTask> {
+  async start(command: string, cwd: string, owner = ""): Promise<BackgroundTask> {
     const id = `bg${this.next++}`;
     const dir = path.join(os.tmpdir(), "node-agent-output");
     await fs.mkdir(dir, { recursive: true });
@@ -66,28 +72,33 @@ class BackgroundManager {
     closeSync(fd); // the child holds its own dup
     child.unref(); // never keep the CLI alive just because a task runs
 
+    let settle!: () => void;
     const task: BackgroundTask = {
       id,
       command,
       logFile,
       startedAt: Date.now(),
+      owner,
       child,
       done: false,
+      endedAt: null,
       exitCode: null,
       killed: false,
+      delivered: false,
       closePromise: new Promise<void>((resolve) => {
-        child.on("close", (code) => {
-          task.done = true;
-          task.exitCode = code;
-          resolve();
-        });
-        child.on("error", () => {
-          task.done = true;
-          task.exitCode = -1;
-          resolve();
-        });
+        settle = resolve;
       }),
     };
+    const finish = (code: number | null) => {
+      if (task.done) return;
+      task.done = true;
+      task.exitCode = code;
+      task.endedAt = Date.now();
+      this.completed.push(task);
+      settle();
+    };
+    child.on("close", (code) => finish(code));
+    child.on("error", () => finish(-1));
     this.tasks.set(id, task);
     return task;
   }
@@ -119,9 +130,46 @@ class BackgroundManager {
     }
   }
 
+  /** Read only the end of a log (completion previews must not load huge files). */
+  readTail(t: BackgroundTask, maxChars = 2_000): string {
+    try {
+      const size = statSync(t.logFile).size;
+      const bytes = Math.min(size, 32_768);
+      if (!bytes) return "";
+      const buf = Buffer.alloc(bytes);
+      const fd = openSync(t.logFile, "r");
+      try {
+        readSync(fd, buf, 0, bytes, size - bytes);
+      } finally {
+        closeSync(fd);
+      }
+      const text = buf.toString("utf8");
+      return text.length > maxChars ? `…${text.slice(-maxChars)}` : text;
+    } catch {
+      return "";
+    }
+  }
+
+  /** Finished background tasks owned by `owner`, each returned once. */
+  drainCompleted(owner: string): BackgroundTask[] {
+    if (!owner) return [];
+    const out = this.completed.filter((t) => t.owner === owner && !t.delivered);
+    for (const t of out) t.delivered = true;
+    if (out.length) this.completed = this.completed.filter((t) => !t.delivered);
+    return out;
+  }
+
   /** Kill everything still running (used by tests / shutdown). */
   killAll(): void {
     for (const t of this.tasks.values()) if (!t.done) this.kill(t.id);
+  }
+
+  /** Clear all state; test isolation helper. */
+  reset(): void {
+    this.killAll();
+    this.tasks.clear();
+    this.completed = [];
+    this.next = 1;
   }
 }
 

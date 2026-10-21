@@ -189,7 +189,7 @@ export const bashTool: Tool = {
 
     if (bool(input, "run_in_background")) {
       try {
-        const task = await backgroundManager.start(command, workdir);
+        const task = await backgroundManager.start(command, workdir, ctx.sessionId);
         return {
           content:
             `Started background task ${task.id} (pid ${task.child.pid ?? "?"}). ` +

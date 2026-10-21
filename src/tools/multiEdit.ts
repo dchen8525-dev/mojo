@@ -147,8 +147,9 @@ export const multiEditTool: Tool = {
       const failed: string[] = [];
       for (const h of hits) {
         try {
-          await ctx.checkpoint?.(h.abs, "multi_edit");
+          const checkpoint = await ctx.checkpoint?.(h.abs, "multi_edit");
           await fs.writeFile(h.abs, h.updated, "utf8");
+          await checkpoint?.finalize?.();
           await ctx.fileState?.recordCurrent(h.abs);
           written.push(relPath(ctx.cwd, h.abs));
         } catch (err) {

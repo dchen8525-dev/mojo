@@ -1,4 +1,5 @@
-import { promises as fs } from "node:fs";
+import { promises as fs, createReadStream } from "node:fs";
+import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
@@ -20,6 +21,18 @@ export interface CheckpointEntry {
   label: string; // which tool captured it: "write_file" | "edit_file"
   ts: string; // ISO timestamp
   restored: boolean;
+  /** SHA-256 of the agent's post-edit content; absent for legacy checkpoints. */
+  postHash?: string;
+  /** Whether the file existed after the agent's write (false if it vanished). */
+  postExisted?: boolean;
+}
+
+export interface UndoResult {
+  file: string;
+  action: string;
+  /** True when the file no longer matches what the agent wrote, so undo was refused. */
+  conflict?: boolean;
+  reason?: string;
 }
 
 export const MAX_CHECKPOINTS = 50;
@@ -98,13 +111,62 @@ export class CheckpointStore {
   }
 
   /**
-   * Restore the newest not-yet-undone checkpoint. Returns a human-readable
-   * description, or null when there is nothing to undo.
+   * Record the file's state after the agent's write landed. Best-effort: a
+   * failed stat/hash leaves the entry as a legacy checkpoint (undo allowed).
    */
-  async undoLast(): Promise<{ file: string; action: string } | null> {
+  async finalize(entry: CheckpointEntry): Promise<void> {
+    await this.load();
+    const stored = this.entries.find((e) => e.id === entry.id);
+    if (!stored) return;
+    try {
+      const stat = await fs.stat(stored.file);
+      if (!stat.isFile()) return;
+      stored.postHash = await hashFile(stored.file);
+      stored.postExisted = true;
+      await this.save();
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        stored.postExisted = false;
+        delete stored.postHash;
+        await this.save();
+      }
+    }
+  }
+
+  /**
+   * Restore the newest not-yet-undone checkpoint. Returns a human-readable
+   * description, or null when there is nothing to undo. Refuses when the file
+   * no longer matches the agent's post-edit content unless `force` is set, so
+   * an undo can never silently clobber the user's own later edit.
+   */
+  async undoLast(opts: { force?: boolean } = {}): Promise<UndoResult | null> {
     await this.load();
     const entry = [...this.entries].reverse().find((e) => !e.restored);
     if (!entry) return null;
+
+    if (!opts.force && entry.postHash !== undefined) {
+      const current = await hashFileIfExists(entry.file);
+      if (entry.postExisted === false) {
+        if (current !== null) {
+          return {
+            file: entry.file,
+            action: "refused",
+            conflict: true,
+            reason: "the file was re-created or changed after the agent removed it",
+          };
+        }
+      } else if (current !== entry.postHash) {
+        return {
+          file: entry.file,
+          action: "refused",
+          conflict: true,
+          reason: current === null
+            ? "the file was deleted or moved after the agent's edit"
+            : "the file was modified after the agent's edit",
+        };
+      }
+    }
+
     if (entry.existed) {
       if (!entry.snapshot) throw new Error(`snapshot file is missing for checkpoint ${entry.id}`);
       await fs.mkdir(path.dirname(entry.file), { recursive: true });
@@ -118,5 +180,24 @@ export class CheckpointStore {
     entry.restored = true;
     await this.save();
     return { file: entry.file, action: "deleted (file was created by the agent)" };
+  }
+}
+
+async function hashFile(file: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash("sha256");
+    const stream = createReadStream(file);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
+/** Hash the current file, or null when it is missing/unreadable. */
+async function hashFileIfExists(file: string): Promise<string | null> {
+  try {
+    return await hashFile(file);
+  } catch {
+    return null;
   }
 }

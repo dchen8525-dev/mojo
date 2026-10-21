@@ -44,9 +44,10 @@ export const writeFileTool: Tool = {
       );
       if (!ok) return { content: "The user rejected this edit. Ask before trying again.", isError: true };
 
-      await ctx.checkpoint?.(abs, "write_file");
+      const checkpoint = await ctx.checkpoint?.(abs, "write_file");
       await fs.mkdir(path.dirname(abs), { recursive: true });
       await fs.writeFile(abs, content, "utf8");
+      await checkpoint?.finalize?.();
       await ctx.fileState?.recordCurrent(abs);
       const hint = await diagnosticsHint(ctx.cwd, abs, content);
       return { content: `${existed ? "Wrote" : "Created"} ${relPath(ctx.cwd, abs)} (${content.length} chars)${hint}` };
@@ -136,8 +137,9 @@ export const editFileTool: Tool = {
       );
       if (!ok) return { content: "The user rejected this edit. Ask before trying again.", isError: true };
 
-      await ctx.checkpoint?.(abs, "edit_file");
+      const checkpoint = await ctx.checkpoint?.(abs, "edit_file");
       await fs.writeFile(abs, updated, "utf8");
+      await checkpoint?.finalize?.();
       await ctx.fileState?.recordCurrent(abs);
       const hint = await diagnosticsHint(ctx.cwd, abs, updated);
       return {

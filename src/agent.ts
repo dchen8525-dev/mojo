@@ -10,6 +10,7 @@ import type { SystemPrompt } from "./llm/types.js";
 import { getTool, tools, todoStore, isExposed } from "./tools/index.js";
 import { planWaves, runWave } from "./scheduler.js";
 import { systemReminder } from "./reminder.js";
+import { backgroundManager } from "./tools/background.js";
 import { subagentTasks } from "./taskRegistry.js";
 import { exitPlanTool } from "./tools/exitPlan.js";
 import type { PermissionManager } from "./permissions.js";
@@ -122,7 +123,7 @@ export class Agent {
     return true;
   }
 
-  /** Deliver finished background subagent reports as a system-reminder user message. */
+  /** Deliver finished background tasks as system-reminder user messages. */
   private drainBackgroundTasks(): void {
     for (const t of subagentTasks.drainCompleted()) {
       const head =
@@ -131,6 +132,20 @@ export class Agent {
         t.status === "failed"
           ? `Background task ${t.id} ("${t.description}") FAILED: ${t.report}`
           : `Background task ${t.id} ("${t.description}") finished:\n\n${head}`;
+      this.messages.push({ role: "user", content: systemReminder(body, { event: "BackgroundTaskComplete" }) });
+    }
+    for (const t of backgroundManager.drainCompleted(this.sessionId)) {
+      const tail = backgroundManager.readTail(t, 2_000).trim();
+      const status = t.killed
+        ? "was killed"
+        : `exited with code ${t.exitCode ?? "?"}`;
+      const seconds = Math.max(0, Math.round(((t.endedAt ?? Date.now()) - t.startedAt) / 1000));
+      const command = t.command.length > 200 ? `${t.command.slice(0, 200)}…` : t.command;
+      const body =
+        `Background shell task ${t.id} ${status} after ${seconds}s: \`${command}\`\n` +
+        `Full log: ${t.logFile}\n` +
+        (tail ? `Last output:\n${tail}\n` : "(no output)\n") +
+        `Use bash_output {id: "${t.id}"} to read from a byte offset.`;
       this.messages.push({ role: "user", content: systemReminder(body, { event: "BackgroundTaskComplete" }) });
     }
   }
@@ -648,9 +663,13 @@ Rules:
     try {
       const result = await tool.execute(tu.input as Record<string, unknown>, {
         cwd: this.cwd,
+        sessionId: this.sessionId,
         signal,
         askPermission: (desc, risk, preview) => this.permissions.check(desc, risk, tool.isReadOnly, preview),
-        checkpoint: (absPath, label) => this.checkpoints.capture(absPath, label).then(() => undefined),
+        checkpoint: async (absPath, label) => {
+          const entry = await this.checkpoints.capture(absPath, label);
+          return entry ? { finalize: () => this.checkpoints.finalize(entry) } : undefined;
+        },
         reportUsage: (usage) => this.costs.record(`${this.llm.provider}:${this.llm.model}`, usage),
         onSubTool: (n, p, ok, r, round) => events?.onSubTool?.(tu.id, n, p, ok, r, round),
         planMode: this.planMode,
@@ -696,8 +715,8 @@ Rules:
     return this.checkpoints.list();
   }
   /** Roll back the most recent not-yet-undone file modification. */
-  undoLastCheckpoint() {
-    return this.checkpoints.undoLast();
+  undoLastCheckpoint(force = false) {
+    return this.checkpoints.undoLast({ force });
   }
 
   /** Create the session file lazily, the first time this agent actually runs a turn. */
