@@ -99,6 +99,59 @@ describe("LLM retry and stream resume", () => {
     expect(h.calls).toHaveLength(2);
   });
 
+  it("retries a request timeout and a gateway timeout", async () => {
+    setScript(
+      () => { throw Object.assign(new Error("timed out"), { name: "APIConnectionTimeoutError" }); },
+      () => { throw httpError(504); },
+      () => turn("ok"),
+    );
+    const p = makeLLM().send(messages, "S", []);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(3000);
+    await expect(p).resolves.toMatchObject({ text: "ok" });
+    expect(h.calls).toHaveLength(3);
+  });
+
+  it("retries a 408 request timeout", async () => {
+    setScript(
+      () => { throw httpError(408); },
+      () => turn("ok"),
+    );
+    const p = makeLLM().send(messages, "S", []);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect(p).resolves.toMatchObject({ text: "ok" });
+  });
+
+  it("accepts an HTTP-date Retry-After", async () => {
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    const when = new Date(Date.now() + 4000).toUTCString();
+    setScript(
+      () => { throw httpError(429, when); },
+      () => turn("ok"),
+    );
+    const p = makeLLM().send(messages, "S", []);
+
+    await vi.advanceTimersByTimeAsync(3999);
+    expect(h.calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(p).resolves.toMatchObject({ text: "ok" });
+  });
+
+  it("caps Retry-After at 30 seconds", async () => {
+    setScript(
+      () => { throw httpError(429, "60"); },
+      () => turn("ok"),
+    );
+    const p = makeLLM().send(messages, "S", []);
+
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(h.calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(p).resolves.toMatchObject({ text: "ok" });
+  });
+
   it("backs off for connection failures", async () => {
     setScript(
       () => { throw connectionError(); },

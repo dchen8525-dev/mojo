@@ -457,12 +457,14 @@ export class LLM {
           (typeof status === "number" && status >= 500 && status < 600) ||
           (status === undefined && LLM.isConnectionError(err));
         if (!retriable) throw err;
-        // Respect server-provided Retry-After when present (seconds), else backoff.
+        // Respect server-provided Retry-After when present, else back off.
         let wait = delays[attempt];
         const ra = e.headers?.get?.("retry-after");
         if (ra) {
           const secs = Number(ra);
-          if (Number.isFinite(secs) && secs >= 0) wait = Math.min(secs * 1000, 30_000);
+          // The header is either delta-seconds or an HTTP date.
+          const ms = Number.isFinite(secs) ? secs * 1000 : Date.parse(ra) - Date.now();
+          if (Number.isFinite(ms) && ms >= 0) wait = Math.min(ms, 30_000);
         }
         await LLM.abortableSleep(wait, signal);
         if (signal?.aborted) throw err;
