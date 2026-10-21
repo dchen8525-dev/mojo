@@ -53,6 +53,14 @@ export class StreamInterrupted extends Error {
   }
 }
 
+/** Thrown when the provider stops sending stream events for too long. */
+export class StreamIdleError extends Error {
+  constructor(idleMs: number) {
+    super(`stream idle for ${Math.round(idleMs / 1000)}s`);
+    this.name = "StreamIdleError";
+  }
+}
+
 export type Provider = "anthropic" | "openai";
 
 export interface LLMBackend {
@@ -64,6 +72,8 @@ export interface LLMBackend {
     tools: Tool[],
     signal?: AbortSignal,
     events?: StreamEvents,
+    /** Abort the request when no stream event arrives for this long (0 = off). */
+    idleMs?: number,
   ): Promise<AssistantTurn>;
   /** Model ids available on this endpoint (best-effort; may throw). */
   listModels?(signal?: AbortSignal): Promise<string[]>;

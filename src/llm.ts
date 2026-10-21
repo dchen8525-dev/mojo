@@ -236,17 +236,17 @@ export class LLM {
 
   /** Retry transient API failures (408 / 429 / 5xx / connection) with backoff. */
   private static async withRetry<T>(
-    fn: () => Promise<T>,
+    fn: (attempt: number) => Promise<T>,
     signal?: AbortSignal,
     events?: StreamEvents,
   ): Promise<T> {
-    const delays = [1000, 3000, 7000];
+    const cfg = LLM.retryConfig();
     let attempt = 0;
     for (;;) {
       try {
-        return await fn();
+        return await fn(attempt);
       } catch (err) {
-        if (signal?.aborted || attempt >= delays.length) throw err;
+        if (signal?.aborted || attempt >= cfg.maxAttempts) throw err;
         if (err instanceof StreamInterrupted) throw err; // owned by the resume loop above
         if ((err as { name?: string }).name === "APIUserAbortError") throw err;
         const e = err as { status?: number; headers?: { get?: (k: string) => string | null } };
@@ -257,8 +257,12 @@ export class LLM {
           (typeof status === "number" && status >= 500 && status < 600) ||
           (status === undefined && LLM.isConnectionError(err));
         if (!retriable) throw err;
-        // Respect server-provided Retry-After when present, else back off.
-        let wait = delays[attempt];
+        // Respect server-provided Retry-After when present, else back off
+        // exponentially (1s -> 2s -> 4s ...) with a little jitter so clients
+        // that fail together do not retry in lockstep.
+        let wait = Math.round(
+          Math.min(cfg.baseMs * 2 ** attempt, cfg.maxDelayMs) * (1 + (Math.random() * 2 - 1) * cfg.jitter),
+        );
         const ra = e.headers?.get?.("retry-after");
         if (ra) {
           const secs = Number(ra);
@@ -267,10 +271,16 @@ export class LLM {
           if (Number.isFinite(ms) && ms >= 0) wait = Math.min(ms, 30_000);
         }
         const reason: RetryReason =
-          status === 429 ? "rate-limit" : status === 408 ? "timeout" : status !== undefined ? "server" : "connection";
+          status === 429
+            ? "rate-limit"
+            : status === 408 || (err as { name?: string }).name === "StreamIdleError"
+              ? "timeout"
+              : status !== undefined
+                ? "server"
+                : "connection";
         events?.onRetry?.({
           attempt: attempt + 1,
-          maxAttempts: delays.length,
+          maxAttempts: cfg.maxAttempts,
           delayMs: wait,
           ...(status !== undefined ? { status } : {}),
           reason,
@@ -280,6 +290,31 @@ export class LLM {
         attempt++;
       }
     }
+  }
+
+  /**
+   * Backoff knobs, re-read per retry so tests and users can tune via env:
+   * AGENT_RETRY_BASE_MS (1s), AGENT_RETRY_MAX_ATTEMPTS (3),
+   * AGENT_RETRY_MAX_DELAY_MS (60s), AGENT_RETRY_JITTER (0.25, 0 disables).
+   */
+  private static retryConfig() {
+    const num = (raw: string | undefined, fallback: number) => {
+      const n = Number(raw);
+      return Number.isFinite(n) && n >= 0 ? n : fallback;
+    };
+    const env = process.env;
+    return {
+      baseMs: num(env.AGENT_RETRY_BASE_MS, 1000),
+      maxAttempts: num(env.AGENT_RETRY_MAX_ATTEMPTS, 3),
+      maxDelayMs: num(env.AGENT_RETRY_MAX_DELAY_MS, 60_000),
+      jitter: num(env.AGENT_RETRY_JITTER, 0.25),
+    };
+  }
+
+  /** Abort a stream that stops sending events (AGENT_STREAM_IDLE_MS, 0 = off). */
+  private static streamIdleMs(): number {
+    const n = Number(process.env.AGENT_STREAM_IDLE_MS);
+    return Number.isFinite(n) && n >= 0 ? n : 60_000;
   }
 
   /** SDKs wrap fetch failures in APIConnectionError; raw fetch throws TypeError. */
@@ -293,6 +328,7 @@ export class LLM {
     return (
       name === "APIConnectionError" ||
       name === "APIConnectionTimeoutError" ||
+      name === "StreamIdleError" ||
       (err instanceof TypeError && /fetch failed|network|terminat/i.test(err.message))
     );
   }
@@ -354,7 +390,17 @@ export class LLM {
         // suffix once the overlap can be computed, so nothing is duplicated.
         const attemptEvents = partial && events ? { ...events, onTextDelta: () => {} } : events;
         const turn = await LLM.withRetry(
-          () => this.backend.send(resumedMessages, system, tools, signal, attemptEvents),
+          (retryAttempt) =>
+            // A stalled stream gets an increasingly generous idle budget:
+            // a slow provider on a slow day should not be killed twice.
+            this.backend.send(
+              resumedMessages,
+              system,
+              tools,
+              signal,
+              attemptEvents,
+              LLM.streamIdleMs() + 30_000 * retryAttempt,
+            ),
           signal,
           events,
         );

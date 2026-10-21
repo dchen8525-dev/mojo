@@ -4,6 +4,7 @@ import { toAnthropicTool } from "../types.js";
 import type { AssistantTurn, LLMBackend, Provider, StreamEvents } from "./types.js";
 import { StreamInterrupted } from "./types.js";
 import { lookupModel } from "./models.js";
+import { withIdleTimeout } from "./idle.js";
 
 const CACHE_CONTROL = { type: "ephemeral" as const };
 
@@ -51,7 +52,15 @@ export class AnthropicBackend implements LLMBackend {
     tools: Tool[],
     signal?: AbortSignal,
     events?: StreamEvents,
+    idleMs = 0,
   ): Promise<AssistantTurn> {
+    // Own the request's lifetime so the idle watchdog can kill it; the outer
+    // signal (user abort) must still reach it.
+    const ac = new AbortController();
+    const onOuterAbort = () => ac.abort();
+    if (signal?.aborted) ac.abort();
+    else signal?.addEventListener("abort", onOuterAbort, { once: true });
+
     const stream = this.client.messages.stream(
       {
         model: this.model,
@@ -66,7 +75,7 @@ export class AnthropicBackend implements LLMBackend {
           ? { thinking: { type: "enabled" as const, budget_tokens: 4096 } }
           : {}),
       },
-      { signal },
+      { signal: ac.signal },
     );
 
     let text = "";
@@ -77,7 +86,7 @@ export class AnthropicBackend implements LLMBackend {
     let toolStarted = false;
 
     try {
-      for await (const event of stream) {
+      for await (const event of withIdleTimeout(stream, idleMs, () => ac.abort())) {
         if (event.type === "content_block_start" && event.content_block.type === "tool_use") {
           toolStarted = true;
           events?.onToolUseStart?.(event.content_block.name, event.content_block.id);
@@ -106,6 +115,8 @@ export class AnthropicBackend implements LLMBackend {
         throw new StreamInterrupted(text, err);
       }
       throw err;
+    } finally {
+      signal?.removeEventListener("abort", onOuterAbort);
     }
 
     const final = await stream.finalMessage();

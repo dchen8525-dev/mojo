@@ -3,6 +3,7 @@ import type { MessageParam, ContentBlock, ToolUseBlock, Tool } from "../types.js
 import type { AssistantTurn, LLMBackend, Provider, StreamEvents } from "./types.js";
 import { StreamInterrupted } from "./types.js";
 import { lookupModel } from "./models.js";
+import { withIdleTimeout } from "./idle.js";
 
 type ChatMsg =
   | { role: "system"; content: string }
@@ -94,7 +95,15 @@ export class OpenAiBackend implements LLMBackend {
     tools: Tool[],
     signal?: AbortSignal,
     events?: StreamEvents,
+    idleMs = 0,
   ): Promise<AssistantTurn> {
+    // Own the request's lifetime so the idle watchdog can kill it; the outer
+    // signal (user abort) must still reach it.
+    const ac = new AbortController();
+    const onOuterAbort = () => ac.abort();
+    if (signal?.aborted) ac.abort();
+    else signal?.addEventListener("abort", onOuterAbort, { once: true });
+
     const chatMessages: ChatMsg[] = [{ role: "system", content: system }, ...toOpenAiMessages(messages)];
     const info = lookupModel(this.model);
 
@@ -112,7 +121,7 @@ export class OpenAiBackend implements LLMBackend {
 
     const stream = await this.client.chat.completions.create(
       params as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming,
-      { signal },
+      { signal: ac.signal },
     );
 
     let text = "";
@@ -123,7 +132,7 @@ export class OpenAiBackend implements LLMBackend {
     const toolCalls = new Map<number, PartialToolCall>();
 
     try {
-      for await (const chunk of stream) {
+      for await (const chunk of withIdleTimeout(stream, idleMs, () => ac.abort())) {
         const delta = chunk.choices[0]?.delta;
         if (delta?.content) {
           text += delta.content;
@@ -163,6 +172,8 @@ export class OpenAiBackend implements LLMBackend {
         throw new StreamInterrupted(text, err);
       }
       throw err;
+    } finally {
+      signal?.removeEventListener("abort", onOuterAbort);
     }
 
     // Synthesize ids for providers that omit them in deltas.

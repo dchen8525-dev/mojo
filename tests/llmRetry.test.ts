@@ -91,11 +91,16 @@ function sdkConnectionError() {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  // Deterministic backoff: jitter would randomize the waits these tests assert.
+  process.env.AGENT_RETRY_JITTER = "0";
   h.calls.length = 0;
   h.script.length = 0;
 });
 
 afterEach(() => {
+  delete process.env.AGENT_RETRY_JITTER;
+  delete process.env.AGENT_RETRY_BASE_MS;
+  delete process.env.AGENT_RETRY_MAX_ATTEMPTS;
   vi.useRealTimers();
 });
 
@@ -123,7 +128,7 @@ describe("LLM retry and stream resume", () => {
     const p = makeLLM().send(messages, "S", []);
 
     await vi.advanceTimersByTimeAsync(1000);
-    await vi.advanceTimersByTimeAsync(3000);
+    await vi.advanceTimersByTimeAsync(2000);
     await expect(p).resolves.toMatchObject({ text: "ok" });
     expect(h.calls).toHaveLength(3);
   });
@@ -229,6 +234,69 @@ describe("LLM retry and stream resume", () => {
     await vi.advanceTimersByTimeAsync(11_000);
     await expect(p).resolves.toMatchObject({ status: 503 });
     expect(h.calls).toHaveLength(4);
+  });
+
+  it("backs off exponentially: 1s, 2s, 4s", async () => {
+    setScript(
+      () => { throw httpError(503); },
+      () => { throw httpError(503); },
+      () => { throw httpError(503); },
+      () => turn("ok"),
+    );
+    const seen: RetryInfo[] = [];
+    const p = makeLLM().send(messages, "S", [], undefined, { onRetry: (info) => seen.push(info) });
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(h.calls).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(h.calls).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(4000);
+    await expect(p).resolves.toMatchObject({ text: "ok" });
+    expect(seen.map((r) => r.delayMs)).toEqual([1000, 2000, 4000]);
+  });
+
+  it("caps the backoff at AGENT_RETRY_MAX_DELAY_MS", async () => {
+    process.env.AGENT_RETRY_BASE_MS = "30000";
+    process.env.AGENT_RETRY_MAX_DELAY_MS = "45000";
+    setScript(
+      () => { throw httpError(503); },
+      () => { throw httpError(503); },
+      () => turn("ok"),
+    );
+    const seen: RetryInfo[] = [];
+    const p = makeLLM().send(messages, "S", [], undefined, { onRetry: (info) => seen.push(info) });
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(45_000);
+    await expect(p).resolves.toMatchObject({ text: "ok" });
+    // 30s * 2 = 60s would exceed the cap, so the second wait is clamped.
+    expect(seen.map((r) => r.delayMs)).toEqual([30_000, 45_000]);
+  });
+
+  it("takes AGENT_RETRY_MAX_ATTEMPTS into account", async () => {
+    process.env.AGENT_RETRY_MAX_ATTEMPTS = "1";
+    setScript(
+      () => { throw httpError(503); },
+      () => { throw httpError(503); },
+    );
+    const p = makeLLM().send(messages, "S", []).catch((err: unknown) => err);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    await expect(p).resolves.toMatchObject({ status: 503 });
+    expect(h.calls).toHaveLength(2);
+  });
+
+  it("retries a stalled stream and labels it a timeout", async () => {
+    setScript(
+      () => { throw Object.assign(new Error("stream idle for 60s"), { name: "StreamIdleError" }); },
+      () => turn("ok"),
+    );
+    const seen: RetryInfo[] = [];
+    const p = makeLLM().send(messages, "S", [], undefined, { onRetry: (info) => seen.push(info) });
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect(p).resolves.toMatchObject({ text: "ok" });
+    expect(seen).toEqual([{ attempt: 1, maxAttempts: 3, delayMs: 1000, reason: "timeout" }]);
   });
 
   it("does not retry client errors", async () => {
