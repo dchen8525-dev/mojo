@@ -438,7 +438,7 @@ export class LLM {
     return this.backend.listModels(signal);
   }
 
-  /** Retry transient API failures (429 / 5xx / network) with backoff. */
+  /** Retry transient API failures (408 / 429 / 5xx / connection) with backoff. */
   private static async withRetry<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     const delays = [1000, 3000, 7000];
     let attempt = 0;
@@ -452,7 +452,10 @@ export class LLM {
         const e = err as { status?: number; headers?: { get?: (k: string) => string | null } };
         const status = e.status;
         const retriable =
-          status === undefined || status === 429 || status === 500 || status === 502 || status === 503 || status === 529;
+          status === 408 ||
+          status === 429 ||
+          (typeof status === "number" && status >= 500 && status < 600) ||
+          (status === undefined && LLM.isConnectionError(err));
         if (!retriable) throw err;
         // Respect server-provided Retry-After when present (seconds), else backoff.
         let wait = delays[attempt];
@@ -461,10 +464,37 @@ export class LLM {
           const secs = Number(ra);
           if (Number.isFinite(secs) && secs >= 0) wait = Math.min(secs * 1000, 30_000);
         }
-        await new Promise((res) => setTimeout(res, wait));
+        await LLM.abortableSleep(wait, signal);
+        if (signal?.aborted) throw err;
         attempt++;
       }
     }
+  }
+
+  /** SDKs wrap fetch failures in APIConnectionError; raw fetch throws TypeError. */
+  private static isConnectionError(err: unknown): boolean {
+    const name = (err as { name?: string } | null)?.name;
+    return (
+      name === "APIConnectionError" ||
+      name === "APIConnectionTimeoutError" ||
+      (err instanceof TypeError && /fetch failed|network|terminat/i.test(err.message))
+    );
+  }
+
+  /** Wake immediately on abort instead of finishing a multi-second backoff. */
+  private static abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.resolve();
+    return new Promise((resolve) => {
+      const onAbort = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
   }
 
   /**
