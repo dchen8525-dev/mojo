@@ -5,11 +5,35 @@ import type { AssistantTurn, LLMBackend, Provider, StreamEvents } from "./types.
 import { StreamInterrupted } from "./types.js";
 import { lookupModel } from "./models.js";
 
+const CACHE_CONTROL = { type: "ephemeral" as const };
+
+/** Mark the last block so the whole prefix up to it is cached. */
+function cacheLastBlock<T extends { cache_control?: unknown }>(blocks: T[]): T[] {
+  if (!blocks.length) return blocks;
+  return [...blocks.slice(0, -1), { ...blocks[blocks.length - 1], cache_control: CACHE_CONTROL }];
+}
+
+function cachedTools(tools: Tool[]): Anthropic.Messages.Tool[] {
+  return cacheLastBlock(tools.map(toAnthropicTool));
+}
+
+function cachedMessages(messages: MessageParam[]): MessageParam[] {
+  if (!messages.length) return messages;
+  const last = messages[messages.length - 1];
+  const content = (
+    typeof last.content === "string" ? [{ type: "text" as const, text: last.content }] : last.content
+  ) as Array<{ cache_control?: unknown }>;
+  const marked = cacheLastBlock(content);
+  return [
+    ...messages.slice(0, -1),
+    { ...last, content: marked as MessageParam["content"] },
+  ] as MessageParam[];
+}
+
 export class AnthropicBackend implements LLMBackend {
   readonly provider: Provider = "anthropic";
   private client: Anthropic;
   model: string;
-
   constructor(opts: { apiKey?: string; model?: string; baseURL?: string }) {
     this.client = new Anthropic({
       apiKey: opts.apiKey ?? process.env.ANTHROPIC_API_KEY,
@@ -32,9 +56,9 @@ export class AnthropicBackend implements LLMBackend {
       {
         model: this.model,
         max_tokens: lookupModel(this.model).maxOutput,
-        system,
-        messages,
-        tools: tools.map(toAnthropicTool),
+        system: [{ type: "text" as const, text: system, cache_control: CACHE_CONTROL }],
+        messages: cachedMessages(messages),
+        tools: cachedTools(tools),
       },
       { signal },
     );
