@@ -68,7 +68,7 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       return {
         kind: "ok",
         text: [
-          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks · /sessions [--cwd <dir>] [--title <词>] [--tag <tag>] [N] · /search [-r] <term> · /resume <id> · /fork [N] [名称] · /rename <名称> · /tag [+<tag> | -<tag> | clear] · /export [md|json] [路径] · /todos · /undo [-y] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
+          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks [trust|revoke] · /sessions [--cwd <dir>] [--title <词>] [--tag <tag>] [N] · /search [-r] <term> · /resume <id> · /fork [N] [名称] · /rename <名称> · /tag [+<tag> | -<tag> | clear] · /export [md|json] [路径] · /todos · /undo [-y] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
           "file refs: @path/to/file inlines the file; Ctrl+V pastes a clipboard image",
           custom ? `custom commands: ${custom}` : "",
         ]
@@ -77,13 +77,30 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       };
     }
     case "hooks": {
+      if (rest[0] === "trust") {
+        const n = await hooks.trustProjectHooks(cwd);
+        if (n === 0) return { kind: "error", text: `no project hooks file at ${path.join(cwd, ".node-agent", "hooks.json")}` };
+        return { kind: "ok", text: `trusted project hooks for this workspace — ${n} hook(s) active (re-approval is required after the file changes)` };
+      }
+      if (rest[0] === "revoke") {
+        const removed = await hooks.revokeProjectHooks(cwd);
+        return {
+          kind: "ok",
+          text: removed ? "revoked hook trust for this workspace; project hooks will not run" : "this workspace has no hook trust to revoke",
+        };
+      }
       const list = hooks.list();
-      return {
-        kind: "ok",
-        text: list.length
-          ? list.map((h) => `${h.event}  [${h.matcher}]  ${h.command}`).join("\n")
-          : "no hooks configured (~/.node-agent/hooks.json, .node-agent/hooks.json)",
-      };
+      const untrusted = hooks.untrustedProjectHooks();
+      const lines = list.length
+        ? list.map((h) => `${h.event}  [${h.matcher}]  ${h.command}`)
+        : ["no hooks configured (~/.node-agent/hooks.json, .node-agent/hooks.json)"];
+      if (untrusted) {
+        lines.push(
+          `⚠ project hooks NOT loaded (untrusted): ${untrusted.file}`,
+          `  review the file, then run /hooks trust to approve this exact version (/hooks revoke to undo)`,
+        );
+      }
+      return { kind: "ok", text: lines.join("\n") };
     }
     case "model": {
       if (!rest[0])

@@ -164,6 +164,8 @@ async function buildProject(cwd: string, opts: BuildOptions): Promise<ProjectCon
   // ---- hooks + custom commands ----
   const hooks = new HookManager();
   await hooks.load(cwd);
+  const untrustedHooks = hooks.untrustedProjectHooks();
+  if (untrustedHooks) console.error(`hooks: project hooks not loaded (untrusted): ${untrustedHooks.file} — run /hooks trust`);
   const customCommands: Map<string, SlashCommand> = await loadSlashCommands(cwd);
 
   // ---- agent ----

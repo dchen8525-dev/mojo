@@ -113,6 +113,11 @@ async function setupLsp(args: { noLsp: boolean }, cwd: string) {
   configureLsp(cwd, { enabled: true, servers: await loadLspConfig(cwd) });
 }
 
+function warnUntrustedHooks(hooks: HookManager) {
+  const u = hooks.untrustedProjectHooks();
+  if (u) console.error(ANSI.warn(`⚠ project hooks not loaded (untrusted): ${u.file} — run /hooks trust to approve`));
+}
+
 /* ---------------- plain-text mode (-p) ---------------- */
 
 async function runPrint(args: ReturnType<typeof parseArgs>) {
@@ -141,6 +146,7 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
 
   const hooks = new HookManager();
   await hooks.load(session.cwd);
+  warnUntrustedHooks(hooks);
 
   const agent = new Agent(session.cwd, session.id, permissions, session.messages, session.model, hooks);
   restoreSessionModel(agent, session.model, args);
@@ -233,6 +239,7 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
 
   const hooks = new HookManager();
   await hooks.load(session.cwd);
+  warnUntrustedHooks(hooks);
   const customCommands = await loadSlashCommands(session.cwd);
 
   const agent = new Agent(session.cwd, session.id, permissions, session.messages, session.model, hooks);

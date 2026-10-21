@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { HookManager } from "../src/hooks.js";
+import { HookManager, hookFileDigest, isHooksTrusted } from "../src/hooks.js";
 
 let dir: string;
 const script = (name: string, body: string) => path.join(dir, name).replaceAll("\\", "/");
@@ -30,6 +30,96 @@ function manager(defs: Array<string | { matcher?: string; command: string; timeo
 }
 
 const payload = { cwd: process.cwd(), session_id: "test" };
+
+describe("workspace hook trust", () => {
+  const project = (cmd: string) => JSON.stringify({ PreToolUse: [{ command: cmd }] }, null, 2);
+
+  async function workspace() {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-hooktrust-"));
+    const home = path.join(root, "home");
+    const cwd = path.join(root, "proj");
+    await fs.mkdir(home, { recursive: true });
+    await fs.mkdir(path.join(cwd, ".node-agent"), { recursive: true });
+    await fs.writeFile(path.join(cwd, ".node-agent", "hooks.json"), project(`node "${script("blocker.js")}"`), "utf8");
+    return { root, home, cwd };
+  }
+
+  it("does not load project hooks until the workspace trusts them", async () => {
+    const { root, home, cwd } = await workspace();
+    try {
+      const hm = new HookManager();
+      expect(await hm.load(cwd, home)).toBe(0);
+      expect(hm.untrustedProjectHooks()).not.toBeNull();
+      expect(hm.list()).toEqual([]);
+      // Untrusted hooks never run.
+      const r = await hm.run("PreToolUse", { cwd }, "bash");
+      expect(r.blocked).toBe(false);
+
+      const digest = (await hookFileDigest(path.join(cwd, ".node-agent", "hooks.json")))!;
+      await hm.trustProjectHooks(cwd, home);
+      expect(await isHooksTrusted(cwd, digest, home)).toBe(true);
+      expect(hm.untrustedProjectHooks()).toBeNull();
+      expect(hm.list()).toHaveLength(1);
+      expect((await hm.run("PreToolUse", { cwd }, "bash")).blocked).toBe(true);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("a trusted workspace starts a fresh manager with the hooks loaded", async () => {
+    const { root, home, cwd } = await workspace();
+    try {
+      await new HookManager().trustProjectHooks(cwd, home);
+      const hm = new HookManager();
+      expect(await hm.load(cwd, home)).toBe(1);
+      expect((await hm.run("PreToolUse", { cwd }, "bash")).blocked).toBe(true);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("editing the hooks file revokes trust (digest pinning)", async () => {
+    const { root, home, cwd } = await workspace();
+    try {
+      const hm = new HookManager();
+      await hm.trustProjectHooks(cwd, home);
+      expect(hm.list()).toHaveLength(1);
+      await fs.writeFile(path.join(cwd, ".node-agent", "hooks.json"), project(`node "${script("context.js")}"`), "utf8");
+      expect(await hm.load(cwd, home)).toBe(0);
+      expect(hm.untrustedProjectHooks()).not.toBeNull();
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("revoke stops project hooks from loading", async () => {
+    const { root, home, cwd } = await workspace();
+    try {
+      const hm = new HookManager();
+      await hm.trustProjectHooks(cwd, home);
+      expect(await hm.revokeProjectHooks(cwd, home)).toBe(true);
+      expect(hm.list()).toEqual([]);
+      expect(hm.untrustedProjectHooks()).not.toBeNull();
+      // Nothing left to revoke.
+      expect(await hm.revokeProjectHooks(cwd, home)).toBe(false);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("global hooks load without trust", async () => {
+    const { root, home, cwd } = await workspace();
+    try {
+      await fs.mkdir(path.join(home, ".node-agent"), { recursive: true });
+      await fs.writeFile(path.join(home, ".node-agent", "hooks.json"), project(`node "${script("context.js")}"`), "utf8");
+      const hm = new HookManager();
+      expect(await hm.load(cwd, home)).toBe(1); // global only; project still untrusted
+      expect(hm.untrustedProjectHooks()).not.toBeNull();
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("HookManager.run", () => {
   it("exit 2 blocks with stderr as the reason", async () => {
