@@ -17,6 +17,8 @@ const h = vi.hoisted(() => ({
   sentTools: [] as string[][],
   sentSystems: [] as string[],
   savedTodos: [] as Array<{ id: string; todos: unknown }>,
+  /** Test hook, invoked at the start of every fake send(). */
+  onSend: null as null | (() => void),
 }));
 
 vi.mock("../src/llm.js", () => ({
@@ -29,6 +31,7 @@ vi.mock("../src/llm.js", () => ({
       return 100_000;
     }
     async send(messages: MessageParam[], system?: string, toolList?: Array<{ name: string }>) {
+      h.onSend?.();
       h.sentMessages.push(structuredClone(messages));
       h.sentTools.push((toolList ?? []).map((t) => t.name));
       h.sentSystems.push(system ?? "");
@@ -166,6 +169,7 @@ beforeEach(() => {
   h.sentMessages = [];
   h.sentTools = [];
   h.sentSystems = [];
+  h.onSend = null;
   toolEvents.length = 0;
 });
 
@@ -550,5 +554,52 @@ describe("todo list lifecycle", () => {
     await agent.fork(2);
     expect(agent.sessionId).toBe("fork0000");
     expect(agent.currentTodos()).toEqual(items);
+  });
+});
+
+describe("Agent mid-turn steering", () => {
+  it("delivers input queued during a tool call at the next round boundary", async () => {
+    let target: InstanceType<typeof Agent> | null = null;
+    registerTool({
+      name: "t_steer_trigger",
+      description: "test",
+      isReadOnly: true,
+      inputSchema: { type: "object", properties: {} },
+      async execute() {
+        expect(target!.steer("prefer the blue module")).toBe(true);
+        return { content: "steered" };
+      },
+    });
+    const agent = makeAgent();
+    target = agent;
+    const queued: string[] = [];
+    agent.onSteerQueued = (text) => queued.push(text);
+
+    h.turns = [toolTurn([["t_steer_trigger", {}]]), textTurn("going blue")];
+    const out = await agent.chat("go");
+    expect(out).toBe("going blue");
+    expect(queued).toEqual(["prefer the blue module"]);
+    // The steered message joined the history before the second model round.
+    const second = h.sentMessages[1];
+    expect(second[second.length - 1]).toMatchObject({ role: "user", content: [{ type: "text", text: "prefer the blue module" }] });
+  });
+
+  it("continues the turn when steering lands while the model is writing", async () => {
+    // Steer during the model's final round (no tool uses): the queued input
+    // must keep the turn alive instead of being left for the next one.
+    const agent = makeAgent();
+    let sends = 0;
+    h.onSend = () => {
+      if (++sends === 1) agent.steer("one more thing");
+    };
+
+    h.turns = [textTurn("first answer"), textTurn("second answer")];
+    const out = await agent.chat("go");
+    expect(out).toBe("first answersecond answer");
+    expect(h.calls).toBe(2);
+  });
+
+  it("refuses to queue when no turn is running", () => {
+    expect(makeAgent().steer("hi")).toBe(false);
   });
 });

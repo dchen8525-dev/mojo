@@ -681,10 +681,17 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       const body = await readBody(req);
 
       if (p === "/api/chat") {
-        if (runtime.busy || runtime.commandBusy || runtime.switching) return sendJson(res, 409, { error: "busy" });
         const text = typeof body.text === "string" ? body.text : "";
         const images = Array.isArray(body.images) ? (body.images as import("../types.js").ImageBlockParam[]) : undefined;
         if (!text.trim() && !images?.length) return sendJson(res, 400, { error: "empty" });
+        // Mid-turn input becomes steering: queued and applied at the next
+        // round boundary instead of bouncing off with 409.
+        if (runtime.busy && !runtime.commandBusy && !runtime.switching) {
+          if (!project.agent.steer(text, images)) return sendJson(res, 409, { error: "busy" });
+          hub.broadcast("steer", { text });
+          return sendJson(res, 202, { ok: true, queued: true });
+        }
+        if (runtime.busy || runtime.commandBusy || runtime.switching) return sendJson(res, 409, { error: "busy" });
         // Fire and forget: the client watches SSE for turn events.
         void handleChat(text, images);
         return sendJson(res, 202, { ok: true });

@@ -788,7 +788,9 @@ function setMeta(sel, sepSel, text) {
 }
 
 function updateComposer() {
-  $("#send").classList.toggle("hidden", state.busy);
+  // Send stays visible while busy: mid-turn submissions steer the running
+  // turn instead of bouncing off.
+  $("#send").classList.remove("hidden");
   $("#stop").classList.toggle("hidden", !state.busy);
   $("#send").disabled = !input.value.trim() && !state.images.length;
   $("#input").disabled = false; // still allow typing while busy; send is guarded
@@ -820,6 +822,11 @@ function connectSSE() {
     if (d.sessionChanged) await refreshState();
     if (d.sidebarChanged) loadSessions();
     if (d.text) appendItem(makeSystemItem(d.text, d.kind, d.highlight));
+  });
+
+  on("steer", (d) => {
+    // Queued mid-turn input; the agent applies it at the next round boundary.
+    if (d.text) appendItem(makeUserItem(d.text, 0));
   });
 
   on("turn_start", (d) => {
@@ -1216,10 +1223,6 @@ input.addEventListener("keydown", (e) => {
 async function send() {
   const text = input.value.trim();
   if (!text && !state.images.length) return;
-  if (state.busy) {
-    toast("上一轮还在进行中，可先点“停止”", true);
-    return;
-  }
   input.value = "";
   input.style.height = "auto";
   hidePalette();
@@ -1230,6 +1233,8 @@ async function send() {
   try {
     const r = await api("/api/chat", { text, images: images.length ? images : undefined });
     if (r.error === "busy") toast("智能体正忙", true);
+    // steer ACK arrives before the SSE echo, so only note it here.
+    if (r.queued) toast("已加入队列，将在本轮间隙生效");
   } catch (err) {
     toast("发送失败: " + err.message, true);
   }

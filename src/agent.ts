@@ -69,6 +69,42 @@ export class Agent {
   /** Built once per user turn; invalidated when plan mode changes. */
   private systemPromptCache: string | null = null;
   private plan = false;
+  /** True between chat() entry and exit; steer() only queues while it holds. */
+  private turnRunning = false;
+  /** User inputs submitted mid-turn, applied at the next round boundary. */
+  private steerQueue: Array<{ text: string; images?: ImageBlockParam[] }> = [];
+
+  /** True while a turn is running. */
+  get busy(): boolean {
+    return this.turnRunning;
+  }
+
+  /** Fired when a steering message is queued, so UIs can acknowledge it. */
+  onSteerQueued?: (text: string) => void;
+
+  /**
+   * Queue a user message into the running turn ("steering"): it joins the
+   * history at the next round boundary, steering the agent without
+   * interrupting the work in flight. Returns false when no turn is running —
+   * callers should start a normal chat() instead.
+   */
+  steer(text: string, images?: ImageBlockParam[]): boolean {
+    if (!this.turnRunning) return false;
+    this.steerQueue.push({ text, images });
+    this.onSteerQueued?.(text);
+    return true;
+  }
+
+  /** Append queued steering messages to the history; true when any were added. */
+  private drainSteer(): boolean {
+    if (!this.steerQueue.length) return false;
+    for (const s of this.steerQueue.splice(0)) {
+      const content: Array<{ type: "text"; text: string } | ImageBlockParam> = [{ type: "text", text: s.text }];
+      for (const img of s.images ?? []) content.push(img);
+      this.messages.push({ role: "user", content });
+    }
+    return true;
+  }
 
   /** Plan mode: only read-only tools + exit_plan are offered until the user approves a plan. */
   get planMode(): boolean {
@@ -396,81 +432,97 @@ Rules:
     let continuations = 0;
     const segments: string[] = [];
 
-    while (iterations < MAX_TOOL_ITERATIONS) {
-      if (signal?.aborted) throw new Error("aborted");
-      events?.onRoundStart?.(iterations + 1);
-      if (this.tokenEstimate() > this.llm.contextWindow * COMPACT_RATIO) await this.compact(events, signal);
+    this.turnRunning = true;
+    try {
+      while (iterations < MAX_TOOL_ITERATIONS) {
+        if (signal?.aborted) throw new Error("aborted");
+        // Steering: user input that arrived while tools were running joins the
+        // history here, before the next model round.
+        this.drainSteer();
+        events?.onRoundStart?.(iterations + 1);
+        if (this.tokenEstimate() > this.llm.contextWindow * COMPACT_RATIO) await this.compact(events, signal);
 
-      const sent = this.messages.length;
-      const activeTools = this.planMode ? [...tools.filter((t) => t.isReadOnly), exitPlanTool] : tools;
-      const turn = await this.llm.send(this.messages, await this.systemPrompt(), activeTools, signal, events);
-      this.tokens.setAnchor(sent, turn.inputTokens, turn.outputTokens);
-      events?.onUsage?.(turn.inputTokens, turn.outputTokens);
-      const spec = `${this.llm.provider}:${this.llm.model}`;
-      this.costs.record(spec, {
-        input: turn.inputTokens,
-        output: turn.outputTokens,
-        cacheRead: turn.cacheReadTokens,
-        cacheWrite: turn.cacheWriteTokens,
-      });
-      const budget = this.costs.checkBudget();
-      if (budget) {
-        events?.onCostWarning?.(budget.message);
-        if (budget.stop) {
-          // End the turn cleanly: every tool_use still needs a tool_result or
-          // the history would be invalid for the next request.
-          this.messages.push({ role: "assistant", content: turn.content });
-          if (turn.toolUses.length) {
+        const sent = this.messages.length;
+        const activeTools = this.planMode ? [...tools.filter((t) => t.isReadOnly), exitPlanTool] : tools;
+        const turn = await this.llm.send(this.messages, await this.systemPrompt(), activeTools, signal, events);
+        this.tokens.setAnchor(sent, turn.inputTokens, turn.outputTokens);
+        events?.onUsage?.(turn.inputTokens, turn.outputTokens);
+        const spec = `${this.llm.provider}:${this.llm.model}`;
+        this.costs.record(spec, {
+          input: turn.inputTokens,
+          output: turn.outputTokens,
+          cacheRead: turn.cacheReadTokens,
+          cacheWrite: turn.cacheWriteTokens,
+        });
+        const budget = this.costs.checkBudget();
+        if (budget) {
+          events?.onCostWarning?.(budget.message);
+          if (budget.stop) {
+            // End the turn cleanly: every tool_use still needs a tool_result or
+            // the history would be invalid for the next request.
+            this.messages.push({ role: "assistant", content: turn.content });
+            if (turn.toolUses.length) {
+              this.messages.push({
+                role: "user",
+                content: turn.toolUses.map((tu) => ({
+                  type: "tool_result" as const,
+                  tool_use_id: tu.id,
+                  content: "Not executed: the session's cost budget is exhausted.",
+                  is_error: true,
+                })),
+              });
+            }
+            segments.push(`\n\n[stopped: ${budget.message}]`);
+            break;
+          }
+        }
+        this.messages.push({ role: "assistant", content: turn.content });
+        if (turn.text) segments.push(turn.text);
+
+        if (turn.toolUses.length === 0) {
+          // Output hit the per-response token cap: ask for the rest instead of
+          // leaving the user with a half-finished answer.
+          const truncated = turn.stopReason === "max_tokens" || turn.stopReason === "length";
+          if (truncated && continuations < MAX_CONTINUATIONS) {
+            continuations++;
             this.messages.push({
               role: "user",
-              content: turn.toolUses.map((tu) => ({
-                type: "tool_result" as const,
-                tool_use_id: tu.id,
-                content: "Not executed: the session's cost budget is exhausted.",
-                is_error: true,
-              })),
+              content: "Your previous message was cut off by the output token limit. Continue exactly where you left off, with no preamble or apology.",
             });
+            continue;
           }
-          segments.push(`\n\n[stopped: ${budget.message}]`);
+          if (truncated) segments.push("\n\n[stopped: output still truncated after continuing]");
+          // Steering arrived while the model was writing: honor it instead of
+          // ending the turn with input still queued.
+          if (this.drainSteer()) continue;
           break;
         }
-      }
-      this.messages.push({ role: "assistant", content: turn.content });
-      if (turn.text) segments.push(turn.text);
+        iterations++;
+        continuations = 0;
 
-      if (turn.toolUses.length === 0) {
-        // Output hit the per-response token cap: ask for the rest instead of
-        // leaving the user with a half-finished answer.
-        const truncated = turn.stopReason === "max_tokens" || turn.stopReason === "length";
-        if (truncated && continuations < MAX_CONTINUATIONS) {
-          continuations++;
-          this.messages.push({
-            role: "user",
-            content: "Your previous message was cut off by the output token limit. Continue exactly where you left off, with no preamble or apology.",
-          });
-          continue;
-        }
-        if (truncated) segments.push("\n\n[stopped: output still truncated after continuing]");
-        break;
-      }
-      iterations++;
-      continuations = 0;
+        // Run independent read-only tools concurrently; mutating tools stay
+        // sequential so file edits and shell commands never interleave.
+        const results: ToolResultBlockParam[] = new Array(turn.toolUses.length);
+        const parallel = turn.toolUses.map((tu, i) => ({ tu, i })).filter(({ tu }) => getTool(tu.name)?.parallelSafe);
+        const serial = turn.toolUses.map((tu, i) => ({ tu, i })).filter(({ tu }) => !getTool(tu.name)?.parallelSafe);
 
-      // Run independent read-only tools concurrently; mutating tools stay
-      // sequential so file edits and shell commands never interleave.
-      const results: ToolResultBlockParam[] = new Array(turn.toolUses.length);
-      const parallel = turn.toolUses.map((tu, i) => ({ tu, i })).filter(({ tu }) => getTool(tu.name)?.parallelSafe);
-      const serial = turn.toolUses.map((tu, i) => ({ tu, i })).filter(({ tu }) => !getTool(tu.name)?.parallelSafe);
-
-      await Promise.all(
-        parallel.map(async ({ tu, i }) => {
+        await Promise.all(
+          parallel.map(async ({ tu, i }) => {
+            results[i] = await this.runTool(tu, signal, events);
+          }),
+        );
+        for (const { tu, i } of serial) {
           results[i] = await this.runTool(tu, signal, events);
-        }),
-      );
-      for (const { tu, i } of serial) {
-        results[i] = await this.runTool(tu, signal, events);
+        }
+        this.messages.push({ role: "user", content: results });
       }
-      this.messages.push({ role: "user", content: results });
+    } catch (err) {
+      // Queued steering dies with a failed or aborted turn: never auto-replay
+      // it into the next one.
+      this.steerQueue.length = 0;
+      throw err;
+    } finally {
+      this.turnRunning = false;
     }
 
     if (iterations >= MAX_TOOL_ITERATIONS) {

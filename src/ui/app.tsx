@@ -519,7 +519,13 @@ export function AgentApp({
       setInput("");
       const images = imagesRef.current;
       if (!text && !images.length) return;
-      if (busyRef.current) return; // ignore submissions while a turn is running
+      if (busyRef.current) {
+        // Mid-turn input steers the running turn instead of being dropped.
+        if (!agent.steer(text, images)) return; // turn just ended; next submit runs normally
+        setItems((prev) => [...prev, { kind: "user", text }]);
+        setItems((prev) => [...prev, { kind: "system", text: "(queued — applied at the next step)" }]);
+        return;
+      }
       if (text.startsWith("/")) {
         const [cmd, ...rest] = text.slice(1).split(/\s+/);
         const custom = customCommands.get(cmd);
@@ -606,7 +612,7 @@ export function AgentApp({
             onChange={setInput}
             onSubmit={onSubmit}
             focus={!permission && !historyOpen}
-            placeholder={busy ? "waiting for agent…" : "ask the agent… (/help · Esc history · Ctrl+O expand)"}
+            placeholder={busy ? "steer the running turn — input is queued" : "ask the agent… (/help · Esc history · Ctrl+O expand)"}
           />
         </Box>
 

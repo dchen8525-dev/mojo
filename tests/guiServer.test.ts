@@ -31,6 +31,7 @@ function fakeAgent(overrides: Partial<Agent> = {}): Agent {
     switchModel: (s: string) => ({ provider: "anthropic", model: s }),
     listModels: async () => ["m1"],
     chat: async () => "done",
+    steer: () => false,
     ...overrides,
   } as unknown as Agent;
 }
@@ -228,6 +229,21 @@ describe("gui server", () => {
       runtime.busy = true;
       const r = await req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "hi" } });
       expect(r.status).toBe(409);
+    });
+  });
+
+  it("queues mid-turn chat input as steering", async () => {
+    await withServer(async (gui, runtime, agent) => {
+      runtime.busy = true;
+      const steered: string[] = [];
+      (agent as { steer: (t: string) => boolean }).steer = (text: string) => {
+        steered.push(text);
+        return true;
+      };
+      const r = await req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "also check the tests" } });
+      expect(r.status).toBe(202);
+      expect(r.json.queued).toBe(true);
+      expect(steered).toEqual(["also check the tests"]);
     });
   });
 
