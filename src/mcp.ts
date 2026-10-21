@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { registerTool, unregisterToolsByPrefix } from "./tools/index.js";
-import { truncate as truncateToolOutput } from "./tools/utils.js";
+import { boundedResult } from "./artifacts.js";
 
 export interface McpServerConfig {
   command: string;
@@ -220,7 +220,7 @@ function wrapTool(server: ConnectedServer, remote: { name: string; description?:
         });
         const text = flattenContent((res.content ?? []) as never);
         return {
-          content: truncateToolOutput(text) || "(empty result)",
+          content: (await boundedResult(text, 30_000, "mcp-result")) || "(empty result)",
           isError: !!res.isError,
         };
       } catch (err) {

@@ -8,7 +8,8 @@ import { webSearchTool, webFetchTool } from "./web.js";
 import { writeFileTool, editFileTool } from "./write.js";
 import { multiEditTool } from "./multiEdit.js";
 import { bashTool } from "./bash.js";
-import { describeError, truncate } from "./utils.js";
+import { describeError } from "./utils.js";
+import { boundedResult } from "../artifacts.js";
 
 const SUB_MAX_ITERATIONS = 25;
 
@@ -211,7 +212,13 @@ export const taskTool: Tool = {
       if (!report.trim()) {
         return { content: "Subagent finished without producing a report.", isError: true };
       }
-      return { content: truncate(`[${kind} subagent "${String(input.description ?? "task")}" finished after ${toolCalls} tool calls]\n\n${report}`, 20_000) };
+      return {
+        content: await boundedResult(
+          `[${kind} subagent "${String(input.description ?? "task")}" finished after ${toolCalls} tool calls]\n\n${report}`,
+          20_000,
+          "subagent-report",
+        ),
+      };
     } catch (err) {
       const msg = describeError(err);
       if (msg === "aborted") return { content: "Subagent was interrupted.", isError: true };

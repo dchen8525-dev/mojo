@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { Tool, ToolContext, ToolResult } from "../types.js";
 import { str, num, truncate, describeError } from "./utils.js";
+import { boundedResult } from "../artifacts.js";
 
 /**
  * Dedicated git tools. Compared to shelling out through `bash`:
@@ -170,7 +171,7 @@ export const gitDiffTool: Tool = {
       }
       const scopeLabel = base ? `${trimRef(base)}...HEAD` : input.staged === true ? "staged changes" : "unstaged changes";
       const header = `scope: ${scopeLabel}${pathFilter ? ` · path: ${pathFilter}` : ""}\n${res.out}`;
-      return { content: truncate(`${header}\n\n${res2.out}`, maxChars) };
+      return { content: await boundedResult(`${header}\n\n${res2.out}`, maxChars, "git-diff") };
     } catch (e) {
       return { content: `Error: ${describeError(e)}`, isError: true };
     }

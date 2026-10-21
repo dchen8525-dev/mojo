@@ -3,7 +3,8 @@ import { glob } from "glob";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { Tool, ToolContext, ToolResult } from "../types.js";
-import { relPath, resolvePath, str, num, truncate, describeError } from "./utils.js";
+import { relPath, resolvePath, str, num, describeError } from "./utils.js";
+import { boundedResult } from "../artifacts.js";
 
 const IGNORED_DIRS = ["node_modules", ".git", "dist", "build", "out", ".next", "target", "__pycache__", ".venv", "vendor"];
 const MAX_FILES_SCANNED = 2000;
@@ -185,14 +186,14 @@ export const grepTool: Tool = {
         }
       }
 
-      return formatHits(hits, limit, skipped);
+      return await formatHits(hits, limit, skipped);
     } catch (err) {
       return { content: `Error: ${describeError(err)}`, isError: true };
     }
   },
 };
 
-function formatHits(hits: string[], limit: number, skipped = 0): ToolResult {
+async function formatHits(hits: string[], limit: number, skipped = 0): Promise<ToolResult> {
   if (hits.length === 0) {
     return {
       content:
@@ -201,8 +202,10 @@ function formatHits(hits: string[], limit: number, skipped = 0): ToolResult {
     };
   }
   return {
-    content: truncate(
+    content: await boundedResult(
       hits.join("\n") + (hits.length >= limit ? `\n[... capped at ${limit} matches; narrow the pattern]` : ""),
+      30_000,
+      "grep-hits",
     ),
   };
 }

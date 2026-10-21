@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import type { Tool, ToolContext, ToolResult } from "../types.js";
-import { relPath, resolvePath, str, num, truncate, describeError } from "./utils.js";
+import { relPath, resolvePath, str, num, describeError } from "./utils.js";
+import { boundedResult } from "../artifacts.js";
 
 const MAX_LINES = 2000;
 
@@ -67,7 +68,7 @@ export const readFileTool: Tool = {
           : offset > 0 || limit < all.length
             ? `\n[End of file: ${all.length} lines total.]`
             : "";
-      return { content: truncate(`${relPath(ctx.cwd, abs)}\n${body}${meta}`) };
+      return { content: await boundedResult(`${relPath(ctx.cwd, abs)}\n${body}${meta}`, 30_000, "read-file") };
     } catch (err) {
       return { content: `Error: ${describeError(err)}`, isError: true };
     }
