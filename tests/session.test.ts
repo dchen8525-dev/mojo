@@ -155,6 +155,65 @@ describe("renameSession / deleteSession", () => {
   });
 });
 
+describe("atomic session rewrites", () => {
+  it("replaces the file through rename and leaves no temp files", async () => {
+    const { id } = await session.createSession("x");
+    await session.appendMessages(id, [{ role: "user", content: "keep" }]);
+    const file = path.join(fakeHome, ".node-agent", "sessions", `${id}.jsonl`);
+    const rename = vi.spyOn(fs, "rename");
+    try {
+      expect(await session.renameSession(id, "Atomic")).toBe(true);
+      expect(rename).toHaveBeenCalled();
+      expect(String(rename.mock.calls.at(-1)?.[0])).toMatch(/\.tmp$/);
+      expect(String(rename.mock.calls.at(-1)?.[1])).toBe(file);
+    } finally {
+      rename.mockRestore();
+    }
+
+    const leftovers = (await fs.readdir(path.dirname(file))).filter((f) => f.endsWith(".tmp"));
+    expect(leftovers).toEqual([]);
+    const lines = (await fs.readFile(file, "utf8")).split("\n").filter(Boolean);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('"title":"Atomic"');
+  });
+
+  it("retries a transient Windows rename failure", async () => {
+    const { id } = await session.createSession("x");
+    const original = fs.rename.bind(fs);
+    let calls = 0;
+    const rename = vi.spyOn(fs, "rename").mockImplementation(async (from, to) => {
+      if (calls++ === 0) throw Object.assign(new Error("locked by scanner"), { code: "EPERM" });
+      return original(from, to);
+    });
+    try {
+      expect(await session.renameSession(id, "Retried")).toBe(true);
+    } finally {
+      rename.mockRestore();
+    }
+    expect(calls).toBe(2);
+    expect((await session.loadSession(id))?.meta.title).toBe("Retried");
+  });
+
+  it("serializes concurrent meta updates and appends without losing data", async () => {
+    const { id } = await session.createSession("race");
+    const jobs: Array<Promise<unknown>> = Array.from({ length: 10 }, (_, i) =>
+      session.appendMessages(id, [{ role: "user", content: `m${i}` }]),
+    );
+    jobs.push(session.renameSession(id, "Race"));
+    jobs.push(session.tagSession(id, ["x"]));
+    jobs.push(session.saveTodos(id, [{ id: "1", content: "todo", status: "pending" }]));
+    await Promise.all(jobs);
+
+    const loaded = await session.loadSession(id);
+    expect(loaded?.messages.map((m) => m.content).sort()).toEqual(
+      Array.from({ length: 10 }, (_, i) => `m${i}`).sort(),
+    );
+    expect(loaded?.meta.title).toBe("Race");
+    expect(loaded?.meta.tags).toEqual(["x"]);
+    expect(loaded?.meta.todos).toEqual([{ id: "1", content: "todo", status: "pending" }]);
+  });
+});
+
 describe("forkSession", () => {
   it("copies messages into a new session and records the parent", async () => {
     const parent = await session.createSession("D:\\proj");

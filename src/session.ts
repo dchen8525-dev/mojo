@@ -33,6 +33,65 @@ function fileFor(id: string) {
 const ID_RE = /^[0-9a-f]{4,64}$/;
 
 /**
+ * Serialize writers per session file. Meta updates are read-modify-write:
+ * without this, a concurrent append landing between the read and the rewrite
+ * would be silently dropped.
+ */
+const fileLocks = new Map<string, Promise<void>>();
+
+function withFileLock<T>(file: string, fn: () => Promise<T>): Promise<T> {
+  const prev = fileLocks.get(file) ?? Promise.resolve();
+  const run = prev.then(fn);
+  const tail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  fileLocks.set(file, tail);
+  void tail.then(() => {
+    if (fileLocks.get(file) === tail) fileLocks.delete(file);
+  });
+  return run;
+}
+
+/**
+ * Replace a file via a sibling temp file + rename, so a crash mid-write leaves
+ * the previous contents intact. rename() is atomic on POSIX; on Windows it
+ * replaces the target too, but can transiently fail with EPERM/EBUSY while a
+ * scanner or reader holds the file, hence the short retry loop.
+ */
+async function atomicWrite(file: string, data: string): Promise<void> {
+  const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
+  try {
+    const handle = await fs.open(tmp, "w", 0o600);
+    try {
+      await handle.writeFile(data, "utf8");
+      // Some network/removable filesystems do not implement fsync; the
+      // rename below still prevents torn files, so do not fail the write.
+      await handle.sync().catch(() => {});
+    } finally {
+      await handle.close();
+    }
+    await renameWithRetry(tmp, file);
+  } catch (err) {
+    await fs.unlink(tmp).catch(() => {});
+    throw err;
+  }
+}
+
+async function renameWithRetry(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await fs.rename(from, to);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (attempt >= 4 || (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES")) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 20 * (attempt + 1)));
+    }
+  }
+}
+
+/**
  * Parsed sessions keyed by file path, validated against mtime + size. The GUI
  * lists and searches sessions far more often than they change; re-parsing
  * every file on each call used to dominate those requests.
@@ -60,8 +119,11 @@ export async function createSession(cwd: string): Promise<{ id: string; meta: Se
 
 export async function appendMessages(id: string, messages: MessageParam[]) {
   const lines = messages.map((m) => JSON.stringify({ type: "message", message: m })).join("\n");
-  if (lines) await fs.appendFile(fileFor(id), lines + "\n", "utf8");
-  invalidateSession(id);
+  if (!lines) return;
+  await withFileLock(fileFor(id), async () => {
+    await fs.appendFile(fileFor(id), lines + "\n", "utf8");
+    invalidateSession(id);
+  });
 }
 
 /**
@@ -71,23 +133,27 @@ export async function appendMessages(id: string, messages: MessageParam[]) {
  */
 export async function rewriteMessages(id: string, messages: MessageParam[]) {
   const file = fileFor(id);
-  let metaLine = "";
-  try {
-    const raw = await fs.readFile(file, "utf8");
-    metaLine = raw.split("\n").find((l) => l.trim().startsWith('{"type":"meta"')) ?? "";
-  } catch {
-    return; // no session file: nothing to rewrite
-  }
-  if (!metaLine) return;
-  const lines = messages.map((m) => JSON.stringify({ type: "message", message: m })).join("\n");
-  await fs.writeFile(file, metaLine + "\n" + (lines ? lines + "\n" : ""), "utf8");
-  invalidateSession(id);
+  await withFileLock(file, async () => {
+    let metaLine = "";
+    try {
+      const raw = await fs.readFile(file, "utf8");
+      metaLine = raw.split("\n").find((l) => l.trim().startsWith('{"type":"meta"')) ?? "";
+    } catch {
+      return; // no session file: nothing to rewrite
+    }
+    if (!metaLine) return;
+    const lines = messages.map((m) => JSON.stringify({ type: "message", message: m })).join("\n");
+    await atomicWrite(file, metaLine + "\n" + (lines ? lines + "\n" : ""));
+    invalidateSession(id);
+  });
 }
 
 /** Append a model marker; the last one in the file is the session's model. */
 export async function appendModel(id: string, model: string) {
-  await fs.appendFile(fileFor(id), JSON.stringify({ type: "model", model }) + "\n");
-  invalidateSession(id);
+  await withFileLock(fileFor(id), async () => {
+    await fs.appendFile(fileFor(id), JSON.stringify({ type: "model", model }) + "\n");
+    invalidateSession(id);
+  });
 }
 
 /**
@@ -97,27 +163,29 @@ export async function appendModel(id: string, model: string) {
 async function updateMeta(id: string, mutate: (meta: SessionMeta) => void): Promise<SessionMeta | null> {
   if (!ID_RE.test(id)) return null;
   const file = fileFor(id);
-  let raw: string;
-  try {
-    raw = await fs.readFile(file, "utf8");
-  } catch {
-    return null;
-  }
-  const lines = raw.split("\n");
-  const idx = lines.findIndex((l) => l.trim().startsWith('{"type":"meta"'));
-  if (idx === -1) return null;
-  let meta: SessionMeta;
-  try {
-    meta = JSON.parse(lines[idx]);
-  } catch {
-    return null;
-  }
-  delete (meta as { updatedAt?: string }).updatedAt;
-  mutate(meta);
-  lines[idx] = JSON.stringify({ type: "meta", ...meta });
-  await fs.writeFile(file, lines.join("\n"), "utf8");
-  invalidateSession(id);
-  return meta;
+  return withFileLock(file, async () => {
+    let raw: string;
+    try {
+      raw = await fs.readFile(file, "utf8");
+    } catch {
+      return null;
+    }
+    const lines = raw.split("\n");
+    const idx = lines.findIndex((l) => l.trim().startsWith('{"type":"meta"'));
+    if (idx === -1) return null;
+    let meta: SessionMeta;
+    try {
+      meta = JSON.parse(lines[idx]);
+    } catch {
+      return null;
+    }
+    delete (meta as { updatedAt?: string }).updatedAt;
+    mutate(meta);
+    lines[idx] = JSON.stringify({ type: "meta", ...meta });
+    await atomicWrite(file, lines.join("\n"));
+    invalidateSession(id);
+    return meta;
+  });
 }
 
 /** Persist the current todo plan in the session header (an empty list clears it). */
@@ -176,18 +244,11 @@ export async function forkSession(
   const todos = sanitizeTodos(opts.todos ?? []) ?? [];
   if (clean || opts.fromId || todos.length) {
     // Rewrite the meta header once, carrying all fields, before any appends.
-    const file = fileFor(id);
-    const raw = await fs.readFile(file, "utf8");
-    const lines = raw.split("\n");
-    const idx = lines.findIndex((l) => l.trim().startsWith('{"type":"meta"'));
-    if (idx !== -1) {
-      const meta = JSON.parse(lines[idx]) as SessionMeta;
+    await updateMeta(id, (meta) => {
       if (clean) meta.title = clean;
       if (opts.fromId) meta.forkedFrom = opts.fromId;
       if (todos.length) meta.todos = todos;
-      lines[idx] = JSON.stringify({ type: "meta", ...meta });
-      await fs.writeFile(file, lines.join("\n"), "utf8");
-    }
+    });
   }
   if (messages.length) await appendMessages(id, messages);
   const now = new Date().toISOString();
@@ -197,14 +258,17 @@ export async function forkSession(
 /** Delete a session file. Returns false when it did not exist. */
 export async function deleteSession(id: string): Promise<boolean> {
   if (!ID_RE.test(id)) return false;
-  invalidateSession(id);
-  try {
-    await fs.unlink(fileFor(id));
-    return true;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw err;
-  }
+  const file = fileFor(id);
+  return withFileLock(file, async () => {
+    invalidateSession(id);
+    try {
+      await fs.unlink(file);
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw err;
+    }
+  });
 }
 
 interface ParsedSession {
