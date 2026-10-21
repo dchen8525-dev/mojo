@@ -809,6 +809,19 @@ function connectSSE() {
 
   const on = (name, fn) => es.addEventListener(name, (e) => fn(JSON.parse(e.data)));
 
+  on("command_start", () => {
+    state.busy = true;
+    updateComposer();
+  });
+
+  on("command_end", async (d) => {
+    state.busy = false;
+    updateComposer();
+    if (d.sessionChanged) await refreshState();
+    if (d.sidebarChanged) loadSessions();
+    if (d.text) appendItem(makeSystemItem(d.text, d.kind, d.highlight));
+  });
+
   on("turn_start", (d) => {
     finalizeLive();
     if (d.user) appendItem(makeUserItem(d.user, d.images ?? 0));
@@ -958,11 +971,15 @@ function connectSSE() {
     state.liveTurn = null;
     state.busy = false;
     updateComposer();
-    if (!d.aborted && d.message) appendItem(makeSystemItem("错误: " + d.message, "error"));
-    if (d.aborted) appendItem(makeSystemItem("（已中断）"));
+    // refreshState redraws the transcript from the server snapshot, so the
+    // error line must land after it or the redraw erases it.
     refreshState()
       .then(loadSessions)
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (!d.aborted && d.message) appendItem(makeSystemItem("错误: " + d.message, "error"));
+        if (d.aborted) appendItem(makeSystemItem("（已中断）"));
+      });
   });
 
   on("usage", () => {
