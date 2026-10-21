@@ -7,6 +7,7 @@
     <link rel="icon" href="/icon.png" />
     <link rel="stylesheet" href="/style.css" />
     <script src="/vendor/marked.min.js"></script>
+    <script src="/vendor/purify.min.js"></script>
   </head>
   <body>
     <div id="app">
@@ -29,6 +30,7 @@
           </button>
         </div>
         <div class="side-foot">
+          <button id="help-btn" class="quit" title="快捷键">⌨ 快捷键</button>
           <button id="quit" class="quit" title="退出">
             <svg class="quit-ico" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
               <path d="M8 2v5.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
@@ -38,8 +40,10 @@
           </button>
         </div>
       </aside>
+      <div id="sidebar-overlay" class="sidebar-overlay hidden"></div>
 
       <main id="main">
+        <button id="sidebar-toggle" type="button" title="打开侧栏" aria-label="打开侧栏" aria-controls="sidebar" aria-expanded="false">☰</button>
         <section id="welcome" class="welcome">
           <h1>mojo，<em>帮你</em>。</h1>
           <p class="welcome-sub">说一句要做什么，剩下的交给它。</p>
@@ -58,8 +62,10 @@
 
           <!-- 输入卡片：上文本域，下 右「模型 · 发送」 -->
           <div class="card">
+            <div id="attachments"></div>
             <textarea id="input" rows="1" placeholder="今天帮你做些什么？输入 / 调用命令"></textarea>
             <div class="card-row">
+              <button id="attach" title="添加图片">＋</button>
               <div class="model-btn">
                 <span class="logo" id="model-logo">·</span>
                 <select id="model-select" title="选择模型" aria-label="选择模型"></select>
@@ -67,8 +73,11 @@
               </div>
               <button id="stop" class="hidden" title="停止">■</button>
               <button id="send" title="发送">↑</button>
+              <input type="file" id="file-input" accept="image/*" multiple hidden />
             </div>
           </div>
+
+          <div id="drop-hint" class="drop-hint hidden">松开以添加图片或文件</div>
 
           <!-- 卡片外下方那一行：左 工作空间 / 权限模式，右 会话·上下文·成本·后台任务 -->
           <div class="toolbar">
@@ -111,16 +120,59 @@
               </div>
             </div>
 
+            <span class="tb-sep" id="sep-todo"></span>
+
+            <div class="tb-item">
+              <button class="tb-btn" id="todo-btn" title="待办进度，由 todo_write 工具维护" aria-controls="todo-pop" aria-expanded="false">
+                <span class="tb-ico">☑</span>
+                <span class="tb-label">待办</span>
+                <span class="bg-count hidden" id="todo-count">0</span>
+              </button>
+              <div class="pop wide hidden" id="todo-pop">
+                <div class="bg-head">
+                  <span>待办</span>
+                  <span id="todo-summary" class="todo-summary"></span>
+                  <button id="todo-close" class="modal-x" type="button" title="关闭" aria-label="关闭">×</button>
+                </div>
+                <div id="todo-list" class="bg-list todo-list"></div>
+              </div>
+            </div>
+
+            <div class="tb-item">
+              <button class="tb-btn" id="background-btn" title="仍在运行的后台命令（bash run_in_background）" aria-controls="background-pop" aria-expanded="false">
+                <span class="tb-ico">▤</span>
+                <span class="tb-label">后台</span>
+                <span class="bg-count hidden" id="bg-count">0</span>
+              </button>
+              <div class="pop wide hidden" id="background-pop">
+                <div class="bg-head">
+                  <span>后台任务</span>
+                  <button id="bg-close" class="modal-x" type="button" title="关闭" aria-label="关闭">×</button>
+                </div>
+                <div id="bg-list" class="bg-list"></div>
+              </div>
+            </div>
+
+            <div class="tb-item">
+              <button class="tb-btn" id="usage-btn" title="跨会话用量与缓存命中">
+                <span class="tb-ico">◔</span>
+                <span class="tb-label">用量</span>
+              </button>
+            </div>
+
+            <div class="tb-item">
+              <button class="tb-btn" id="manage-btn" title="MCP 服务器与权限规则">
+                <span class="tb-ico">⚙</span>
+                <span class="tb-label">管理</span>
+              </button>
+            </div>
+
             <span class="sp"></span>
             <span class="tb-meta tip" id="meta-session" data-tip="当前会话 ID，用 /resume &lt;id&gt; 可随时回到它"></span>
             <span class="tb-sep" id="sep-ctx"></span>
             <span class="tb-meta tip" id="meta-ctx" data-tip="上下文占用：估算 token ÷ 模型窗口。到 75% 会自动压缩"></span>
             <span class="tb-sep" id="sep-cost"></span>
             <span class="tb-meta tip" id="meta-cost" data-tip="本会话累计 API 费用；终端里用 /cost 看明细"></span>
-            <span class="tb-sep" id="sep-todo"></span>
-            <span class="tb-meta tip" id="meta-todo" data-tip="待办进度，由 todo_write 工具维护"></span>
-            <span class="tb-sep" id="sep-bg"></span>
-            <span class="tb-meta tip" id="meta-bg" data-tip="仍在运行的后台命令（bash run_in_background）"></span>
           </div>
         </div>
       </main>
@@ -197,6 +249,155 @@
               <button id="cfg-cancel" type="button">取消</button>
             </div>
           </form>
+        </div>
+      </div>
+    </div>
+
+    <div id="usage-modal" class="modal hidden">
+      <div class="modal-card usage-card">
+        <div class="perm-head">
+          <span class="perm-desc">用量与缓存</span>
+          <span class="badge low">本地账本</span>
+          <button id="usage-close" class="modal-x" type="button" title="关闭" aria-label="关闭">×</button>
+        </div>
+        <div class="settings-body usage-body">
+          <div id="usage-cards" class="usage-cards"></div>
+          <div class="usage-budget">
+            <div class="usage-budget-head">
+              <span>当前会话预算</span>
+              <span class="settings-note" id="budget-note"></span>
+            </div>
+            <div class="path-row">
+              <input id="budget-input" type="number" min="0" step="0.01" placeholder="不设上限（USD）" />
+              <button id="budget-save" class="link-btn" type="button">保存</button>
+              <button id="budget-clear" class="link-btn danger" type="button">清除</button>
+            </div>
+          </div>
+          <div class="usage-section">
+            <div class="usage-sec-head"><span>按模型</span><span id="usage-models-count"></span></div>
+            <div id="usage-models" class="usage-table"></div>
+          </div>
+          <div class="usage-section">
+            <div class="usage-sec-head"><span>按天</span><span>最近 14 天</span></div>
+            <div id="usage-days" class="usage-table"></div>
+          </div>
+          <div class="usage-section">
+            <div class="usage-sec-head"><span>按会话</span><span id="usage-sessions-count"></span></div>
+            <div id="usage-sessions" class="usage-table"></div>
+          </div>
+          <p class="settings-note" id="usage-ledger"></p>
+        </div>
+      </div>
+    </div>
+
+    <div id="manage-modal" class="modal hidden">
+      <div class="modal-card manage-card">
+        <div class="perm-head">
+          <span class="perm-desc">管理</span>
+          <div class="manage-tabs" id="manage-tabs">
+            <button type="button" data-tab="mcp" class="active">MCP 服务器</button>
+            <button type="button" data-tab="perm">权限规则</button>
+          </div>
+          <button id="manage-close" class="modal-x" type="button" title="关闭" aria-label="关闭">×</button>
+        </div>
+        <div class="settings-body">
+          <div id="mcp-pane" class="manage-pane">
+            <p class="settings-note" id="mcp-note"></p>
+            <div class="profile-list-head">
+              <span>服务器</span>
+              <span class="manage-tools">
+                <button id="mcp-reload" class="link-btn" type="button">重新连接</button>
+                <button id="mcp-add" class="link-btn" type="button">＋ 添加</button>
+              </span>
+            </div>
+            <div id="mcp-list" class="profile-list"></div>
+            <div id="mcp-editor" class="profile-editor hidden">
+              <div class="settings-grid">
+                <label class="field">
+                  <span>名称</span>
+                  <input id="mcp-name" type="text" maxlength="40" placeholder="filesystem" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="field">
+                  <span>作用域</span>
+                  <select id="mcp-scope">
+                    <option value="global">全局 · ~/.node-agent/mcp.json</option>
+                    <option value="project">项目 · .mcp.json</option>
+                  </select>
+                </label>
+                <label class="field wide">
+                  <span>命令</span>
+                  <input id="mcp-command" type="text" placeholder="npx" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="field wide">
+                  <span>参数 <em>每行一个</em></span>
+                  <textarea id="mcp-args" rows="3" spellcheck="false" placeholder="-y&#10;@modelcontextprotocol/server-filesystem&#10;D:\work"></textarea>
+                </label>
+                <label class="field wide">
+                  <span>环境变量 <em>每行 KEY=VALUE</em></span>
+                  <textarea id="mcp-env" rows="3" spellcheck="false" placeholder="GITHUB_TOKEN=…"></textarea>
+                </label>
+                <label class="plan-toggle"><input type="checkbox" id="mcp-disabled" /> 停用（不连接）</label>
+              </div>
+              <p class="settings-note" id="mcp-edit-note"></p>
+              <div class="profile-editor-actions">
+                <button id="mcp-save" class="primary" type="button">保存并重连</button>
+                <button id="mcp-cancel" type="button">取消</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="perm-pane" class="manage-pane hidden">
+            <p class="settings-note" id="perm-note"></p>
+            <div class="profile-list-head">
+              <span>规则 · 项目优先于全局</span>
+              <button id="perm-add" class="link-btn" type="button">＋ 添加规则</button>
+            </div>
+            <div id="perm-list" class="profile-list"></div>
+            <div id="perm-editor" class="profile-editor hidden">
+              <div class="settings-grid">
+                <label class="field wide">
+                  <span>匹配模式 <em>支持 * 通配</em></span>
+                  <input id="perm-match" type="text" maxlength="200" placeholder="Bash(npm run *)" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="field">
+                  <span>决定</span>
+                  <select id="perm-decision">
+                    <option value="allow">允许</option>
+                    <option value="deny">拒绝</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>作用域</span>
+                  <select id="perm-scope">
+                    <option value="project">项目 · .node-agent/permissions.json</option>
+                    <option value="global">全局 · ~/.node-agent/permissions.json</option>
+                  </select>
+                </label>
+              </div>
+              <div class="profile-editor-actions">
+                <button id="perm-save" class="primary" type="button">添加规则</button>
+                <button id="perm-cancel" type="button">取消</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="help-modal" class="modal hidden">
+      <div class="modal-card help-card">
+        <div class="perm-head">
+          <span class="perm-desc">快捷键</span>
+          <button id="help-close" class="modal-x" type="button" title="关闭" aria-label="关闭">×</button>
+        </div>
+        <div id="help-list" class="help-body">
+          <div class="help-row"><kbd>Ctrl / Cmd + K</kbd><span>搜索历史会话</span></div>
+          <div class="help-row"><kbd>Ctrl / Cmd + Enter</kbd><span>发送消息</span></div>
+          <div class="help-row"><kbd>Enter</kbd><span>发送（输入框内）</span></div>
+          <div class="help-row"><kbd>Shift + Enter</kbd><span>换行</span></div>
+          <div class="help-row"><kbd>Esc</kbd><span>关闭弹层、抽屉或取消当前操作</span></div>
+          <div class="help-row"><kbd>?</kbd><span>打开这份快捷键清单</span></div>
+          <div class="help-row"><kbd>Y / A / N / D</kbd><span>权限弹窗：允许 / 总是允许 / 拒绝 / 总是拒绝</span></div>
         </div>
       </div>
     </div>

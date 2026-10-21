@@ -1,3 +1,5 @@
+import { promises as dns } from "node:dns";
+import net from "node:net";
 import type { Tool, ToolContext, ToolResult } from "../types.js";
 import { str, num, truncate, describeError } from "./utils.js";
 
@@ -5,33 +7,165 @@ import { str, num, truncate, describeError } from "./utils.js";
  * Web tools built on the global fetch (Node >= 18). No API key required:
  * - web_search uses DuckDuckGo's HTML endpoint and parses the results,
  * - web_fetch downloads a page and strips it to readable text/markdown-ish.
- * Both cap response size and time, and refuse non-http(s) schemes so a model
- * cannot poke at file:// or the local network.
+ * Both cap response size and time, refuse non-http(s) schemes, and reject
+ * loopback/private/link-local hosts (including names that resolve to them),
+ * so a model cannot reach file://, localhost, or cloud metadata endpoints.
  */
 
 const FETCH_TIMEOUT_MS = 20_000;
+const MAX_REDIRECTS = 5;
+const MAX_BODY_BYTES = 1_000_000;
 const UA = "Mozilla/5.0 (compatible; node-agent/0.1; +https://example.invalid)";
 
-async function httpGet(url: string, signal?: AbortSignal): Promise<{ status: number; body: string; contentType: string }> {
-  const parsed = new URL(url);
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new Error(`refusing non-http(s) URL: ${parsed.protocol}//`);
+/** True for addresses that must never be fetched: loopback, private, metadata, ... */
+export function isBlockedAddress(ip: string): boolean {
+  const addr = ip.replace(/^\[|\]$/g, "").split("%")[0];
+  if (net.isIPv4(addr)) {
+    const [a, b, c] = addr.split(".").map(Number);
+    return (
+      a === 0 ||
+      a === 10 ||
+      a === 127 ||
+      (a === 100 && b >= 64 && b <= 127) || // CGNAT
+      (a === 169 && b === 254) || // link-local + cloud metadata
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 0 && (c === 0 || c === 2)) || // protocol assignments / TEST-NET-1
+      (a === 192 && b === 168) ||
+      (a === 198 && (b === 18 || b === 19)) || // benchmarking
+      (a === 198 && b === 51 && c === 100) || // TEST-NET-2
+      (a === 203 && b === 0 && c === 113) || // TEST-NET-3
+      a >= 224 // multicast + reserved
+    );
   }
+  if (!net.isIPv6(addr)) return true;
+  const s = addr.toLowerCase();
+  if (s === "::" || s === "::1") return true;
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(s);
+  if (mapped) return isBlockedAddress(mapped[1]);
+  const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(s);
+  if (mappedHex) {
+    const hi = parseInt(mappedHex[1], 16);
+    const lo = parseInt(mappedHex[2], 16);
+    return isBlockedAddress(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
+  }
+  return (
+    /^f[cd]/.test(s) || // unique local fc00::/7
+    /^fe[89ab]/.test(s) || // link-local fe80::/10
+    /^ff/.test(s) || // multicast
+    /^2001:db8:/.test(s) || // documentation
+    s.startsWith("64:ff9b:") || // NAT64
+    s.startsWith("2001:0:") // Teredo
+  );
+}
+
+function isBlockedHostname(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/\.$/, "");
+  return (
+    h === "localhost" ||
+    h.endsWith(".localhost") ||
+    h.endsWith(".local") ||
+    h.endsWith(".internal") ||
+    h.endsWith(".home.arpa") ||
+    h === "metadata.google.internal"
+  );
+}
+
+/**
+ * Validate an http(s) URL and every address its host resolves to. Redirect
+ * targets are validated the same way, so a public URL cannot bounce the agent
+ * into the local network. DNS is re-resolved per hop; rebinding between the
+ * check and the connect is out of scope for fetch-level guarding.
+ */
+export async function assertPublicUrl(input: string | URL): Promise<URL> {
+  let url: URL;
+  try {
+    url = typeof input === "string" ? new URL(input) : input;
+  } catch {
+    throw new Error(`invalid URL: ${String(input)}`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`refusing non-http(s) URL: ${url.protocol}//`);
+  }
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  if (!host) throw new Error("refusing URL without a host");
+  if (isBlockedHostname(host)) throw new Error(`refusing to fetch local host "${host}"`);
+  if (net.isIP(host)) {
+    if (isBlockedAddress(host)) throw new Error(`refusing to fetch private address ${host}`);
+    return url;
+  }
+  let addresses: string[];
+  try {
+    addresses = (await dns.lookup(host, { all: true, verbatim: true })).map((a) => a.address);
+  } catch {
+    throw new Error(`cannot resolve host "${host}"`);
+  }
+  if (!addresses.length || addresses.some(isBlockedAddress)) {
+    throw new Error(`refusing to fetch "${host}": it resolves to a local/private address`);
+  }
+  return url;
+}
+
+async function readLimited(res: Response, limit = MAX_BODY_BYTES): Promise<Uint8Array> {
+  if (!res.body) {
+    const buf = new Uint8Array(await res.arrayBuffer());
+    return buf.subarray(0, limit);
+  }
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value?.byteLength) continue;
+      const room = limit - total;
+      chunks.push(value.subarray(0, room));
+      total += Math.min(value.byteLength, room);
+      if (value.byteLength >= room) {
+        await reader.cancel().catch(() => {});
+        break;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+async function httpGet(
+  url: string,
+  signal?: AbortSignal,
+): Promise<{ status: number; body: string; contentType: string; finalUrl: string }> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
   const onAbort = () => ctrl.abort();
   signal?.addEventListener("abort", onAbort);
   try {
-    const res = await fetch(url, {
-      signal: ctrl.signal,
-      redirect: "follow",
-      headers: { "User-Agent": UA, Accept: "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8" },
-    });
-    const contentType = res.headers.get("content-type") ?? "";
-    const buf = await res.arrayBuffer();
-    // Bound the in-memory body to ~1 MB before decoding.
-    const body = new TextDecoder("utf-8", { fatal: false }).decode(buf.byteLength > 1_000_000 ? buf.slice(0, 1_000_000) : buf);
-    return { status: res.status, body, contentType };
+    let current = await assertPublicUrl(url);
+    for (let hop = 0; ; hop++) {
+      const res = await fetch(current.toString(), {
+        signal: ctrl.signal,
+        redirect: "manual",
+        headers: { "User-Agent": UA, Accept: "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8" },
+      });
+      const location = res.headers.get("location");
+      if (res.status >= 300 && res.status < 400 && location) {
+        await res.body?.cancel().catch(() => {});
+        if (hop >= MAX_REDIRECTS) throw new Error(`too many redirects (${MAX_REDIRECTS})`);
+        current = await assertPublicUrl(new URL(location, current).toString());
+        continue;
+      }
+      const contentType = res.headers.get("content-type") ?? "";
+      const bytes = await readLimited(res);
+      const body = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+      return { status: res.status, body, contentType, finalUrl: current.toString() };
+    }
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener("abort", onAbort);
@@ -185,7 +319,8 @@ export const webFetchTool: Tool = {
   description:
     "Fetch a URL and return its readable text (HTML is stripped to plain text). Use for " +
     "documentation pages, READMEs, error explanations, and API references. Output is " +
-    "truncated if large. Only http(s) URLs are allowed.",
+    "truncated if large. Only public http(s) URLs are allowed: localhost, private, " +
+    "link-local, and cloud-metadata addresses are refused.",
   isReadOnly: true,
   parallelSafe: true,
   inputSchema: {
@@ -200,15 +335,15 @@ export const webFetchTool: Tool = {
     const url = str(input, "url");
     const maxChars = Math.min(100_000, Math.max(1_000, num(input, "max_chars") ?? 20_000));
     try {
-      const { status, body, contentType } = await httpGet(url, ctx.signal);
-      if (status >= 400) return { content: `Fetch failed: HTTP ${status} for ${url}`, isError: true };
+      const { status, body, contentType, finalUrl } = await httpGet(url, ctx.signal);
+      if (status >= 400) return { content: `Fetch failed: HTTP ${status} for ${finalUrl}`, isError: true };
       let text: string;
       if (/json/i.test(contentType)) text = body;
       else if (/html/i.test(contentType) || /^\s*</.test(body)) text = htmlToText(body);
       else text = body; // plain text or unknown
-      if (!text.trim()) return { content: `Fetched ${url} but it had no readable text.`, isError: true };
+      if (!text.trim()) return { content: `Fetched ${finalUrl} but it had no readable text.`, isError: true };
       const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(body)?.[1];
-      const header = title ? `# ${htmlToText(title).trim()}\nSource: ${url}\n\n` : `Source: ${url}\n\n`;
+      const header = title ? `# ${htmlToText(title).trim()}\nSource: ${finalUrl}\n\n` : `Source: ${finalUrl}\n\n`;
       return { content: truncate(header + text, maxChars) };
     } catch (err) {
       return { content: `Fetch error: ${describeError(err)}`, isError: true };

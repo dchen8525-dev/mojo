@@ -49,6 +49,9 @@ Ink 的交互式 UI。
   规则（`match` 支持 `*` 通配如 `"bash: npm run *"`），项目规则优先于全局、可提前自动放行/拒绝
 - **多模型**：Anthropic 与 OpenAI（Chat Completions）后端，`/model` 热切换，支持别名
   （`sonnet` / `opus` / `haiku` / `gpt`），按模型区分上下文窗口
+- **多套 API 配置**：Provider + Model + Base URL + API Key 打包成命名配置，存在全局
+  `~/.node-agent/config.json`；每个项目可选择其中一套（项目配置只存 id），也可设全局默认；
+  GUI 内可增删改选，切换后立即热生效
 - **流式输出 + 断点恢复**：被中断的流从已产出的部分继续，而不是重发整个请求；瞬时 API
   故障带退避重试
 - **精确的 token 统计**：以 API 返回的精确用量为锚点，加上对 CJK 友好的增量估算——压缩
@@ -156,6 +159,45 @@ $env:AGENT_BASE_URL = "https://mirror.example/v1"; agent -p "hello"
 
 启动后输入 `/model`（无参数）会显示当前 `provider:model` 与上下文窗口；
 缺 key 报错时的提示语会指明该去哪个文件补配置。
+
+### 多套 API 配置（profiles）
+
+把 provider / model / baseURL / apiKey 打包成一份命名配置，适合同时维护「官方 API」
+「公司网关」等多套环境：
+
+```json
+{
+  "apiProfiles": [
+    {
+      "id": "p1234abcd",
+      "name": "Anthropic 官方",
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-5",
+      "apiKey": "sk-ant-..."
+    },
+    {
+      "id": "p5678ef01",
+      "name": "公司网关",
+      "provider": "openai",
+      "model": "gpt-4o",
+      "baseURL": "https://llm.corp/v1",
+      "apiKey": "sk-..."
+    }
+  ],
+  "defaultApiProfile": "p1234abcd"
+}
+```
+
+- `apiProfiles` / `defaultApiProfile` 写在全局 `~/.node-agent/config.json`。
+- 项目在 `.node-agent/config.json` 里只写 `{ "apiProfile": "p5678ef01" }`，**不要**把 key
+  写进项目配置（它常被提交到 git）。
+- 解析优先级：命令行显式 `--provider` / `--model` > 会话内 `/model` > 项目选择 >
+  全局默认 > 环境变量 > 旧版顶层 `provider` / `model` / `baseURL` / `apiKey`。选中
+  profile 时，它的 `baseURL` / `apiKey` 不会被环境变量覆盖；`/model` 仍可临时换模型，
+  但沿用该 profile 的凭据。
+- 没有 profile 时仍兼容旧的单份顶层配置；旧配置和 profile 可以共存，选中 profile 后
+  以 profile 为准。
+- GUI 切换项目时会按新项目的选择重新解析 profile；会话内 `/model` 的临时覆盖不会跨项目保留。
 
 ### 主题（dark / light / auto）
 
@@ -341,11 +383,24 @@ YOLO 模式分段切换、PLAN 开关、上下文占用条、模型下拉与自�
 
 #### 切换项目
 
-GUI 的工作目录在启动时确定，但运行中可以随时切换：点击顶栏的目录（📁 ▾）。
-Electron 会弹出系统目录选择框；浏览器版输入绝对路径或相对当前项目的路径即可。
-切换会新建一个属于该目录的会话，并重载该项目的权限规则、hooks、自定义命令、LSP 与 MCP；
-旧项目仍在运行的后台任务会被终止。侧栏恢复其他项目的会话时，也会自动切回该会话记录的
-工作目录。想直接以某个项目启动，仍推荐 `cd <项目> && agent --gui`。
+GUI 的工作目录在启动时确定，但运行中可以随时切换：点击顶栏的目录（📁 ▾）打开「项目」
+对话框。填写工作目录，或点「浏览…」弹出文件夹选择器——Electron 用系统目录框，浏览器版
+用内置目录浏览器（只列出子文件夹，支持盘符切换、上级、直接输入路径）。点「打开项目」会
+切换目录并新建会话。切换会重载该项目的权限规则、hooks、自定义命令、LSP 与 MCP；旧项目
+仍在运行的后台任务会被终止。侧栏恢复其他项目的会话时，也会自动切回该会话记录的工作目录。
+想直接以某个项目启动，仍推荐 `cd <项目> && agent --gui`。
+
+#### API 配置（多套配置 + 实时切换）
+
+首次启动（或当前项目没有可用 key）时，GUI 会自动打开「API 配置」；也可以点侧栏底部的
+`⚙ API 设置`。这里只负责管理配置列表：新建 / 编辑 / 删除多套 provider + model + baseURL +
+key。
+
+聊天输入框下方有一个 API 选择器，列出所有配置。选中后会立即热切换
+provider、model、baseURL 与 key，并把选择写入当前项目（项目配置只存 id）；选
+「＋ API 配置…」直接打开配置管理。配置列表存在全局 `~/.node-agent/config.json`。
+
+没有 key 也能启动 GUI：终端模式（`agent` / `agent -p`）仍会在启动时检查凭据。
 
 ### 交互快捷键
 

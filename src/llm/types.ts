@@ -15,11 +15,27 @@ export interface AssistantTurn {
   stopReason: string | null;
 }
 
+/** Why a request is being retried; the UI maps this to a short label. */
+export type RetryReason = "rate-limit" | "timeout" | "server" | "connection";
+
+export interface RetryInfo {
+  /** 1-based number of the retry that is about to start. */
+  attempt: number;
+  maxAttempts: number;
+  /** How long the request will wait before retrying. */
+  delayMs: number;
+  /** HTTP status when the failure came from a response. */
+  status?: number;
+  reason: RetryReason;
+}
+
 export interface StreamEvents {
   onTextDelta?: (delta: string) => void;
   /** Reasoning/thinking tokens streamed before (or between) visible output. */
   onThinkingDelta?: (delta: string) => void;
   onToolUseStart?: (name: string, id: string) => void;
+  /** A transient failure is about to be retried after `delayMs`. */
+  onRetry?: (info: RetryInfo) => void;
 }
 
 /**

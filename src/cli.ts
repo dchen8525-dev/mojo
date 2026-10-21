@@ -6,6 +6,7 @@ import { createRequire } from "node:module";
 import { promises as fs } from "node:fs";
 import { render } from "ink";
 import { Agent, COMPACT_RATIO, type AgentEvents } from "./agent.js";
+import { parseArgs } from "./cliArgs.js";
 import { resolveSettings } from "./llm.js";
 import { PermissionManager } from "./permissions.js";
 import type { MessageParam, Risk } from "./types.js";
@@ -40,31 +41,6 @@ function contextBar(pct: number, theme: Theme): string {
   return pct >= COMPACT_RATIO * 100 ? ansiPaint(theme.error, bar) : ANSI.dim(bar);
 }
 
-function parseArgs(argv: string[]) {
-  const args = { resume: "", cont: false, print: "", model: "", provider: "", theme: "", auto: false, yolo: false, plan: false, mcpServer: false, noMcp: false, noLsp: false, help: false, version: false, exportId: "", exportFormat: "md" as "md" | "json", gui: false, port: 0 };
-  for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--resume" && argv[i + 1]) args.resume = argv[++i];
-    else if (argv[i] === "--continue") args.cont = true;
-    else if (argv[i] === "-p" && argv[i + 1]) args.print = argv[++i];
-    else if (argv[i] === "--export" && argv[i + 1]) args.exportId = argv[++i];
-    else if (argv[i] === "--format" && argv[i + 1] && (argv[++i] === "md" || argv[i] === "json")) args.exportFormat = argv[i] as "md" | "json";
-    else if (argv[i] === "--model" && argv[i + 1]) args.model = argv[++i];
-    else if (argv[i] === "--provider" && argv[i + 1]) args.provider = argv[++i];
-    else if (argv[i] === "--theme" && argv[i + 1]) args.theme = argv[++i];
-    else if (argv[i] === "--port" && argv[i + 1]) args.port = Number(argv[++i]) || 0;
-    else if (argv[i] === "--auto") args.auto = true;
-    else if (argv[i] === "--yolo") args.yolo = true;
-    else if (argv[i] === "--plan") args.plan = true;
-    else if (argv[i] === "--mcp-server") args.mcpServer = true;
-    else if (argv[i] === "--no-mcp") args.noMcp = true;
-    else if (argv[i] === "--no-lsp") args.noLsp = true;
-    else if (argv[i] === "--gui") args.gui = true;
-    else if (argv[i] === "-h" || argv[i] === "--help") args.help = true;
-    else if (argv[i] === "-v" || argv[i] === "--version") args.version = true;
-  }
-  return args;
-}
-
 async function resolveSession(args: { resume: string; cont: boolean }) {
   if (args.resume) {
     const loaded = await loadSession(args.resume);
@@ -78,6 +54,7 @@ async function resolveSession(args: { resume: string; cont: boolean }) {
       messages: loaded.messages.length ? loaded.messages : undefined,
       cwd: loaded.meta.cwd,
       model: loaded.meta.model,
+      todos: loaded.meta.todos,
     };
   }
   // --continue: jump into the most recently updated session, if any.
@@ -94,13 +71,14 @@ async function resolveSession(args: { resume: string; cont: boolean }) {
           messages: loaded.messages.length ? loaded.messages : undefined,
           cwd: loaded.meta.cwd,
           model: loaded.meta.model,
+          todos: loaded.meta.todos,
         };
       }
     }
     console.error(ANSI.warn("no previous session to continue - starting a new one."));
   }
   const s = await createSession(process.cwd());
-  return { id: s.id, messages: undefined as MessageParam[] | undefined, cwd: process.cwd(), model: undefined as string | undefined };
+  return { id: s.id, messages: undefined as MessageParam[] | undefined, cwd: process.cwd(), model: undefined as string | undefined, todos: undefined };
 }
 
 /** Restore the session's last-used model unless the user pinned one via CLI/env. */
@@ -167,7 +145,7 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
   const agent = new Agent(session.cwd, session.id, permissions, session.messages, session.model, hooks);
   restoreSessionModel(agent, session.model, args);
   if (args.plan) agent.planMode = true;
-  await agent.startSession(session.messages?.length ? "resume" : "startup");
+  await agent.startSession(session.messages?.length ? "resume" : "startup", undefined, session.todos);
   const events: AgentEvents = {
     onTextDelta: (d) => process.stdout.write(d),
     onToolStart: (_id, name, preview) => {
@@ -181,6 +159,11 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
     onCompacting: () => console.log(ANSI.warn("… compacting context …")),
     onCompacted: (before, after) =>
       console.log(ANSI.dim(`  context: ${before.toLocaleString()} → ${after.toLocaleString()} tokens`)),
+    onRetry: (info) => {
+      const why = info.reason === "server" ? `HTTP ${info.status}` : info.reason;
+      const secs = Math.round(info.delayMs / 100) / 10;
+      console.log(ANSI.warn(`… retrying in ${secs}s (${info.attempt}/${info.maxAttempts}, ${why})`));
+    },
   };
 
   const controller = new AbortController();
@@ -255,7 +238,7 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
   const agent = new Agent(session.cwd, session.id, permissions, session.messages, session.model, hooks);
   restoreSessionModel(agent, session.model, args);
   if (args.plan) agent.planMode = true;
-  await agent.startSession(session.messages?.length ? "resume" : "startup");
+  await agent.startSession(session.messages?.length ? "resume" : "startup", undefined, session.todos);
 
   const cmdCtx: CommandContext = {
     agent,
@@ -373,9 +356,12 @@ async function runGui(args: ReturnType<typeof parseArgs>) {
   const { startGuiBackend } = await import("./gui/backend.js");
   const { openBrowser } = await import("./gui/openBrowser.js");
 
+  let resume = args.resume || undefined;
+  if (!resume && args.cont) resume = (await listSessions())[0]?.id;
+
   const backend = await startGuiBackend({
     cwd: process.cwd(),
-    resume: args.resume || undefined,
+    resume,
     auto: args.auto,
     yolo: args.yolo,
     plan: args.plan,
@@ -420,6 +406,13 @@ async function main() {
     return;
   }
 
+  // The GUI can start without credentials: it opens its own API settings
+  // dialog and the first turn will explain what is missing.
+  if (args.gui) {
+    await runGui(args);
+    return;
+  }
+
   const settings = resolveSettings({ cwd: process.cwd() });
   if (!settings.apiKey) {
     console.error(
@@ -437,8 +430,7 @@ async function main() {
     return;
   }
 
-  if (args.gui) await runGui(args);
-  else if (args.print) await runPrint(args);
+  if (args.print) await runPrint(args);
   else await runInteractive(args);
 }
 

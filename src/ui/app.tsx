@@ -467,6 +467,14 @@ export function AgentApp({
             ...prev,
             { kind: "system", text: `context compacted: ${before.toLocaleString()} → ${after.toLocaleString()} tokens` },
           ]),
+        onRetry: (info) => {
+          const why = info.reason === "server" ? `HTTP ${info.status}` : info.reason;
+          const secs = Math.round(info.delayMs / 100) / 10;
+          setItems((prev) => [
+            ...prev,
+            { kind: "system", text: `retrying in ${secs}s (${info.attempt}/${info.maxAttempts}, ${why})` },
+          ]);
+        },
         onHook: (event, message) => setItems((prev) => [...prev, { kind: "system", text: `[hook ${event}] ${message}` }]),
         onPlanApproved: () => {
           setItems((prev) => [...prev, { kind: "system", text: "plan approved — switching to execution mode" }]);

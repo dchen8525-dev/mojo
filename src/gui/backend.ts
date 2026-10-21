@@ -16,7 +16,7 @@ import {
 } from "../llmProfiles.js";
 import { PermissionManager, type Mode } from "../permissions.js";
 import { HookManager } from "../hooks.js";
-import { McpManager, loadMcpConfig } from "../mcp.js";
+import { McpManager, loadMcpConfig, type McpServerStatus } from "../mcp.js";
 import { loadSlashCommands, type SlashCommand } from "../commands.js";
 import { configureLsp, disposeLsp, loadLspConfig } from "../lsp.js";
 import { backgroundManager } from "../tools/background.js";
@@ -35,6 +35,7 @@ import { SseHub } from "./sse.js";
 import { GuiRuntime } from "./state.js";
 import { startGuiServer, type RunningGui } from "./server.js";
 import { resolveProjectDir, samePath, type ProjectContext, type SwitchResult } from "./project.js";
+import { rememberRecentProject } from "./recentProjects.js";
 
 /** Where each SDK looks for the model list when no baseURL is configured. */
 const DEFAULT_BASE_URL = { anthropic: "https://api.anthropic.com", openai: "https://api.openai.com/v1" } as const;
@@ -100,11 +101,13 @@ interface SessionSeed {
   model?: string;
   /** UI-only subagent chains stored in the session file. */
   subCalls?: SessionSubCall[];
+  todos?: SessionMeta["todos"];
 }
 
 interface BuildOptions {
   session: SessionSeed;
   mode: Mode;
+  plan: boolean;
   noMcp: boolean;
   noLsp: boolean;
   askPermission: PermissionManager["askUser"];
@@ -120,6 +123,7 @@ async function seedSession(cwd: string, resumeId?: string): Promise<SessionSeed>
       messages: loaded.messages.length ? loaded.messages : undefined,
       model: loaded.meta.model,
       subCalls: loaded.subCalls,
+      todos: loaded.meta.todos,
     };
   }
   // No session file up front: `Agent.chat` creates one on the first message,
@@ -165,6 +169,7 @@ async function buildProject(cwd: string, opts: BuildOptions): Promise<ProjectCon
   // ---- agent ----
   const { session } = opts;
   const agent = new Agent(cwd, session.id, permissions, session.messages, session.model, hooks);
+  agent.planMode = opts.plan;
   if (session.model) {
     try {
       agent.switchModel(session.model);
@@ -172,7 +177,7 @@ async function buildProject(cwd: string, opts: BuildOptions): Promise<ProjectCon
       /* no key for that provider - keep the model resolved from config/env */
     }
   }
-  await agent.startSession(session.messages?.length ? "resume" : "startup");
+  await agent.startSession(session.messages?.length ? "resume" : "startup", undefined, session.todos);
 
   return { cwd, agent, permissions, hooks, customCommands, mcp };
 }
@@ -206,11 +211,13 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
   const project = await buildProject(cwd, {
     session,
     mode,
+    plan: !!opts.plan,
     noMcp,
     noLsp,
     askPermission: (desc, risk, preview) => runtime.askPermission(desc, risk, preview),
   });
   runtime.attach(project.agent, project.permissions);
+  await rememberRecentProject(cwd);
   void refreshModelMeta();
   // A stuck permission prompt with no client to answer it would hang the turn
   // forever; when the last tab/window closes, deny outstanding prompts.
@@ -238,6 +245,7 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
       return { ok: true, cwd: project.cwd, sessionId: project.agent.sessionId };
     }
 
+    const keepPlan = project.agent.planMode;
     runtime.switching = true;
     try {
       // Prepare the target session before tearing anything down, so a missing
@@ -265,6 +273,7 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
       const next = await buildProject(target, {
         session: nextSession,
         mode: project.permissions.mode,
+        plan: keepPlan,
         noMcp,
         noLsp,
         askPermission: (desc, risk, preview) => runtime.askPermission(desc, risk, preview),
@@ -274,6 +283,7 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
       runtime.subCalls.clear();
       for (const c of nextSession.subCalls ?? []) runtime.recordSubCall(c.toolUseId, c);
       runtime.attach(project.agent, project.permissions);
+      await rememberRecentProject(target);
       void refreshModelMeta();
       hub.broadcast("project_changed", {
         cwd: project.cwd,
@@ -422,6 +432,22 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
     }
   }
 
+  async function reloadMcp(): Promise<McpServerStatus[]> {
+    if (noMcp) return [];
+    try {
+      await project.mcp?.shutdown();
+    } catch {
+      /* best effort - a stuck server must not block reconfiguration */
+    }
+    project.mcp = null;
+    const configs = await loadMcpConfig(project.cwd);
+    if (!Object.keys(configs).length) return [];
+    const manager = new McpManager();
+    const statuses = await manager.connectAll(configs);
+    project.mcp = manager;
+    return statuses;
+  }
+
   const gui = await startGuiServer(
     {
       project,
@@ -429,6 +455,8 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
       runtime,
       token,
       switchProject,
+      reloadMcp,
+      mcpDisabled: noMcp,
       newSession: async () => {
         // Nothing on disk yet; the next message creates the session file.
         runtime.subCalls.clear();
@@ -448,7 +476,7 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
           const r = await switchProject(target, { resumeId: id });
           return r.ok ? null : r.error;
         }
-        await project.agent.resetSession(loaded.meta.id, loaded.messages, loaded.meta.model);
+        await project.agent.resetSession(loaded.meta.id, loaded.messages, loaded.meta.model, loaded.meta.todos);
         runtime.subCalls.clear();
         for (const c of loaded.subCalls) runtime.recordSubCall(c.toolUseId, c);
         if (loaded.meta.model) {

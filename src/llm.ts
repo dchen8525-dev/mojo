@@ -2,7 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { readFileSync } from "node:fs";
 import type { MessageParam, Tool, ContentBlock } from "./types.js";
-import type { AssistantTurn, LLMBackend, Provider, StreamEvents } from "./llm/types.js";
+import type { AssistantTurn, LLMBackend, Provider, RetryReason, StreamEvents } from "./llm/types.js";
 import { StreamInterrupted } from "./llm/types.js";
 import { AnthropicBackend } from "./llm/anthropic.js";
 import { OpenAiBackend } from "./llm/openai.js";
@@ -234,8 +234,12 @@ export class LLM {
     return this.backend.listModels(signal);
   }
 
-  /** Retry transient API failures (429 / 5xx / network) with backoff. */
-  private static async withRetry<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  /** Retry transient API failures (408 / 429 / 5xx / connection) with backoff. */
+  private static async withRetry<T>(
+    fn: () => Promise<T>,
+    signal?: AbortSignal,
+    events?: StreamEvents,
+  ): Promise<T> {
     const delays = [1000, 3000, 7000];
     let attempt = 0;
     for (;;) {
@@ -248,19 +252,60 @@ export class LLM {
         const e = err as { status?: number; headers?: { get?: (k: string) => string | null } };
         const status = e.status;
         const retriable =
-          status === undefined || status === 429 || status === 500 || status === 502 || status === 503 || status === 529;
+          status === 408 ||
+          status === 429 ||
+          (typeof status === "number" && status >= 500 && status < 600) ||
+          (status === undefined && LLM.isConnectionError(err));
         if (!retriable) throw err;
-        // Respect server-provided Retry-After when present (seconds), else backoff.
+        // Respect server-provided Retry-After when present, else back off.
         let wait = delays[attempt];
         const ra = e.headers?.get?.("retry-after");
         if (ra) {
           const secs = Number(ra);
-          if (Number.isFinite(secs) && secs >= 0) wait = Math.min(secs * 1000, 30_000);
+          // The header is either delta-seconds or an HTTP date.
+          const ms = Number.isFinite(secs) ? secs * 1000 : Date.parse(ra) - Date.now();
+          if (Number.isFinite(ms) && ms >= 0) wait = Math.min(ms, 30_000);
         }
-        await new Promise((res) => setTimeout(res, wait));
+        const reason: RetryReason =
+          status === 429 ? "rate-limit" : status === 408 ? "timeout" : status !== undefined ? "server" : "connection";
+        events?.onRetry?.({
+          attempt: attempt + 1,
+          maxAttempts: delays.length,
+          delayMs: wait,
+          ...(status !== undefined ? { status } : {}),
+          reason,
+        });
+        await LLM.abortableSleep(wait, signal);
+        if (signal?.aborted) throw err;
         attempt++;
       }
     }
+  }
+
+  /** SDKs wrap fetch failures in APIConnectionError; raw fetch throws TypeError. */
+  private static isConnectionError(err: unknown): boolean {
+    const name = (err as { name?: string } | null)?.name;
+    return (
+      name === "APIConnectionError" ||
+      name === "APIConnectionTimeoutError" ||
+      (err instanceof TypeError && /fetch failed|network|terminat/i.test(err.message))
+    );
+  }
+
+  /** Wake immediately on abort instead of finishing a multi-second backoff. */
+  private static abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.resolve();
+    return new Promise((resolve) => {
+      const onAbort = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
   }
 
   /**
@@ -299,9 +344,19 @@ export class LLM {
       }
 
       try {
-        const turn = await LLM.withRetry(() => this.backend.send(resumedMessages, system, tools, signal, events), signal);
+        // On a resumed attempt the model may re-emit text we already showed
+        // (OpenAI has no prefill). Hold its deltas back and emit only the new
+        // suffix once the overlap can be computed, so nothing is duplicated.
+        const attemptEvents = partial && events ? { ...events, onTextDelta: () => {} } : events;
+        const turn = await LLM.withRetry(
+          () => this.backend.send(resumedMessages, system, tools, signal, attemptEvents),
+          signal,
+          events,
+        );
         if (!partial) return turn;
         const text = LLM.mergeText(partial, turn.text);
+        const suffix = text.slice(partial.length);
+        if (suffix) events?.onTextDelta?.(suffix);
         return {
           ...turn,
           text,
@@ -311,7 +366,11 @@ export class LLM {
           ] as ContentBlock[],
         };
       } catch (err) {
-        if (err instanceof StreamInterrupted && attempt < MAX_RESUMES && !signal?.aborted) {
+        // Backends surface aborts differently (APIUserAbortError, or the last
+        // transient error when cancellation lands during a backoff). Callers
+        // only special-case the "aborted" message, so normalize it here.
+        if (signal?.aborted) throw new Error("aborted");
+        if (err instanceof StreamInterrupted && attempt < MAX_RESUMES) {
           partial += err.partialText;
           continue;
         }

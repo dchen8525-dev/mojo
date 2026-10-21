@@ -17,7 +17,8 @@ import { logUsage } from "./usage.js";
 import { appendMemoryNote, renderMemory } from "./memory.js";
 import { buildReviewPrompt, collectReview, REVIEW_SYSTEM } from "./review.js";
 import { truncate } from "./tools/utils.js";
-import { appendMessages, appendModel, createSession, forkSession, rewriteMessages } from "./session.js";
+import { appendMessages, appendModel, createSession, forkSession, rewriteMessages, saveTodos } from "./session.js";
+import type { TodoItem } from "./tools/todo.js";
 import {
   buildAckMessage,
   buildSummarizerInput,
@@ -65,8 +66,19 @@ export class Agent {
   private hooks?: HookManager;
   /** stdout of SessionStart hooks; injected into the system prompt for the whole session. */
   private sessionStartContext = "";
+  /** Built once per user turn; invalidated when plan mode changes. */
+  private systemPromptCache: string | null = null;
+  private plan = false;
+
   /** Plan mode: only read-only tools + exit_plan are offered until the user approves a plan. */
-  planMode = false;
+  get planMode(): boolean {
+    return this.plan;
+  }
+  set planMode(value: boolean) {
+    if (this.plan === value) return;
+    this.plan = value;
+    this.systemPromptCache = null;
+  }
 
   get model(): string {
     return this.llm.model;
@@ -139,14 +151,23 @@ export class Agent {
    * system prompt, so a hook can seed project context, env notes, or checklists.
    * `source` is "startup" for a fresh session, "resume" when history was loaded.
    */
-  async startSession(source: "startup" | "resume", events?: AgentEvents): Promise<void> {
+  async startSession(source: "startup" | "resume", events?: AgentEvents, todos: TodoItem[] = []): Promise<void> {
+    // A session start replaces the process-global plan: /new, /resume and
+    // project switches restore their own list (empty for a fresh session).
+    todoStore.items = [...todos];
     if (!this.hooks) return;
     const hr = await this.hooks.run("SessionStart", { cwd: this.cwd, session_id: this.sessionId, source }, undefined);
     if (hr.context) this.sessionStartContext = hr.context.trim();
     if (hr.reason) events?.onHook?.("SessionStart", hr.reason);
   }
 
+  /** Per-turn cache: the tool loop calls this on every iteration. */
   private async systemPrompt(): Promise<string> {
+    if (this.systemPromptCache === null) this.systemPromptCache = await this.buildSystemPrompt();
+    return this.systemPromptCache;
+  }
+
+  private async buildSystemPrompt(): Promise<string> {
     let gitStatus = "(not a git repo)";
     try {
       gitStatus = execSync("git status --short --branch", {
@@ -358,6 +379,7 @@ Rules:
     // must not litter the sidebar with empty sessions; a session exists once
     // the user actually sends something.
     await this.ensureSession();
+    this.systemPromptCache = null; // fresh git status / memory for each user turn
     let prompt = userText;
     if (this.hooks) {
       const hr = await this.hooks.run("UserPromptSubmit", { cwd: this.cwd, session_id: this.sessionId, prompt }, undefined);
@@ -521,6 +543,9 @@ Rules:
           events?.onPlanApproved?.();
         },
       });
+      if (tu.name === "todo_write" && !result.isError) {
+        await saveTodos(this.sessionId, todoStore.items);
+      }
       events?.onToolEnd?.(tu.id, tu.name, !result.isError, result.content.slice(0, 200), result.content);
       if (this.hooks) {
         const hr = await this.hooks.run("PostToolUse", {
@@ -571,14 +596,14 @@ Rules:
    * /resume, /clear, /fork and the GUI session switcher; each of those is a
    * session start from the model's point of view, so SessionStart fires here.
    */
-  async resetSession(sessionId: string, history?: MessageParam[], modelSpec?: string) {
+  async resetSession(sessionId: string, history?: MessageParam[], modelSpec?: string, todos: TodoItem[] = []) {
     this.sessionId = sessionId;
     this.checkpoints = new CheckpointStore(sessionId);
     this.messages = history ?? [];
     this.persisted = this.messages.length;
     this.lastPersistedModel = modelSpec ?? "";
     this.tokens.invalidate();
-    await this.startSession(this.messages.length ? "resume" : "startup");
+    await this.startSession(this.messages.length ? "resume" : "startup", undefined, todos);
   }
 
   /**
@@ -591,10 +616,12 @@ Rules:
     const cut = pickForkBoundary(this.messages, keep);
     const prefix = this.messages.slice(0, cut);
     if (!prefix.length) return null;
-    const { id } = await forkSession(this.cwd, prefix, { title, fromId: this.sessionId });
+    const { id } = await forkSession(this.cwd, prefix, { title, fromId: this.sessionId, todos: todoStore.items });
+    // A fork continues the same job, so its plan carries over.
+    const todos = [...todoStore.items];
     // Re-point this agent at the new file: same in-memory history, but future
     // turns persist to (and can diverge in) the fork instead of the original.
-    await this.resetSession(id, prefix, `${this.llm.provider}:${this.llm.model}`);
+    await this.resetSession(id, prefix, `${this.llm.provider}:${this.llm.model}`, todos);
     return id;
   }
 }

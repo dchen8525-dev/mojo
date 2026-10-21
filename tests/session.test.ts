@@ -36,6 +36,23 @@ describe("createSession / loadSession", () => {
     expect(loaded?.meta.cwd).toBe("D:\\proj");
   });
 
+  it("sees metadata and message changes immediately despite the parse cache", async () => {
+    const { id } = await session.createSession("cache");
+    expect((await session.loadSession(id))?.messages).toHaveLength(0); // warm the cache
+
+    await session.appendMessages(id, [{ role: "user", content: "one" }]);
+    expect((await session.loadSession(id))?.messages).toHaveLength(1);
+
+    await session.renameSession(id, "Renamed");
+    expect((await session.listSessions()).find((m) => m.id === id)?.title).toBe("Renamed");
+
+    await session.tagSession(id, ["alpha"]);
+    expect((await session.listSessions()).find((m) => m.id === id)?.tags).toEqual(["alpha"]);
+
+    await session.deleteSession(id);
+    expect(await session.loadSession(id)).toBeNull();
+  });
+
   it("updatedAt reflects the file mtime, not creation time", async () => {
     const { id } = await session.createSession("x");
     await new Promise((r) => setTimeout(r, 1100)); // mtime granularity
@@ -165,6 +182,84 @@ describe("renameSession / deleteSession", () => {
     await session.renameSession(id, "listed");
     const found = (await session.listSessions()).find((s) => s.id === id);
     expect(found?.title).toBe("listed");
+  });
+});
+
+describe("atomic session rewrites", () => {
+  it("replaces the file through rename and leaves no temp files", async () => {
+    const { id } = await session.createSession("x");
+    await session.appendMessages(id, [{ role: "user", content: "keep" }]);
+    const file = path.join(fakeHome, ".node-agent", "sessions", `${id}.jsonl`);
+    const rename = vi.spyOn(fs, "rename");
+    try {
+      expect(await session.renameSession(id, "Atomic")).toBe(true);
+      expect(rename).toHaveBeenCalled();
+      expect(String(rename.mock.calls.at(-1)?.[0])).toMatch(/\.tmp$/);
+      expect(String(rename.mock.calls.at(-1)?.[1])).toBe(file);
+    } finally {
+      rename.mockRestore();
+    }
+
+    const leftovers = (await fs.readdir(path.dirname(file))).filter((f) => f.endsWith(".tmp"));
+    expect(leftovers).toEqual([]);
+    const lines = (await fs.readFile(file, "utf8")).split("\n").filter(Boolean);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('"title":"Atomic"');
+  });
+
+  it("keeps the previous contents when the rename fails", async () => {
+    const { id } = await session.createSession("x");
+    expect(await session.renameSession(id, "Before")).toBe(true);
+    const file = path.join(fakeHome, ".node-agent", "sessions", `${id}.jsonl`);
+
+    const rename = vi.spyOn(fs, "rename").mockRejectedValueOnce(
+      Object.assign(new Error("rename failed"), { code: "ENOENT" }),
+    );
+    try {
+      await expect(session.renameSession(id, "Broken")).rejects.toThrow("rename failed");
+    } finally {
+      rename.mockRestore();
+    }
+
+    expect((await session.loadSession(id))?.meta.title).toBe("Before");
+    expect((await fs.readFile(file, "utf8")).split("\n").filter(Boolean)).toHaveLength(1);
+    expect((await fs.readdir(path.dirname(file))).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("retries a transient Windows rename failure", async () => {
+    const { id } = await session.createSession("x");
+    const original = fs.rename.bind(fs);
+    let calls = 0;
+    const rename = vi.spyOn(fs, "rename").mockImplementation(async (from, to) => {
+      if (calls++ === 0) throw Object.assign(new Error("locked by scanner"), { code: "EPERM" });
+      return original(from, to);
+    });
+    try {
+      expect(await session.renameSession(id, "Retried")).toBe(true);
+    } finally {
+      rename.mockRestore();
+    }
+    expect(calls).toBe(2);
+    expect((await session.loadSession(id))?.meta.title).toBe("Retried");
+  });
+
+  it("serializes concurrent meta updates and appends without losing data", async () => {
+    const { id } = await session.createSession("race");
+    const jobs: Array<Promise<unknown>> = Array.from({ length: 10 }, (_, i) =>
+      session.appendMessages(id, [{ role: "user", content: `m${i}` }]),
+    );
+    jobs.push(session.renameSession(id, "Race"));
+    jobs.push(session.tagSession(id, ["x"]));
+    jobs.push(session.saveTodos(id, [{ id: "1", content: "todo", status: "pending" }]));
+    await Promise.all(jobs);
+
+    const loaded = await session.loadSession(id);
+    expect(loaded?.messages.map((m) => m.content).sort()).toEqual(
+      Array.from({ length: 10 }, (_, i) => `m${i}`).sort(),
+    );
+    expect(loaded?.meta.title).toBe("Race");
+    expect(loaded?.meta.tags).toEqual(["x"]);
+    expect(loaded?.meta.todos).toEqual([{ id: "1", content: "todo", status: "pending" }]);
   });
 });
 
@@ -321,5 +416,55 @@ describe("renderSessionMarkdown", () => {
     ]);
     expect(out).toContain("(error)");
     expect(out).toContain("42");
+  });
+});
+
+describe("todo persistence", () => {
+  const items = [
+    { id: "1", content: "plan", status: "in_progress" as const },
+    { id: "2", content: "done", status: "completed" as const },
+  ];
+
+  it("saves todos into the meta header and reloads them", async () => {
+    const { id } = await session.createSession("todos");
+    expect(await session.saveTodos(id, items)).toBe(true);
+    expect((await session.loadSession(id))?.meta.todos).toEqual(items);
+
+    // Rewriting the header again must replace the list, not duplicate it.
+    expect(await session.saveTodos(id, [items[0]])).toBe(true);
+    expect((await session.loadSession(id))?.meta.todos).toEqual([items[0]]);
+  });
+
+  it("clears todos from the header when given an empty list", async () => {
+    const { id } = await session.createSession("todos");
+    await session.saveTodos(id, items);
+    await session.saveTodos(id, []);
+    expect((await session.loadSession(id))?.meta.todos).toBeUndefined();
+  });
+
+  it("drops malformed todo entries instead of failing", async () => {
+    const { id } = await session.createSession("todos");
+    await session.saveTodos(id, [
+      { id: "ok", content: "kept", status: "pending" },
+      { id: 1, content: "bad" },
+      { id: "unknown", content: "status falls back", status: "strange" },
+    ] as never);
+    expect((await session.loadSession(id))?.meta.todos).toEqual([
+      { id: "ok", content: "kept", status: "pending" },
+      { id: "unknown", content: "status falls back", status: "pending" },
+    ]);
+  });
+
+  it("carries todos into a fork", async () => {
+    const fork = await session.forkSession("D:\\proj", [{ role: "user", content: "hi" }], {
+      fromId: "abc123",
+      todos: items,
+    });
+    expect(fork.meta.todos).toEqual(items);
+    expect((await session.loadSession(fork.id))?.meta.todos).toEqual(items);
+  });
+
+  it("returns false for a missing session", async () => {
+    expect(await session.saveTodos("deadbeef", items)).toBe(false);
   });
 });

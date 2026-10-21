@@ -56,7 +56,8 @@ function scrub(html) {
 }
 
 function renderMarkdown(el, text) {
-  el.innerHTML = scrub(marked.parse(text ?? "", { breaks: true }));
+  const html = marked.parse(text ?? "", { breaks: true });
+  el.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(html, { USE_PROFILES: { html: true } }) : scrub(html);
   // copy buttons on code blocks
   el.querySelectorAll("pre").forEach((pre) => {
     const btn = document.createElement("button");
@@ -69,7 +70,10 @@ function renderMarkdown(el, text) {
     };
     pre.appendChild(btn);
   });
-  el.querySelectorAll("a").forEach((a) => a.setAttribute("target", "_blank"));
+  el.querySelectorAll("a").forEach((a) => {
+    a.setAttribute("target", "_blank");
+    a.setAttribute("rel", "noopener noreferrer");
+  });
 }
 
 /* ---------------- state ---------------- */
@@ -85,7 +89,12 @@ const state = {
   items: [], // {kind, ...} finalized transcript entries
   liveTurn: null, // {turnId, text, thinking, tools[]}
   perms: [], // queued permission requests
+  todos: [], // latest todo plan (drives the 待办 popover)
+  images: [], // staged image attachments for the next message
 };
+
+let todoSyncSeq = 0;
+let todoSyncEpoch = 0;
 
 const transcriptEl = $("#transcript");
 
@@ -721,6 +730,9 @@ async function refreshState() {
   mountLive();
   updateWelcome();
   if (Array.isArray(s.customCommands)) customCmds = s.customCommands;
+  todoSyncEpoch++; // invalidate any todo-only refresh that started earlier
+  state.todos = Array.isArray(s.todos) ? s.todos : [];
+  renderTodos();
   // Re-show any prompts that arrived while we were disconnected.
   if (Array.isArray(s.pendingPermissions) && s.pendingPermissions.length) {
     const known = new Set(state.perms.map((p) => p.id));
@@ -756,12 +768,9 @@ function syncPermissionUi(s) {
 /** 工具行右端的 mono 元信息；空项连同它前面的分隔线一起隐藏。 */
 function updateStatus(s) {
   const pct = s.contextWindow > 0 ? Math.min(100, Math.round((s.tokenEstimate / s.contextWindow) * 100)) : 0;
-  const todos = s.todos ?? [];
   setMeta("#meta-session", null, s.sessionId ?? "");
   setMeta("#meta-ctx", "#sep-ctx", `上下文 ${pct}%`);
   setMeta("#meta-cost", "#sep-cost", compactCost(s.cost));
-  setMeta("#meta-todo", "#sep-todo", todos.length ? `待办 ${todos.filter((t) => t.status === "completed").length}/${todos.length}` : "");
-  setMeta("#meta-bg", "#sep-bg", s.backgroundTasks ? `后台任务 ${s.backgroundTasks}` : "");
 }
 
 /** 终端 /cost 是多行报告；工具行只需要一个短数字。 */
@@ -781,7 +790,7 @@ function setMeta(sel, sepSel, text) {
 function updateComposer() {
   $("#send").classList.toggle("hidden", state.busy);
   $("#stop").classList.toggle("hidden", !state.busy);
-  $("#send").disabled = !input.value.trim();
+  $("#send").disabled = !input.value.trim() && !state.images.length;
   $("#input").disabled = false; // still allow typing while busy; send is guarded
 }
 
@@ -905,6 +914,7 @@ function connectSSE() {
   });
 
   on("tool_end", (d) => {
+    if (d.name === "todo_write") void refreshTodos();
     if (!state.liveTurn) return;
     const t = state.liveTurn.tools.find((x) => x.id === d.id);
     if (t) {
@@ -967,6 +977,17 @@ function connectSSE() {
   on("cost_warning", (d) => appendItem(makeSystemItem("⚠ " + d.message, "error")));
   on("compacting", () => appendItem(makeSystemItem("… 正在压缩上下文 …")));
   on("compacted", (d) => appendItem(makeSystemItem(`上下文: ${d.before.toLocaleString()} → ${d.after.toLocaleString()} tokens`)));
+  on("retry", (d) => {
+    const why =
+      d.reason === "rate-limit"
+        ? "限流"
+        : d.reason === "timeout"
+          ? "请求超时"
+          : d.reason === "server"
+            ? `服务端错误 ${d.status ?? ""}`.trim()
+            : "连接失败";
+    appendItem(makeSystemItem(`… ${Math.round(d.delayMs / 100) / 10} 秒后重试（${d.attempt}/${d.maxAttempts} · ${why}）`));
+  });
   on("hook", (d) => appendItem(makeSystemItem(`[hook ${d.event}] ${d.message}`)));
   on("plan_approved", () => {
     syncPermissionUi({ planMode: false, mode: state.mode });
@@ -977,6 +998,10 @@ function connectSSE() {
   on("project_changed", async () => {
     await refreshState();
     loadSessions();
+    loadBackground(true); // switching projects kills the old project's tasks
+    // MCP servers, permission rules, and the session budget are project-scoped.
+    if (!$("#manage-modal").classList.contains("hidden")) void loadManagement();
+    if (!$("#usage-modal").classList.contains("hidden")) void loadUsage();
   });
 
   on("permission_request", (d) => {
@@ -1028,6 +1053,115 @@ function clearStalePermissions() {
 
 document.querySelectorAll(".perm-actions button").forEach((b) => (b.onclick = () => answerPermission(b.dataset.decision)));
 
+/* ---------------- narrow-screen drawer ---------------- */
+
+const sidebarEl = $("#sidebar");
+const sidebarToggle = $("#sidebar-toggle");
+const sidebarOverlay = $("#sidebar-overlay");
+const narrowQuery = window.matchMedia("(max-width: 860px)");
+
+function setSidebarOpen(open) {
+  const wasOpen = sidebarEl.classList.contains("open");
+  const next = !!open && narrowQuery.matches;
+  sidebarEl.classList.toggle("open", next);
+  sidebarOverlay.classList.toggle("hidden", !next);
+  $("#main").inert = next;
+  document.body.classList.toggle("drawer-locked", next);
+  sidebarToggle.setAttribute("aria-expanded", String(next));
+  sidebarToggle.setAttribute("aria-label", next ? "关闭侧栏" : "打开侧栏");
+  sidebarToggle.title = next ? "关闭侧栏" : "打开侧栏";
+  if (next) {
+    setBackgroundOpen(false);
+    setTodosOpen(false);
+    // Keep keyboard focus out of the page area the overlay covers.
+    if (!wasOpen) $("#new-session").focus({ preventScroll: true });
+  } else if (wasOpen && narrowQuery.matches && !document.querySelector(".modal:not(.hidden)")) {
+    sidebarToggle.focus({ preventScroll: true });
+  }
+}
+
+sidebarToggle.onclick = () => setSidebarOpen(!sidebarEl.classList.contains("open"));
+sidebarOverlay.onclick = () => setSidebarOpen(false);
+narrowQuery.addEventListener("change", () => setSidebarOpen(false));
+
+// On phones the drawer would otherwise cover the conversation after navigating.
+sidebarEl.addEventListener("click", (e) => {
+  if (e.target.closest(".session-item") && !e.target.closest(".session-actions")) setSidebarOpen(false);
+  else if (e.target.closest("#new-session, #help-btn, #llm-config, #quit")) setSidebarOpen(false);
+});
+
+// Edge swipe: open from the left edge, close with a left flick. Passive
+// listeners keep vertical scrolling smooth; text fields are ignored so
+// selecting text in the search box cannot close the drawer.
+let swipeStartX = 0;
+let swipeStartY = 0;
+let swipeStartAt = 0;
+let swipeBlocked = false;
+document.addEventListener(
+  "touchstart",
+  (e) => {
+    swipeStartAt = 0;
+    if (!narrowQuery.matches || e.touches.length !== 1) return;
+    const t = e.touches[0];
+    swipeStartX = t.clientX;
+    swipeStartY = t.clientY;
+    swipeStartAt = Date.now();
+    swipeBlocked = e.target instanceof Element && !!e.target.closest("input, textarea, select, [contenteditable]");
+  },
+  { passive: true },
+);
+document.addEventListener(
+  "touchend",
+  (e) => {
+    const startedAt = swipeStartAt;
+    swipeStartAt = 0;
+    if (!startedAt || !narrowQuery.matches || swipeBlocked || document.querySelector(".modal:not(.hidden)")) return;
+    const t = e.changedTouches[0];
+    if (!t) return;
+    const dx = t.clientX - swipeStartX;
+    const dy = t.clientY - swipeStartY;
+    if (Date.now() - startedAt > 600 || Math.abs(dy) > 50 || Math.abs(dx) < 60) return;
+    const open = sidebarEl.classList.contains("open");
+    if (!open && dx > 0 && swipeStartX <= 24) setSidebarOpen(true);
+    else if (open && dx < 0) setSidebarOpen(false);
+  },
+  { passive: true },
+);
+
+/* ---------------- shortcut help ---------------- */
+
+let helpReturnFocus = null;
+
+function openHelp() {
+  helpReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  hidePalette();
+  setBackgroundOpen(false);
+  setTodosOpen(false);
+  $("#help-modal").classList.remove("hidden");
+  $("#help-close").focus({ preventScroll: true });
+}
+
+function closeHelp() {
+  $("#help-modal").classList.add("hidden");
+  const back = helpReturnFocus;
+  helpReturnFocus = null;
+  if (back && back.isConnected && back.getClientRects().length) back.focus({ preventScroll: true });
+  else $("#input").focus({ preventScroll: true });
+}
+
+function isTypingTarget(target) {
+  return (
+    target instanceof HTMLElement &&
+    (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable)
+  );
+}
+
+$("#help-btn").onclick = () => {
+  setSidebarOpen(false);
+  openHelp();
+};
+$("#help-close").onclick = closeHelp;
+
 /* ---------------- composer ---------------- */
 
 const input = $("#input");
@@ -1040,7 +1174,13 @@ input.addEventListener("input", () => {
 });
 
 input.addEventListener("keydown", (e) => {
+  if (e.isComposing || e.keyCode === 229) return; // Enter/Escape belong to the IME while composing
   if (!$("#perm-modal").classList.contains("hidden")) return; // modal owns keys
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    send();
+    return;
+  }
   if (paletteOpen()) {
     if (e.key === "ArrowDown") { e.preventDefault(); movePalette(1); return; }
     if (e.key === "ArrowUp") { e.preventDefault(); movePalette(-1); return; }
@@ -1058,7 +1198,7 @@ input.addEventListener("keydown", (e) => {
 
 async function send() {
   const text = input.value.trim();
-  if (!text) return;
+  if (!text && !state.images.length) return;
   if (state.busy) {
     toast("上一轮还在进行中，可先点“停止”", true);
     return;
@@ -1066,9 +1206,12 @@ async function send() {
   input.value = "";
   input.style.height = "auto";
   hidePalette();
+  const images = state.images;
+  state.images = [];
+  renderAttachments();
   updateComposer();
   try {
-    const r = await api("/api/chat", { text });
+    const r = await api("/api/chat", { text, images: images.length ? images : undefined });
     if (r.error === "busy") toast("智能体正忙", true);
   } catch (err) {
     toast("发送失败: " + err.message, true);
@@ -1087,11 +1230,161 @@ document.querySelectorAll("#welcome .hint").forEach((b) => {
   };
 });
 
+/* attachments */
+$("#attach").onclick = () => $("#file-input").click();
+$("#file-input").onchange = (e) => {
+  for (const file of e.target.files) addImageFile(file);
+  e.target.value = "";
+};
+
+function addImageFile(file) {
+  if (file.size > 5 * 1024 * 1024) {
+    toast(`图片 ${file.name} 超过 5MB 上限`, true);
+    return false;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const dataUrl = reader.result;
+    const base64 = dataUrl.split(",")[1];
+    state.images.push({ type: "image", source: { type: "base64", media_type: file.type, data: base64 } });
+    renderAttachments();
+    updateComposer();
+  };
+  reader.readAsDataURL(file);
+  return true;
+}
+
+function renderAttachments() {
+  const box = $("#attachments");
+  box.replaceChildren();
+  state.images.forEach((img, i) => {
+    const chip = el("span", "chip");
+    const im = document.createElement("img");
+    im.src = `data:${img.source.media_type};base64,${img.source.data}`;
+    const x = el("button", "", "✕");
+    x.onclick = () => {
+      state.images.splice(i, 1);
+      renderAttachments();
+      updateComposer();
+    };
+    chip.appendChild(im);
+    chip.appendChild(x);
+    box.appendChild(chip);
+  });
+}
+
+/* ---------------- drag & drop ---------------- */
+
+const TEXT_FILE_RE =
+  /\.(txt|md|markdown|json|jsonc|json5|js|mjs|cjs|jsx|ts|tsx|css|scss|less|html?|xml|svg|ya?ml|toml|ini|cfg|conf|env|log|csv|tsv|py|rs|go|java|kt|kts|c|h|cc|cpp|hpp|cs|rb|php|sh|bash|zsh|ps1|bat|sql|gradle|swift|lua|vue|svelte|dockerfile|gitignore)$/i;
+const MAX_DROP_TEXT = 200 * 1024;
+
+let dragDepth = 0;
+
+function fileDrag(e) {
+  return Array.from(e.dataTransfer?.types ?? []).includes("Files");
+}
+
+function endDrag() {
+  dragDepth = 0;
+  $("#composer").classList.remove("dragover");
+  $("#drop-hint").classList.add("hidden");
+}
+
+/** Relative path when the dropped file lives under the project, else "". */
+function relativeToCwd(abs) {
+  const cwd = (state.cwd || "").replace(/\\/g, "/").replace(/\/+$/, "");
+  const norm = abs.replace(/\\/g, "/");
+  if (!cwd) return "";
+  const lower = norm.toLowerCase();
+  const base = cwd.toLowerCase();
+  if (!lower.startsWith(base + "/")) return "";
+  return norm.slice(cwd.length + 1);
+}
+
+function insertComposerText(text) {
+  const start = input.selectionStart ?? input.value.length;
+  const end = input.selectionEnd ?? start;
+  const before = input.value.slice(0, start);
+  const after = input.value.slice(end);
+  const pad = before && !/\s$/.test(before) ? " " : "";
+  input.value = before + pad + text + after;
+  const pos = before.length + pad.length + text.length;
+  input.setSelectionRange(pos, pos);
+  input.focus();
+  input.dispatchEvent(new Event("input"));
+}
+
+async function addDroppedFiles(files) {
+  let added = 0;
+  for (const file of files) {
+    if (file.type.startsWith("image/")) {
+      if (addImageFile(file)) added++;
+      continue;
+    }
+    // Electron: resolve the real path so the agent can read the file with @path.
+    const abs = window.mojo?.getPathForFile?.(file) || "";
+    const rel = abs ? relativeToCwd(abs) : "";
+    if (rel) {
+      insertComposerText(`@${/[\s"(),;]/.test(rel) ? `"${rel}"` : rel} `);
+      added++;
+      continue;
+    }
+    if (!file.type.startsWith("text/") && !TEXT_FILE_RE.test(file.name)) {
+      toast(`${file.name} 不在当前项目内，且不是文本文件，无法插入`, true);
+      continue;
+    }
+    if (file.size > MAX_DROP_TEXT) {
+      toast(`${file.name} 超过 200KB，未插入`, true);
+      continue;
+    }
+    try {
+      const content = await file.text();
+      insertComposerText(`\n<file name="${file.name.replace(/"/g, "'")}">\n${content}\n</file>\n`);
+      added++;
+    } catch {
+      toast(`无法读取 ${file.name}`, true);
+    }
+  }
+  if (added) toast(`已添加 ${added} 个附件`);
+}
+
+window.addEventListener("dragenter", (e) => {
+  if (!fileDrag(e)) return;
+  e.preventDefault();
+  dragDepth++;
+  $("#composer").classList.add("dragover");
+  $("#drop-hint").classList.remove("hidden");
+});
+
+window.addEventListener("dragover", (e) => {
+  if (!fileDrag(e)) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "copy";
+});
+
+window.addEventListener("dragleave", (e) => {
+  if (!fileDrag(e)) return;
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (!dragDepth) endDrag();
+});
+
+window.addEventListener("drop", (e) => {
+  if (!fileDrag(e)) return;
+  // Always stop the browser from navigating to the file.
+  e.preventDefault();
+  endDrag();
+  if (document.querySelector(".modal:not(.hidden)")) return;
+  const files = [...(e.dataTransfer?.files ?? [])];
+  if (files.length) void addDroppedFiles(files);
+});
+
 /* command palette */
 const BUILTIN_CMDS = [
   ["/help", "命令列表"],
   ["/model", "查看/切换模型"],
   ["/compact", "压缩上下文"],
+  ["/context", "上下文占用明细"],
   ["/cost", "费用与预算"],
   ["/plan", "切换 Plan 模式"],
   ["/auto", "切换自动批准"],
@@ -1103,6 +1396,7 @@ const BUILTIN_CMDS = [
   ["/resume ", "恢复会话 <id>"],
   ["/fork ", "从当前会话分叉"],
   ["/rename ", "给当前会话改名"],
+  ["/tag ", "设置会话标签 <标签…>"],
   ["/export ", "导出会话 md|json"],
   ["/clear", "新建会话"],
   ["/todos", "查看待办"],
@@ -1697,9 +1991,604 @@ $("#cfg-form").addEventListener("submit", (e) => {
   saveCfgProfile();
 });
 
+/* ---------------- usage dashboard ---------------- */
+
+const fmtUsd = (usd) => {
+  const v = Number(usd) || 0;
+  if (v >= 1) return "$" + v.toFixed(2);
+  if (v > 0) return "$" + v.toFixed(4);
+  return "$0.00";
+};
+
+const fmtTokens = (n) => {
+  const v = Number(n) || 0;
+  if (v >= 1_000_000) return (v / 1_000_000).toFixed(v >= 10_000_000 ? 0 : 1) + "M";
+  if (v >= 1_000) return (v / 1_000).toFixed(v >= 10_000 ? 0 : 1) + "k";
+  return String(v);
+};
+
+async function openUsage() {
+  $("#usage-modal").classList.remove("hidden");
+  await loadUsage();
+}
+
+async function loadUsage() {
+  let data;
+  try {
+    data = await api("/api/usage");
+  } catch {
+    toast("读取用量失败", true);
+    return;
+  }
+  if (data.error) return toast("读取用量失败: " + data.error, true);
+  renderUsage(data);
+}
+
+function renderUsage(data) {
+  const total = data.totals ?? {};
+  const session = data.session ?? {};
+
+  const cards = [
+    {
+      cls: "accent",
+      label: "累计花费",
+      value: fmtUsd(total.usd),
+      sub: `${(total.requests ?? 0).toLocaleString()} 次请求 · ${total.sessions ?? 0} 个会话 · ${total.days ?? 0} 天`,
+    },
+    {
+      cls: "green",
+      label: "缓存命中率",
+      value: ((total.cacheShare ?? 0) * 100).toFixed(1) + "%",
+      sub: `读 ${fmtTokens(total.cacheRead)} · 写 ${fmtTokens(total.cacheWrite)}`,
+    },
+    {
+      label: "输入 tokens",
+      value: fmtTokens(total.input),
+      sub: "未命中缓存的输入",
+    },
+    {
+      label: "输出 tokens",
+      value: fmtTokens(total.output),
+      sub: total.unpriced ? `${total.unpriced} 次请求无定价` : "全部请求已定价",
+    },
+  ];
+  const cardBox = $("#usage-cards");
+  cardBox.replaceChildren();
+  for (const c of cards) {
+    const card = el("div", "usage-stat" + (c.cls ? " " + c.cls : ""));
+    card.appendChild(el("div", "u-label", c.label));
+    card.appendChild(el("div", "u-value", c.value));
+    card.appendChild(el("div", "u-sub", c.sub));
+    cardBox.appendChild(card);
+  }
+
+  const budget = session.budgetUsd;
+  if (document.activeElement !== $("#budget-input")) $("#budget-input").value = budget != null ? String(budget) : "";
+  const used = budget ? Math.min(999, Math.round(((session.usd ?? 0) / budget) * 100)) : 0;
+  $("#budget-note").textContent =
+    `本会话 ${fmtUsd(session.usd)} · ${session.requests ?? 0} 次请求` + (budget != null ? ` · 已用 ${used}%` : " · 未设上限");
+
+  const models = data.byModel ?? [];
+  renderUsageRows("#usage-models", models, { empty: "还没有用量记录。", label: (r) => r.key });
+  $("#usage-models-count").textContent = `${models.length} 个模型`;
+
+  const days = [...(data.byDay ?? [])].sort((a, b) => String(b.key).localeCompare(String(a.key))).slice(0, 14);
+  renderUsageRows("#usage-days", days, { empty: "还没有按天记录。", label: (r) => r.key });
+
+  const sessions = data.bySession ?? [];
+  renderUsageRows("#usage-sessions", sessions, {
+    empty: "还没有会话记录。",
+    label: (r) => r.title || String(r.key).slice(0, 14),
+  });
+  $("#usage-sessions-count").textContent = `${sessions.length} 个会话`;
+
+  $("#usage-ledger").textContent =
+    `账本: ${data.ledger}` + (total.unpriced ? ` · ${total.unpriced} 次请求没有定价，费用被低估` : "");
+}
+
+function renderUsageRows(selector, rows, opts) {
+  const box = $(selector);
+  box.replaceChildren();
+  if (!rows.length) {
+    box.appendChild(el("div", "usage-empty", opts.empty));
+    return;
+  }
+  const maxUsd = Math.max(...rows.map((r) => Number(r.usd) || 0), 0);
+  for (const row of rows.slice(0, 20)) {
+    const line = el("div", "usage-row");
+    line.title = `${row.requests} 次请求 · 输入 ${row.input} · 输出 ${row.output} · 缓存读 ${row.cacheRead} · 缓存写 ${row.cacheWrite}`;
+    line.appendChild(el("span", "u-name", opts.label(row)));
+    const bar = el("span", "u-bar");
+    const fill = document.createElement("i");
+    fill.style.width = maxUsd > 0 && row.usd > 0 ? Math.max(2, Math.round((row.usd / maxUsd) * 100)) + "%" : "0";
+    bar.appendChild(fill);
+    line.appendChild(bar);
+    const tokens = (row.input ?? 0) + (row.output ?? 0) + (row.cacheRead ?? 0) + (row.cacheWrite ?? 0);
+    line.appendChild(el("span", "u-num", `${fmtTokens(tokens)} tok · ${row.requests} 次`));
+    line.appendChild(el("span", "u-usd", fmtUsd(row.usd)));
+    box.appendChild(line);
+  }
+  if (rows.length > 20) box.appendChild(el("div", "usage-empty", `仅显示前 20 条，共 ${rows.length} 条`));
+}
+
+async function saveBudget(usd) {
+  let r;
+  try {
+    r = await api("/api/usage/budget", { usd });
+  } catch {
+    return toast("预算保存失败", true);
+  }
+  if (r.error) return toast("预算保存失败: " + r.error, true);
+  toast(usd == null ? "已清除会话预算" : `会话预算已设为 ${fmtUsd(usd)}`);
+  await loadUsage();
+}
+
+$("#usage-btn").onclick = () => void openUsage();
+$("#usage-close").onclick = () => $("#usage-modal").classList.add("hidden");
+$("#budget-save").onclick = () => {
+  const raw = $("#budget-input").value.trim();
+  if (!raw) return toast("请输入预算金额，或点“清除”", true);
+  const usd = Number(raw);
+  if (!Number.isFinite(usd) || usd <= 0) return toast("预算需为正数", true);
+  void saveBudget(usd);
+};
+$("#budget-clear").onclick = () => {
+  $("#budget-input").value = "";
+  void saveBudget(null);
+};
+
+/* ---------------- MCP & permission management ---------------- */
+
+let mcpData = { servers: [], disabled: false };
+let mcpEditing = null;
+let permData = { global: [], project: [], mode: "default" };
+
+const manageError = (error) => (error === "busy" ? "请先停止当前回合" : error);
+
+function switchManageTab(tab) {
+  document.querySelectorAll("#manage-tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+  $("#mcp-pane").classList.toggle("hidden", tab !== "mcp");
+  $("#perm-pane").classList.toggle("hidden", tab !== "perm");
+  if (tab !== "mcp") $("#mcp-editor").classList.add("hidden");
+  if (tab !== "perm") $("#perm-editor").classList.add("hidden");
+}
+
+async function openManage(tab = "mcp") {
+  $("#manage-modal").classList.remove("hidden");
+  $("#mcp-editor").classList.add("hidden");
+  $("#perm-editor").classList.add("hidden");
+  mcpEditing = null;
+  switchManageTab(tab);
+  await loadManagement();
+}
+
+async function loadManagement() {
+  try {
+    const [mcp, perms] = await Promise.all([api("/api/mcp"), api("/api/permissions")]);
+    if (mcp?.error) toast("读取 MCP 配置失败: " + mcp.error, true);
+    else {
+      mcpData = mcp;
+      renderMcp();
+    }
+    if (perms?.error) toast("读取权限规则失败: " + perms.error, true);
+    else renderPermissions(perms);
+  } catch {
+    toast("读取管理数据失败", true);
+  }
+}
+
+function renderMcp() {
+  const list = $("#mcp-list");
+  list.replaceChildren();
+  const off = !!mcpData.disabled;
+  $("#mcp-note").textContent = off
+    ? "本次以 --no-mcp 启动：服务器不会连接，也无法在这里保存或重连。"
+    : "项目 .mcp.json 中的同名服务器会覆盖全局配置。保存后会自动重连。";
+  $("#mcp-add").disabled = off;
+  $("#mcp-reload").disabled = off;
+
+  const servers = Array.isArray(mcpData.servers) ? mcpData.servers : [];
+  if (!servers.length) {
+    list.appendChild(el("div", "profile-empty", "还没有 MCP 服务器。点击“添加”连接一个 stdio 服务。"));
+    return;
+  }
+  for (const server of servers) {
+    const row = el("div", "profile-row" + (server.disabled ? " muted" : ""));
+    row.appendChild(el("span", "status-dot " + server.status));
+    const main = el("div", "profile-main");
+    const name = el("div", "profile-name");
+    name.appendChild(document.createTextNode(server.name));
+    name.appendChild(el("span", "profile-badge", server.scope === "project" ? "项目" : "全局"));
+    if (server.disabled) name.appendChild(el("span", "profile-badge danger", "停用"));
+    if (server.shadowed) name.appendChild(el("span", "profile-badge", "被覆盖"));
+    main.appendChild(name);
+    main.appendChild(el("div", "profile-meta", [server.command, ...(server.args ?? [])].join(" ")));
+    const statusText =
+      server.status === "connected"
+        ? `已连接 · ${server.toolCount} 个工具`
+        : server.status === "failed"
+          ? "连接失败"
+          : server.status === "disabled"
+            ? "已停用"
+            : "未连接";
+    main.appendChild(el("div", "profile-meta", statusText));
+    if (server.error) main.appendChild(el("div", "mcp-error", server.error));
+    row.appendChild(main);
+
+    const actions = el("div", "profile-actions");
+    const edit = el("button", "", "编辑");
+    edit.type = "button";
+    edit.onclick = () => openMcpEditor(server);
+    const del = el("button", "del", "删除");
+    del.type = "button";
+    del.onclick = () => void deleteMcpServer(server);
+    actions.append(edit, del);
+    row.appendChild(actions);
+    list.appendChild(row);
+  }
+}
+
+function openMcpEditor(server) {
+  mcpEditing = server ? { name: server.name, scope: server.scope } : null;
+  $("#mcp-name").value = server?.name ?? "";
+  $("#mcp-name").disabled = !!server;
+  $("#mcp-scope").value = server?.scope ?? "global";
+  $("#mcp-scope").disabled = !!server;
+  $("#mcp-command").value = server?.command ?? "";
+  $("#mcp-args").value = (server?.args ?? []).join("\n");
+  $("#mcp-env").value = Object.entries(server?.env ?? {}).map(([k, v]) => `${k}=${v}`).join("\n");
+  $("#mcp-disabled").checked = !!server?.disabled;
+  $("#mcp-edit-note").textContent = server
+    ? "改名或切换作用域：请删除后重新添加。保存会立即重连全部 MCP 服务器。"
+    : "全局写入 ~/.node-agent/mcp.json，项目写入 <项目>/.mcp.json；env 值会以 0600 权限保存。";
+  $("#mcp-editor").classList.remove("hidden");
+  $("#mcp-command").focus();
+}
+
+async function deleteMcpServer(server) {
+  const scopeText = server.scope === "project" ? "项目" : "全局";
+  if (!(await confirmText(`删除${scopeText} MCP 服务器「${server.name}」？`))) return;
+  try {
+    const r = await api("/api/mcp/delete", { name: server.name, scope: server.scope });
+    if (r.error) return toast("删除失败: " + manageError(r.error), true);
+    mcpData = r;
+    renderMcp();
+    toast(r.reloadError ? `已删除；重连失败: ${r.reloadError}` : `已删除 ${server.name}`, !!r.reloadError);
+  } catch (err) {
+    toast("删除失败: " + (err instanceof Error ? err.message : String(err)), true);
+  }
+}
+
+async function reloadMcpServers() {
+  const btn = $("#mcp-reload");
+  btn.disabled = true;
+  try {
+    const r = await api("/api/mcp/reload", {});
+    if (r.error) return toast("重连失败: " + manageError(r.error), true);
+    mcpData = r;
+    renderMcp();
+    toast(r.reloadError ? `重连失败: ${r.reloadError}` : "已重新连接 MCP 服务器", !!r.reloadError);
+  } catch (err) {
+    toast("重连失败: " + (err instanceof Error ? err.message : String(err)), true);
+  } finally {
+    btn.disabled = !!mcpData.disabled;
+  }
+}
+
+function renderPermissions(data) {
+  permData = data ?? { global: [], project: [], mode: "default" };
+  const list = $("#perm-list");
+  list.replaceChildren();
+  const modes = { default: "默认（逐次询问）", auto: "自动批准", yolo: "YOLO（跳过询问）" };
+  $("#perm-note").textContent = `当前模式：${modes[permData.mode] ?? permData.mode}。项目规则优先于全局规则，改动立即生效。`;
+
+  const rows = [
+    ...(permData.project ?? []).map((rule, index) => ({ ...rule, scope: "project", index })),
+    ...(permData.global ?? []).map((rule, index) => ({ ...rule, scope: "global", index })),
+  ];
+  if (!rows.length) {
+    list.appendChild(el("div", "profile-empty", "还没有规则。非只读操作会按当前模式询问。"));
+    return;
+  }
+  for (const rule of rows) {
+    const row = el("div", "profile-row");
+    row.appendChild(el("span", "perm-rule-badge " + rule.decision, rule.decision === "allow" ? "允许" : "拒绝"));
+    const main = el("div", "profile-main");
+    main.appendChild(el("div", "perm-match", rule.match));
+    main.appendChild(
+      el(
+        "div",
+        "profile-meta",
+        rule.scope === "project" ? "项目 · .node-agent/permissions.json" : "全局 · ~/.node-agent/permissions.json",
+      ),
+    );
+    row.appendChild(main);
+    const del = el("button", "link-btn danger", "删除");
+    del.type = "button";
+    del.onclick = () => void deleteRule(rule);
+    row.appendChild(del);
+    list.appendChild(row);
+  }
+}
+
+async function deleteRule(rule) {
+  const scopeText = rule.scope === "project" ? "项目" : "全局";
+  if (!(await confirmText(`删除${scopeText}规则「${rule.match}」？`))) return;
+  try {
+    const r = await api("/api/permissions/delete", { scope: rule.scope, index: rule.index });
+    if (r.error) return toast("删除失败: " + manageError(r.error), true);
+    renderPermissions(r);
+    toast("规则已删除");
+  } catch (err) {
+    toast("删除失败: " + (err instanceof Error ? err.message : String(err)), true);
+  }
+}
+
+$("#manage-btn").onclick = () => void openManage();
+$("#manage-close").onclick = () => $("#manage-modal").classList.add("hidden");
+document.querySelectorAll("#manage-tabs button").forEach((b) => (b.onclick = () => switchManageTab(b.dataset.tab)));
+$("#mcp-add").onclick = () => openMcpEditor(null);
+$("#mcp-cancel").onclick = () => {
+  $("#mcp-editor").classList.add("hidden");
+  mcpEditing = null;
+};
+$("#mcp-reload").onclick = () => void reloadMcpServers();
+
+$("#mcp-save").onclick = async () => {
+  if (mcpData.disabled) return toast("本次以 --no-mcp 启动，无法保存", true);
+  const editing = mcpEditing;
+  const name = editing?.name ?? $("#mcp-name").value.trim();
+  const scope = editing?.scope ?? $("#mcp-scope").value;
+  const command = $("#mcp-command").value.trim();
+  if (!name) return toast("请填写名称", true);
+  if (!/^[A-Za-z0-9._-]{1,40}$/.test(name)) return toast("名称只能包含字母、数字、. _ -（≤40 字符）", true);
+  if (!command) return toast("请填写启动命令", true);
+  const args = $("#mcp-args")
+    .value.split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const env = {};
+  for (const line of $("#mcp-env").value.split("\n")) {
+    const text = line.trim();
+    if (!text) continue;
+    const eq = text.indexOf("=");
+    if (eq <= 0) return toast(`环境变量格式应为 KEY=VALUE：${text}`, true);
+    env[text.slice(0, eq).trim()] = text.slice(eq + 1);
+  }
+
+  const btn = $("#mcp-save");
+  btn.disabled = true;
+  try {
+    const r = await api("/api/mcp/save", {
+      name,
+      scope,
+      config: { command, args, env, disabled: $("#mcp-disabled").checked },
+    });
+    if (r.error) return toast("保存失败: " + manageError(r.error), true);
+    mcpData = r;
+    mcpEditing = null;
+    $("#mcp-editor").classList.add("hidden");
+    renderMcp();
+    toast(r.reloadError ? `已保存；重连失败: ${r.reloadError}` : `已保存 ${name}`, !!r.reloadError);
+  } catch (err) {
+    toast("保存失败: " + (err instanceof Error ? err.message : String(err)), true);
+  } finally {
+    btn.disabled = false;
+    $("#mcp-add").disabled = !!mcpData.disabled;
+  }
+};
+
+$("#perm-add").onclick = () => {
+  $("#perm-match").value = "";
+  $("#perm-decision").value = "allow";
+  $("#perm-scope").value = "project";
+  $("#perm-editor").classList.remove("hidden");
+  $("#perm-match").focus();
+};
+$("#perm-cancel").onclick = () => $("#perm-editor").classList.add("hidden");
+$("#perm-save").onclick = async () => {
+  const match = $("#perm-match").value.trim();
+  if (!match) return toast("请填写匹配模式", true);
+  const btn = $("#perm-save");
+  btn.disabled = true;
+  try {
+    const r = await api("/api/permissions/add", {
+      scope: $("#perm-scope").value,
+      match,
+      decision: $("#perm-decision").value,
+    });
+    if (r.error) return toast("添加失败: " + manageError(r.error), true);
+    renderPermissions(r);
+    $("#perm-editor").classList.add("hidden");
+    toast("规则已添加");
+  } catch (err) {
+    toast("添加失败: " + (err instanceof Error ? err.message : String(err)), true);
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+/* ---------------- background tasks ---------------- */
+
+let bgTimer = null;
+
+async function loadBackground(silent = false) {
+  try {
+    renderBackground(await api("/api/background"));
+  } catch {
+    if (!silent) toast("读取后台任务失败", true);
+  }
+}
+
+function bgElapsed(startedAt) {
+  const ms = Date.now() - Date.parse(startedAt);
+  if (!Number.isFinite(ms) || ms < 0) return "";
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ${sec % 60}s`;
+  return `${Math.floor(min / 60)}h ${min % 60}m`;
+}
+
+function renderBackground(data) {
+  const tasks = Array.isArray(data?.tasks) ? data.tasks : [];
+  const running = tasks.filter((t) => t.running).length;
+  const badge = $("#bg-count");
+  badge.textContent = String(running);
+  badge.classList.toggle("hidden", running === 0);
+
+  const list = $("#bg-list");
+  const scrollTop = list.scrollTop;
+  list.replaceChildren();
+  if (!tasks.length) {
+    list.appendChild(
+      el("div", "bg-empty", "暂无后台任务。模型用 bash run_in_background 启动的进程会显示在这里。"),
+    );
+    return;
+  }
+  for (const t of tasks) {
+    const row = el("div", "bg-row");
+    const main = el("div", "bg-main");
+    main.appendChild(el("div", "bg-cmd", t.command));
+    const meta = el("div", "bg-meta");
+    const stateText = t.running
+      ? `运行中 · ${bgElapsed(t.startedAt)}`
+      : `已结束${typeof t.exitCode === "number" ? ` · exit ${t.exitCode}` : ""}${t.killed ? " · 已终止" : ""}`;
+    meta.appendChild(el("span", "bg-state " + (t.running ? "running" : t.killed ? "killed" : "done"), stateText));
+    meta.appendChild(el("span", "bg-id", t.id));
+    main.appendChild(meta);
+    row.appendChild(main);
+    if (t.running) {
+      const kill = el("button", "link-btn danger", "终止");
+      kill.type = "button";
+      kill.onclick = async () => {
+        kill.disabled = true;
+        const r = await api("/api/background/kill", { id: t.id });
+        if (r.error) toast("终止失败: " + r.error, true);
+        loadBackground(true);
+      };
+      row.appendChild(kill);
+    }
+    list.appendChild(row);
+  }
+  list.scrollTop = scrollTop;
+}
+
+function setBackgroundOpen(open) {
+  $("#background-pop").classList.toggle("hidden", !open);
+  $("#background-btn").setAttribute("aria-expanded", String(open));
+  clearInterval(bgTimer);
+  bgTimer = null;
+  if (open) {
+    setTodosOpen(false);
+    loadBackground(true);
+    bgTimer = setInterval(() => loadBackground(true), 3000);
+  }
+}
+
+$("#background-btn").onclick = (e) => {
+  e.stopPropagation();
+  setBackgroundOpen($("#background-pop").classList.contains("hidden"));
+};
+$("#bg-close").onclick = () => setBackgroundOpen(false);
+
+/* ---------------- todos ---------------- */
+
+function renderTodos() {
+  const todos = state.todos;
+  const done = todos.filter((t) => t.status === "completed").length;
+  const open = todos.length - done;
+  const badge = $("#todo-count");
+  badge.textContent = String(open);
+  badge.classList.toggle("hidden", open === 0);
+  $("#todo-summary").textContent = todos.length ? `${done}/${todos.length} 已完成` : "";
+
+  const list = $("#todo-list");
+  const scrollTop = list.scrollTop;
+  list.replaceChildren();
+  if (!todos.length) {
+    list.appendChild(el("div", "bg-empty", "暂无待办。模型用 todo_write 制定的计划会显示在这里。"));
+    return;
+  }
+  for (const t of todos) {
+    const row = el("div", "todo-row " + t.status);
+    row.appendChild(el("span", "todo-check", t.status === "completed" ? "✓" : t.status === "in_progress" ? "▸" : "○"));
+    row.appendChild(el("span", "todo-text", t.content));
+    list.appendChild(row);
+  }
+  list.scrollTop = scrollTop;
+}
+
+async function refreshTodos() {
+  const seq = ++todoSyncSeq;
+  const epoch = todoSyncEpoch;
+  try {
+    const s = await api("/api/state");
+    // A newer todo refresh or a full state sync already applied its snapshot.
+    if (seq !== todoSyncSeq || epoch !== todoSyncEpoch) return;
+    state.todos = Array.isArray(s.todos) ? s.todos : [];
+    renderTodos();
+    updateStatus(s);
+  } catch {
+    /* transient failure — turn_end does a full refresh */
+  }
+}
+
+function setTodosOpen(open) {
+  renderTodos();
+  $("#todo-pop").classList.toggle("hidden", !open);
+  $("#todo-btn").setAttribute("aria-expanded", String(open));
+  if (open) setBackgroundOpen(false);
+}
+
+$("#todo-btn").onclick = (e) => {
+  e.stopPropagation();
+  setTodosOpen($("#todo-pop").classList.contains("hidden"));
+};
+$("#todo-close").onclick = () => setTodosOpen(false);
+
+document.addEventListener("click", (e) => {
+  if (
+    !$("#background-pop").classList.contains("hidden") &&
+    !e.target.closest("#background-pop") &&
+    !e.target.closest("#background-btn")
+  ) {
+    setBackgroundOpen(false);
+  }
+  if (
+    !$("#todo-pop").classList.contains("hidden") &&
+    !e.target.closest("#todo-pop") &&
+    !e.target.closest("#todo-btn")
+  ) {
+    setTodosOpen(false);
+  }
+});
+
 /* ---------------- global keys ---------------- */
 
 document.addEventListener("keydown", (e) => {
+  if (e.isComposing || e.keyCode === 229) return;
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    if (document.querySelector(".modal:not(.hidden)")) return; // the open dialog owns keys
+    hidePalette();
+    setSidebarOpen(true); // no-op on wide screens where the sidebar is always visible
+    sessionSearch.focus();
+    sessionSearch.select();
+    return;
+  }
+  if (
+    e.key === "?" &&
+    !e.ctrlKey &&
+    !e.metaKey &&
+    !e.altKey &&
+    !isTypingTarget(e.target) &&
+    !document.querySelector(".modal:not(.hidden)")
+  ) {
+    e.preventDefault();
+    openHelp();
+    return;
+  }
   if (!$("#perm-modal").classList.contains("hidden")) {
     const k = e.key.toLowerCase();
     const map = { y: "yes", a: "always", n: "no", d: "always_deny" };
@@ -1710,10 +2599,36 @@ document.addEventListener("keydown", (e) => {
       e.preventDefault();
       answerPermission("yes");
     }
+  } else if (!$("#input-modal").classList.contains("hidden")) {
+    if (e.key === "Escape" || e.key === "Enter") {
+      e.preventDefault();
+      $(e.key === "Escape" ? "#input-cancel" : "#input-ok").click();
+    }
+  } else if (e.key === "Escape" && !$("#help-modal").classList.contains("hidden")) {
+    e.preventDefault();
+    closeHelp();
+  } else if (e.key === "Escape" && !$("#background-pop").classList.contains("hidden")) {
+    e.preventDefault();
+    setBackgroundOpen(false);
+  } else if (e.key === "Escape" && !$("#todo-pop").classList.contains("hidden")) {
+    e.preventDefault();
+    setTodosOpen(false);
+  } else if (e.key === "Escape" && !$("#usage-modal").classList.contains("hidden")) {
+    e.preventDefault();
+    $("#usage-modal").classList.add("hidden");
+  } else if (e.key === "Escape" && !$("#manage-modal").classList.contains("hidden")) {
+    e.preventDefault();
+    if (!$("#mcp-editor").classList.contains("hidden") || !$("#perm-editor").classList.contains("hidden")) {
+      $("#mcp-editor").classList.add("hidden");
+      $("#perm-editor").classList.add("hidden");
+      mcpEditing = null;
+    } else {
+      $("#manage-modal").classList.add("hidden");
+    }
+  } else if (e.key === "Escape" && sidebarEl.classList.contains("open")) {
+    e.preventDefault();
+    setSidebarOpen(false);
   } else if (e.key === "Escape") {
-    // The prompt/confirm dialog owns Esc while it is up.
-    if (!$("#input-modal").classList.contains("hidden")) return;
-    // 模型配置弹窗是「点了 X 才关」：Esc 和点遮罩都不关闭，避免误关丢掉填了一半的配置。
     closePops();
   }
 });
@@ -1738,4 +2653,8 @@ document.addEventListener("keydown", (e) => {
   await refreshState();
   loadSessions();
   loadModelOptions();
+  loadBackground(true);
+  setInterval(() => {
+    if (!document.hidden) loadBackground(true);
+  }, 10_000);
 })();

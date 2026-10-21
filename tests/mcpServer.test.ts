@@ -172,6 +172,44 @@ describe("mojo MCP server", () => {
     await client.close();
   });
 
+  it("refuses agent_chat yolo unless AGENT_MCP_ALLOW_YOLO=1", async () => {
+    const prev = process.env.AGENT_MCP_ALLOW_YOLO;
+    delete process.env.AGENT_MCP_ALLOW_YOLO;
+    try {
+      const client = await connect();
+      const res = (await client.callTool({
+        name: "agent_chat",
+        arguments: { prompt: "modify files", yolo: true },
+      })) as { content: Array<{ text?: string }>; isError?: boolean };
+      expect(res.isError).toBe(true);
+      expect(res.content[0].text).toContain("AGENT_MCP_ALLOW_YOLO");
+      expect(h.calls).toBe(0);
+      await client.close();
+    } finally {
+      if (prev === undefined) delete process.env.AGENT_MCP_ALLOW_YOLO;
+      else process.env.AGENT_MCP_ALLOW_YOLO = prev;
+    }
+  });
+
+  it("honors agent_chat yolo when the env gate is enabled", async () => {
+    const prev = process.env.AGENT_MCP_ALLOW_YOLO;
+    process.env.AGENT_MCP_ALLOW_YOLO = "1";
+    h.turns = [textTurn("yolo ok")];
+    try {
+      const client = await connect();
+      const res = (await client.callTool({
+        name: "agent_chat",
+        arguments: { prompt: "modify files", yolo: true },
+      })) as { content: Array<{ text?: string }>; isError?: boolean };
+      expect(res.isError).toBeFalsy();
+      expect(res.content[0].text).toContain("yolo ok");
+      await client.close();
+    } finally {
+      if (prev === undefined) delete process.env.AGENT_MCP_ALLOW_YOLO;
+      else process.env.AGENT_MCP_ALLOW_YOLO = prev;
+    }
+  });
+
   it("lists and reads project resources", async () => {
     const client = await connect();
     const { resources } = await client.listResources();
