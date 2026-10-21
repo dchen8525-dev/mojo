@@ -177,6 +177,25 @@ describe("atomic session rewrites", () => {
     expect(lines[0]).toContain('"title":"Atomic"');
   });
 
+  it("keeps the previous contents when the rename fails", async () => {
+    const { id } = await session.createSession("x");
+    expect(await session.renameSession(id, "Before")).toBe(true);
+    const file = path.join(fakeHome, ".node-agent", "sessions", `${id}.jsonl`);
+
+    const rename = vi.spyOn(fs, "rename").mockRejectedValueOnce(
+      Object.assign(new Error("rename failed"), { code: "ENOENT" }),
+    );
+    try {
+      await expect(session.renameSession(id, "Broken")).rejects.toThrow("rename failed");
+    } finally {
+      rename.mockRestore();
+    }
+
+    expect((await session.loadSession(id))?.meta.title).toBe("Before");
+    expect((await fs.readFile(file, "utf8")).split("\n").filter(Boolean)).toHaveLength(1);
+    expect((await fs.readdir(path.dirname(file))).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+  });
+
   it("retries a transient Windows rename failure", async () => {
     const { id } = await session.createSession("x");
     const original = fs.rename.bind(fs);

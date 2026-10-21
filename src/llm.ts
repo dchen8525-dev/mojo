@@ -548,13 +548,19 @@ export class LLM {
       }
 
       try {
+        // On a resumed attempt the model may re-emit text we already showed
+        // (OpenAI has no prefill). Hold its deltas back and emit only the new
+        // suffix once the overlap can be computed, so nothing is duplicated.
+        const attemptEvents = partial && events ? { ...events, onTextDelta: () => {} } : events;
         const turn = await LLM.withRetry(
-          () => this.backend.send(resumedMessages, system, tools, signal, events),
+          () => this.backend.send(resumedMessages, system, tools, signal, attemptEvents),
           signal,
           events,
         );
         if (!partial) return turn;
         const text = LLM.mergeText(partial, turn.text);
+        const suffix = text.slice(partial.length);
+        if (suffix) events?.onTextDelta?.(suffix);
         return {
           ...turn,
           text,
@@ -564,7 +570,11 @@ export class LLM {
           ] as ContentBlock[],
         };
       } catch (err) {
-        if (err instanceof StreamInterrupted && attempt < MAX_RESUMES && !signal?.aborted) {
+        // Backends surface aborts differently (APIUserAbortError, or the last
+        // transient error when cancellation lands during a backoff). Callers
+        // only special-case the "aborted" message, so normalize it here.
+        if (signal?.aborted) throw new Error("aborted");
+        if (err instanceof StreamInterrupted && attempt < MAX_RESUMES) {
           partial += err.partialText;
           continue;
         }

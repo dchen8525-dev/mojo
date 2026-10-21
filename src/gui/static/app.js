@@ -1753,11 +1753,15 @@ function openMcpEditor(server) {
 async function deleteMcpServer(server) {
   const scopeText = server.scope === "project" ? "项目" : "全局";
   if (!(await confirmText(`删除${scopeText} MCP 服务器「${server.name}」？`))) return;
-  const r = await api("/api/mcp/delete", { name: server.name, scope: server.scope });
-  if (r.error) return toast("删除失败: " + manageError(r.error), true);
-  mcpData = r;
-  renderMcp();
-  toast(r.reloadError ? `已删除；重连失败: ${r.reloadError}` : `已删除 ${server.name}`, !!r.reloadError);
+  try {
+    const r = await api("/api/mcp/delete", { name: server.name, scope: server.scope });
+    if (r.error) return toast("删除失败: " + manageError(r.error), true);
+    mcpData = r;
+    renderMcp();
+    toast(r.reloadError ? `已删除；重连失败: ${r.reloadError}` : `已删除 ${server.name}`, !!r.reloadError);
+  } catch (err) {
+    toast("删除失败: " + (err instanceof Error ? err.message : String(err)), true);
+  }
 }
 
 async function reloadMcpServers() {
@@ -1769,6 +1773,8 @@ async function reloadMcpServers() {
     mcpData = r;
     renderMcp();
     toast(r.reloadError ? `重连失败: ${r.reloadError}` : "已重新连接 MCP 服务器", !!r.reloadError);
+  } catch (err) {
+    toast("重连失败: " + (err instanceof Error ? err.message : String(err)), true);
   } finally {
     btn.disabled = !!mcpData.disabled;
   }
@@ -1813,10 +1819,14 @@ function renderPermissions(data) {
 async function deleteRule(rule) {
   const scopeText = rule.scope === "project" ? "项目" : "全局";
   if (!(await confirmText(`删除${scopeText}规则「${rule.match}」？`))) return;
-  const r = await api("/api/permissions/delete", { scope: rule.scope, index: rule.index });
-  if (r.error) return toast("删除失败: " + manageError(r.error), true);
-  renderPermissions(r);
-  toast("规则已删除");
+  try {
+    const r = await api("/api/permissions/delete", { scope: rule.scope, index: rule.index });
+    if (r.error) return toast("删除失败: " + manageError(r.error), true);
+    renderPermissions(r);
+    toast("规则已删除");
+  } catch (err) {
+    toast("删除失败: " + (err instanceof Error ? err.message : String(err)), true);
+  }
 }
 
 $("#manage-btn").onclick = () => void openManage();
@@ -1865,6 +1875,8 @@ $("#mcp-save").onclick = async () => {
     $("#mcp-editor").classList.add("hidden");
     renderMcp();
     toast(r.reloadError ? `已保存；重连失败: ${r.reloadError}` : `已保存 ${name}`, !!r.reloadError);
+  } catch (err) {
+    toast("保存失败: " + (err instanceof Error ? err.message : String(err)), true);
   } finally {
     btn.disabled = false;
     $("#mcp-add").disabled = !!mcpData.disabled;
@@ -1882,15 +1894,23 @@ $("#perm-cancel").onclick = () => $("#perm-editor").classList.add("hidden");
 $("#perm-save").onclick = async () => {
   const match = $("#perm-match").value.trim();
   if (!match) return toast("请填写匹配模式", true);
-  const r = await api("/api/permissions/add", {
-    scope: $("#perm-scope").value,
-    match,
-    decision: $("#perm-decision").value,
-  });
-  if (r.error) return toast("添加失败: " + manageError(r.error), true);
-  renderPermissions(r);
-  $("#perm-editor").classList.add("hidden");
-  toast("规则已添加");
+  const btn = $("#perm-save");
+  btn.disabled = true;
+  try {
+    const r = await api("/api/permissions/add", {
+      scope: $("#perm-scope").value,
+      match,
+      decision: $("#perm-decision").value,
+    });
+    if (r.error) return toast("添加失败: " + manageError(r.error), true);
+    renderPermissions(r);
+    $("#perm-editor").classList.add("hidden");
+    toast("规则已添加");
+  } catch (err) {
+    toast("添加失败: " + (err instanceof Error ? err.message : String(err)), true);
+  } finally {
+    btn.disabled = false;
+  }
 };
 
 /* ---------------- background tasks ---------------- */

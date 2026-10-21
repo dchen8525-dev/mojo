@@ -339,6 +339,43 @@ describe("GUI interactions (happy-dom)", () => {
     expect(doc.querySelector("#perm-editor")?.classList.contains("hidden")).toBe(true);
   });
 
+  it("keeps management editors open when a save fails", async () => {
+    const fail = () => {
+      throw new Error("offline");
+    };
+    const { window } = await boot({
+      routes: {
+        "/api/mcp": { servers: [], disabled: false },
+        "/api/permissions": { global: [], project: [], mode: "default" },
+        "/api/mcp/save": fail,
+        "/api/permissions/add": fail,
+      },
+    });
+    const doc = window.document;
+
+    (doc.querySelector("#manage-btn") as HTMLElement).click();
+    await vi.waitFor(() => expect(doc.querySelector("#mcp-list")?.textContent).toContain("还没有 MCP 服务器"));
+
+    (doc.querySelector("#mcp-add") as HTMLElement).click();
+    (doc.querySelector("#mcp-name") as HTMLInputElement).value = "github";
+    (doc.querySelector("#mcp-command") as HTMLInputElement).value = "npx";
+    (doc.querySelector("#mcp-save") as HTMLElement).click();
+
+    await vi.waitFor(() => expect(doc.querySelector("#toast")?.textContent).toContain("保存失败"));
+    expect(doc.querySelector("#toast")?.classList.contains("error")).toBe(true);
+    expect(doc.querySelector("#mcp-editor")?.classList.contains("hidden")).toBe(false);
+    expect((doc.querySelector("#mcp-save") as HTMLButtonElement).disabled).toBe(false);
+
+    (doc.querySelector('#manage-tabs button[data-tab="perm"]') as HTMLElement).click();
+    (doc.querySelector("#perm-add") as HTMLElement).click();
+    (doc.querySelector("#perm-match") as HTMLInputElement).value = "Bash(npm test)";
+    (doc.querySelector("#perm-save") as HTMLElement).click();
+
+    await vi.waitFor(() => expect(doc.querySelector("#toast")?.textContent).toContain("添加失败"));
+    expect(doc.querySelector("#perm-editor")?.classList.contains("hidden")).toBe(false);
+    expect((doc.querySelector("#perm-save") as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("renders the usage dashboard and saves a session budget", async () => {
     const usage = {
       totals: {

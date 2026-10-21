@@ -222,7 +222,7 @@ describe("LLM retry and stream resume", () => {
     expect(h.calls).toHaveLength(1);
   });
 
-  it("wakes up immediately when aborted during backoff", async () => {
+  it("wakes up immediately when aborted during backoff and reports an abort", async () => {
     setScript(
       () => { throw httpError(500); },
       () => turn("never"),
@@ -233,8 +233,20 @@ describe("LLM retry and stream resume", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(h.calls).toHaveLength(1);
     controller.abort();
-    await expect(p).resolves.toMatchObject({ status: 500 });
+    await expect(p).resolves.toMatchObject({ message: "aborted" });
     expect(h.calls).toHaveLength(1);
+  });
+
+  it("normalizes a backend abort to the same message", async () => {
+    setScript(() => {
+      throw Object.assign(new Error("Request was aborted."), { name: "APIUserAbortError" });
+    });
+    const controller = new AbortController();
+    controller.abort(); // aborted before the call, like a cancelled stream
+
+    await expect(
+      makeLLM().send(messages, "S", [], controller.signal),
+    ).rejects.toThrow("aborted");
   });
 
   it("resumes an Anthropic stream with assistant prefill and dedupes the overlap", async () => {
@@ -250,6 +262,26 @@ describe("LLM retry and stream resume", () => {
       role: "assistant",
       content: [{ type: "text", text: "Hello" }],
     });
+  });
+
+  it("emits only the new suffix when a resumed stream repeats the overlap", async () => {
+    setScript(
+      () => {
+        h.calls.at(-1)!.events?.onTextDelta?.("Hello");
+        throw new StreamInterrupted("Hello");
+      },
+      () => {
+        h.calls.at(-1)!.events?.onTextDelta?.("Hello world");
+        return turn("Hello world");
+      },
+    );
+    const deltas: string[] = [];
+    const result = await makeLLM("openai").send(messages, "S", [], undefined, {
+      onTextDelta: (delta) => deltas.push(delta),
+    });
+
+    expect(result.text).toBe("Hello world");
+    expect(deltas).toEqual(["Hello", " world"]);
   });
 
   it("asks an OpenAI model to continue from the cut-off point", async () => {
