@@ -284,7 +284,12 @@ export class LLM {
 
   /** SDKs wrap fetch failures in APIConnectionError; raw fetch throws TypeError. */
   private static isConnectionError(err: unknown): boolean {
-    const name = (err as { name?: string } | null)?.name;
+    // SDK 0.135 stopped setting `name` on APIConnectionError, so fall back to
+    // the constructor name before giving up on classifying it.
+    const e = err as { name?: string; constructor?: { name?: string } } | null;
+    const ctorName = e?.constructor?.name;
+    if (ctorName === "APIConnectionError" || ctorName === "APIConnectionTimeoutError") return true;
+    const name = e?.name;
     return (
       name === "APIConnectionError" ||
       name === "APIConnectionTimeoutError" ||

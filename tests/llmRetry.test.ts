@@ -81,6 +81,14 @@ function connectionError() {
   return Object.assign(new Error("Connection error."), { name: "APIConnectionError" });
 }
 
+/** SDK 0.135 stopped setting `name` on APIConnectionError. */
+function sdkConnectionError() {
+  const err = new Error("Connection error.");
+  Object.defineProperty(err, "name", { value: "Error" });
+  Object.defineProperty(err, "constructor", { value: { name: "APIConnectionError" } });
+  return err;
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   h.calls.length = 0;
@@ -162,6 +170,19 @@ describe("LLM retry and stream resume", () => {
   it("backs off for connection failures", async () => {
     setScript(
       () => { throw connectionError(); },
+      () => turn("ok"),
+    );
+    const p = makeLLM().send(messages, "S", []);
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(h.calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(p).resolves.toMatchObject({ text: "ok" });
+  });
+
+  it("backs off for connection failures that only identify via the constructor", async () => {
+    setScript(
+      () => { throw sdkConnectionError(); },
       () => turn("ok"),
     );
     const p = makeLLM().send(messages, "S", []);
