@@ -58,6 +58,8 @@ export class PermissionManager {
   mode: Mode = "default";
   private rules: PermissionRule[] = [];
   private projectRules: PermissionRule[] = [];
+  /** Grants answered with "session": in-memory only, they die with the process. */
+  private sessionRules: PermissionRule[] = [];
   /**
    * Serializes interactive prompts. Parallel subagents can call check() at the
    * same instant; without this, the TUI's single prompt slot (and print mode's
@@ -65,8 +67,20 @@ export class PermissionManager {
    * worker's Promise unresolved and the whole turn deadlocked.
    */
   private readonly promptLock = new Mutex();
-  /** Provided by the CLI: prompt the user. `preview` is optional multi-line detail (e.g. a diff). */
-  askUser: (description: string, risk: Risk, preview?: string) => Promise<"yes" | "no" | "always" | "always_deny">;
+  /**
+   * Provided by the CLI: prompt the user. `preview` is optional multi-line detail (e.g. a diff).
+   * - "yes": allow once
+   * - "session": allow until the session ends (in-memory, never persisted)
+   * - "project": persist an allow rule to the project's permissions.json
+   * - "always": persist an allow rule to the global permissions.json
+   * - "always_deny": persist a deny rule globally
+   * - "no": deny once
+   */
+  askUser: (
+    description: string,
+    risk: Risk,
+    preview?: string,
+  ) => Promise<"yes" | "no" | "session" | "project" | "always" | "always_deny">;
 
   constructor(askUser: PermissionManager["askUser"]) {
     this.askUser = askUser;
@@ -94,6 +108,11 @@ export class PermissionManager {
 
   getProjectRules(): readonly PermissionRule[] {
     return this.projectRules;
+  }
+
+  /** Grants made with "session" this run — visible so UIs can report them. */
+  getSessionRules(): readonly PermissionRule[] {
+    return this.sessionRules;
   }
 
   /** Append a rule and persist it to the chosen layer; it applies immediately. */
@@ -140,14 +159,16 @@ export class PermissionManager {
     const project = this.projectRules.length;
     this.rules = [];
     this.projectRules = [];
+    this.sessionRules = [];
     await this.save();
     return { global, project };
   }
 
-  /** First matching rule (project before global) decides the outcome, or null. */
+  /** First matching rule (project before global before session) decides the outcome, or null. */
   private ruleDecision(description: string): boolean | null {
     for (const r of this.projectRules) if (ruleMatches(r.match, description)) return r.decision === "allow";
     for (const r of this.rules) if (ruleMatches(r.match, description)) return r.decision === "allow";
+    for (const r of this.sessionRules) if (ruleMatches(r.match, description)) return r.decision === "allow";
     return null;
   }
 
@@ -180,12 +201,23 @@ export class PermissionManager {
       if (decided !== null) return decided;
     }
     const answer = await this.askUser(description, risk, preview);
-    if (answer === "always" || answer === "always_deny") {
+    if (answer !== "yes" && answer !== "no") {
       // Persist a rule keyed on the leading verb + target of the description.
       const key = description.slice(0, 60);
-      this.rules.push({ match: key, decision: answer === "always" ? "allow" : "deny" });
+      if (answer === "session") {
+        this.sessionRules.push({ match: key, decision: "allow" });
+        return true;
+      }
+      if (answer === "project" && this.projectFile) {
+        this.projectRules.push({ match: key, decision: "allow" });
+        await saveRules(this.projectFile, this.projectRules);
+        return true;
+      }
+      // "always", or "project" with no project file loaded: persist globally.
+      const decision = answer === "always_deny" ? "deny" : "allow";
+      this.rules.push({ match: key, decision });
       await this.save();
-      return answer === "always";
+      return decision === "allow";
     }
     return answer === "yes";
   }

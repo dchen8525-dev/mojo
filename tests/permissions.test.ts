@@ -215,3 +215,63 @@ describe("PermissionManager rule management", () => {
     await expect(pm.addRule("project", "x", "maybe" as never)).rejects.toThrow(/decision/);
   });
 });
+describe("session and project permission answers", () => {
+  it('"session" allows for the rest of the run without touching disk', async () => {
+    let answer: "session" | "no" = "session";
+    const pm = new PermissionManager(async () => answer);
+    const file = path.join(fakeHome, ".node-agent", "permissions.json");
+    const before = await fs.readFile(file, "utf8").catch(() => null);
+
+    expect(await pm.check("Run npm run build", "medium", false)).toBe(true);
+    // A second identical request is covered by the session grant, no new prompt.
+    expect(await pm.check("Run npm run build", "medium", false)).toBe(true);
+    expect(pm.getSessionRules()).toEqual([{ match: "Run npm run build", decision: "allow" }]);
+    // Nothing was persisted.
+    expect(await fs.readFile(file, "utf8").catch(() => null)).toBe(before);
+
+    // A fresh manager (new "process") prompts again.
+    const fresh = new PermissionManager(async () => {
+      answer = "no";
+      return answer;
+    });
+    await fresh.load();
+    expect(await fresh.check("Run npm run build", "medium", false)).toBe(false);
+  });
+
+  it('"project" persists an allow rule to the project file', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "agent-perm-projans-"));
+    await fs.mkdir(path.join(tmp, ".node-agent"), { recursive: true });
+    const pm = new PermissionManager(async () => "project");
+    await pm.loadProject(tmp);
+
+    expect(await pm.check("Run npm test", "medium", false)).toBe(true);
+    expect(JSON.parse(await fs.readFile(path.join(tmp, ".node-agent", "permissions.json"), "utf8"))).toEqual([
+      { match: "Run npm test", decision: "allow" },
+    ]);
+    // Subsequent identical requests skip the prompt entirely.
+    const pm2 = new PermissionManager(async () => {
+      throw new Error("should not prompt");
+    });
+    await pm2.loadProject(tmp);
+    expect(await pm2.check("Run npm test", "medium", false)).toBe(true);
+  });
+
+  it('a persisted deny still wins over a "session" grant', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "agent-perm-denywins-"));
+    await fs.mkdir(path.join(tmp, ".node-agent"), { recursive: true });
+    await fs.writeFile(path.join(tmp, ".node-agent", "permissions.json"), JSON.stringify([{ match: "git push", decision: "deny" }]), "utf8");
+
+    const pm = new PermissionManager(async () => "session");
+    await pm.loadProject(tmp);
+    expect(await pm.check("Run git push origin main", "high", false)).toBe(false);
+  });
+
+  it('"project" degrades to a global rule when no project file is loaded', async () => {
+    const pm = new PermissionManager(async () => "project");
+    await pm.load();
+    await pm.clearRules();
+    expect(await pm.check("Run npm test", "medium", false)).toBe(true);
+    expect(pm.getRules()).toEqual([{ match: "Run npm test", decision: "allow" }]);
+    await pm.clearRules();
+  });
+});

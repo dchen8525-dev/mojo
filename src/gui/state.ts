@@ -5,7 +5,7 @@ import type { Risk } from "../types.js";
 import type { SseHub } from "./sse.js";
 import type { UiSubCall, UiTurn } from "./transcript.js";
 
-export type PermissionDecision = "yes" | "no" | "always" | "always_deny";
+export type PermissionDecision = "yes" | "no" | "session" | "project" | "always" | "always_deny";
 
 /**
  * Mutable state shared by the HTTP routes: the single running turn, pending

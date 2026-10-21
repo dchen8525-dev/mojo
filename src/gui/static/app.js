@@ -2608,7 +2608,7 @@ document.addEventListener("keydown", (e) => {
   }
   if (!$("#perm-modal").classList.contains("hidden")) {
     const k = e.key.toLowerCase();
-    const map = { y: "yes", a: "always", n: "no", d: "always_deny" };
+    const map = { y: "yes", s: "session", p: "project", a: "always", n: "no", d: "always_deny" };
     if (map[k]) {
       e.preventDefault();
       answerPermission(map[k]);

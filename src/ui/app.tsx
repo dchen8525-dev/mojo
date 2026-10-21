@@ -31,7 +31,7 @@ interface PermissionRequest {
   description: string;
   risk: Risk;
   preview?: string;
-  resolve: (answer: "yes" | "no" | "always" | "always_deny") => void;
+  resolve: (answer: "yes" | "no" | "session" | "project" | "always" | "always_deny") => void;
 }
 
 const MAX_VISIBLE_TOOLS = 6;
@@ -153,7 +153,10 @@ function PermissionPrompt({ request, diffPage, diffSplit, termCols }: { request:
       </Text>
       <Text>{request.description}</Text>
       {request.preview && <DiffPreview diff={request.preview} page={diffPage} split={diffSplit} termCols={termCols} />}
-      <Text dimColor>y = allow once · a = always allow · d = always deny · n / Esc = deny once · t = toggle split diff</Text>
+      <Text dimColor>
+        y = allow once · s = allow this session · p = allow for project · a = always allow · d = always deny · n / Esc =
+        deny once · t = toggle split diff
+      </Text>
     </Box>
   );
 }
@@ -303,7 +306,7 @@ export function AgentApp({
   // Register the permission handler for the UI.
   useEffect(() => {
     bridge.askPermission = (description: string, risk: Risk, preview?: string) =>
-      new Promise<"yes" | "no" | "always" | "always_deny">((resolve) => {
+      new Promise<"yes" | "no" | "session" | "project" | "always" | "always_deny">((resolve) => {
         setDiffPage(0);
         setPermission({ description, risk, preview, resolve });
       });
@@ -334,6 +337,12 @@ export function AgentApp({
           }
           if (a === "y") {
             perm.resolve("yes");
+            setPermission(null);
+          } else if (a === "s") {
+            perm.resolve("session");
+            setPermission(null);
+          } else if (a === "p") {
+            perm.resolve("project");
             setPermission(null);
           } else if (a === "a") {
             perm.resolve("always");
