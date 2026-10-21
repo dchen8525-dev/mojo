@@ -168,3 +168,50 @@ describe("PermissionManager concurrent prompts", () => {
     expect(asks).toBe(0);
   });
 });
+
+describe("PermissionManager rule management", () => {
+  it("adds project rules to disk and applies them immediately", async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "agent-perm-manage-"));
+    let asks = 0;
+    const pm = new PermissionManager(async () => {
+      asks++;
+      return "yes";
+    });
+    await pm.loadProject(tmp);
+
+    await pm.addRule("project", "  npm run *  ", "allow");
+    expect(pm.getProjectRules()).toEqual([{ match: "npm run *", decision: "allow" }]);
+    const file = path.join(tmp, ".node-agent", "permissions.json");
+    expect(JSON.parse(await fs.readFile(file, "utf8"))).toEqual([{ match: "npm run *", decision: "allow" }]);
+    expect(await pm.check("bash: npm run test", "medium", false)).toBe(true);
+    expect(asks).toBe(0);
+
+    expect(await pm.removeRule("project", 0)).toEqual({ match: "npm run *", decision: "allow" });
+    expect(pm.getProjectRules()).toEqual([]);
+    expect(JSON.parse(await fs.readFile(file, "utf8"))).toEqual([]);
+    expect(await pm.removeRule("project", 0)).toBeNull();
+  });
+
+  it("persists global rules through the mocked home", async () => {
+    const pm = new PermissionManager(async () => "yes");
+    await pm.load();
+    await pm.clearRules();
+
+    await pm.addRule("global", "git push", "deny");
+    expect(pm.getRules()).toEqual([{ match: "git push", decision: "deny" }]);
+    expect(await pm.check("Run git push origin main", "high", false)).toBe(false);
+
+    const file = path.join(fakeHome, ".node-agent", "permissions.json");
+    expect(JSON.parse(await fs.readFile(file, "utf8"))).toEqual([{ match: "git push", decision: "deny" }]);
+    await pm.removeRule("global", 0);
+    await pm.clearRules();
+  });
+
+  it("rejects empty matches and invalid decisions", async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "agent-perm-manage2-"));
+    const pm = new PermissionManager(async () => "yes");
+    await pm.loadProject(tmp);
+    await expect(pm.addRule("project", "   ", "allow")).rejects.toThrow(/match is required/);
+    await expect(pm.addRule("project", "x", "maybe" as never)).rejects.toThrow(/decision/);
+  });
+});

@@ -33,8 +33,8 @@ const AGENT_CHAT: Tool = {
   description:
     "Run one full mojo agent turn (tool loop included) against the project. Returns the agent's final text. " +
     "By default write/shell tools auto-deny (headless, nobody to approve), so it behaves like a capable " +
-    "read-and-analyze agent. Pass yolo:true to let it actually modify files - only do that when the user " +
-    "has asked for it.",
+    "read-and-analyze agent. Pass yolo:true to auto-approve write/shell tools for this turn; that requires " +
+    "the MCP server to run with AGENT_MCP_ALLOW_YOLO=1 and is refused otherwise.",
   isReadOnly: false,
   inputSchema: {
     type: "object",
@@ -44,7 +44,10 @@ const AGENT_CHAT: Tool = {
         type: "string",
         description: "Optional id to continue a previous agent_chat conversation; omit for a fresh session.",
       },
-      yolo: { type: "boolean", description: "Auto-approve write/shell tools for this turn (default false)." },
+      yolo: {
+        type: "boolean",
+        description: "Auto-approve write/shell tools for this turn (default false; needs AGENT_MCP_ALLOW_YOLO=1).",
+      },
     },
     required: ["prompt"],
   },
@@ -57,6 +60,7 @@ export function exposedTools(): Tool[] {
 
 interface ChatSession {
   agent: Agent;
+  permissions: PermissionManager;
   history: number;
 }
 
@@ -81,16 +85,30 @@ export function buildMcpServer(cwd: string): Server {
       const prompt = typeof input.prompt === "string" ? input.prompt : "";
       if (!prompt.trim()) return { content: [{ type: "text" as const, text: "prompt must not be empty" }], isError: true };
       const yolo = input.yolo === true;
+      if (yolo && process.env.AGENT_MCP_ALLOW_YOLO !== "1") {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text:
+                "yolo:true is disabled: start the MCP server with AGENT_MCP_ALLOW_YOLO=1 to allow " +
+                "auto-approving write/shell tools.",
+            },
+          ],
+          isError: true,
+        };
+      }
       let id = typeof input.session_id === "string" && input.session_id ? input.session_id : "";
       let entry = id ? chats.get(id) : undefined;
       if (!entry) {
         const s = await createSession(cwd);
         id = s.id;
         const permissions = new PermissionManager(async () => "no" as const);
-        if (yolo) permissions.mode = "yolo";
-        entry = { agent: new Agent(cwd, s.id, permissions), history: 0 };
+        entry = { agent: new Agent(cwd, s.id, permissions), permissions, history: 0 };
         chats.set(id, entry);
       }
+      // yolo applies to this turn only; a later non-yolo call returns to deny-by-default.
+      entry.permissions.mode = yolo ? "yolo" : "default";
       try {
         const text = await entry.agent.chat(prompt);
         entry.history++;

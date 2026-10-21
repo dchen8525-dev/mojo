@@ -6,16 +6,18 @@ import { Mutex } from "./sync.js";
 
 export type Mode = "default" | "auto" | "yolo"; // auto = accept edits, still asks for high risk; yolo = accept everything
 
-interface Rule {
+export interface PermissionRule {
   match: string; // substring of the permission description; `*` is a wildcard
   decision: "allow" | "deny";
 }
+
+export type RuleScope = "global" | "project";
 
 const CONFIG_DIR = path.join(os.homedir(), ".node-agent");
 const RULES_FILE = path.join(CONFIG_DIR, "permissions.json");
 
 /** Read a permissions file (array of { match, decision }) or [] on any problem. */
-export async function loadRulesFrom(file: string): Promise<Rule[]> {
+export async function loadRulesFrom(file: string): Promise<PermissionRule[]> {
   try {
     const raw = await fs.readFile(file, "utf8");
     const parsed = JSON.parse(raw.replace(/^\uFEFF/, ""));
@@ -24,6 +26,12 @@ export async function loadRulesFrom(file: string): Promise<Rule[]> {
   } catch {
     return [];
   }
+}
+
+async function saveRules(file: string, rules: PermissionRule[]): Promise<void> {
+  await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  await fs.writeFile(file, JSON.stringify(rules, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
+  await fs.chmod(file, 0o600).catch(() => {});
 }
 
 /**
@@ -48,8 +56,8 @@ function escapeRe(s: string): string {
 
 export class PermissionManager {
   mode: Mode = "default";
-  private rules: Rule[] = [];
-  private projectRules: Rule[] = [];
+  private rules: PermissionRule[] = [];
+  private projectRules: PermissionRule[] = [];
   /**
    * Serializes interactive prompts. Parallel subagents can call check() at the
    * same instant; without this, the TUI's single prompt slot (and print mode's
@@ -68,18 +76,57 @@ export class PermissionManager {
     this.rules = await loadRulesFrom(RULES_FILE);
   }
 
+  private projectFile: string | null = null;
+
   /** Load a project-scoped net-new file (e.g. `<cwd>/.node-agent/permissions.json`). Takes precedence over global rules. */
   async loadProject(cwd: string) {
-    this.projectRules = await loadRulesFrom(path.join(cwd, ".node-agent", "permissions.json"));
+    this.projectFile = path.join(cwd, ".node-agent", "permissions.json");
+    this.projectRules = await loadRulesFrom(this.projectFile);
   }
 
   private async save() {
-    await fs.mkdir(CONFIG_DIR, { recursive: true });
-    await fs.writeFile(RULES_FILE, JSON.stringify(this.rules, null, 2), "utf8");
+    await saveRules(RULES_FILE, this.rules);
   }
 
-  getRules(): readonly Rule[] {
+  getRules(): readonly PermissionRule[] {
     return this.rules;
+  }
+
+  getProjectRules(): readonly PermissionRule[] {
+    return this.projectRules;
+  }
+
+  /** Append a rule and persist it to the chosen layer; it applies immediately. */
+  async addRule(scope: RuleScope, match: string, decision: PermissionRule["decision"]): Promise<PermissionRule> {
+    const clean = match.trim();
+    if (!clean) throw new Error("match is required");
+    if (clean.length > 200) throw new Error("match is too long (max 200 characters)");
+    if (decision !== "allow" && decision !== "deny") throw new Error("decision must be allow or deny");
+    const rule: PermissionRule = { match: clean, decision };
+    if (scope === "project") {
+      if (!this.projectFile) throw new Error("no project loaded");
+      this.projectRules.push(rule);
+      await saveRules(this.projectFile, this.projectRules);
+    } else {
+      this.rules.push(rule);
+      await this.save();
+    }
+    return rule;
+  }
+
+  /** Remove the rule at `index` from a layer; null when the index is out of range. */
+  async removeRule(scope: RuleScope, index: number): Promise<PermissionRule | null> {
+    if (!Number.isInteger(index) || index < 0) return null;
+    const list = scope === "project" ? this.projectRules : this.rules;
+    if (index >= list.length) return null;
+    const [removed] = list.splice(index, 1);
+    if (scope === "project") {
+      if (!this.projectFile) throw new Error("no project loaded");
+      await saveRules(this.projectFile, this.projectRules);
+    } else {
+      await this.save();
+    }
+    return removed;
   }
 
   /**

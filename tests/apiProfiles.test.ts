@@ -262,3 +262,18 @@ describe("deleteApiProfile", () => {
     expect(result.deleted).toBe(false);
   });
 });
+
+describe("config file permissions", () => {
+  it("keeps the credential-bearing global config owner-only on POSIX", async () => {
+    if (process.platform === "win32") return; // chmod only toggles the readonly bit there
+    const home = await tempDir();
+    await saveApiProfile({ name: "P", provider: "anthropic", model: "m", apiKey: "sk" }, { home });
+    const file = path.join(home, ".node-agent", "config.json");
+    expect((await fs.stat(file)).mode & 0o777).toBe(0o600);
+
+    // Every later rewrite (default selection, deletion) must keep it private.
+    const cwd = await tempDir();
+    await selectApiProfile(cwd, "default", null, { home });
+    expect((await fs.stat(file)).mode & 0o777).toBe(0o600);
+  });
+});

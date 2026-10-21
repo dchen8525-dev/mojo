@@ -190,8 +190,10 @@ function globalConfigFile(home: string): string {
 }
 
 async function writeConfigFile(file: string, config: Record<string, unknown>): Promise<void> {
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.writeFile(file, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  await fs.writeFile(file, `${JSON.stringify(config, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  // Existing files keep their old mode; config may hold API keys, so force private.
+  await fs.chmod(file, 0o600).catch(() => {});
 }
 
 /** Create or update a profile in the global registry. */
@@ -228,8 +230,6 @@ export async function saveApiProfile(
     next.defaultApiProfile = profile.id;
   }
   await writeConfigFile(file, next);
-  // Best effort: keep a credential-bearing file private on POSIX.
-  await fs.chmod(file, 0o600).catch(() => {});
 
   return { profile, created, view: listApiProfiles(opts.cwd ?? process.cwd(), home) };
 }
