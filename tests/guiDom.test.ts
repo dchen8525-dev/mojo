@@ -69,7 +69,15 @@ afterEach(async () => {
   FakeEventSource.instances.length = 0;
 });
 
-async function boot(opts: { todos?: typeof seededTodos; state?: Record<string, unknown>; width?: number } = {}) {
+type Route = unknown | ((url: string, init?: RequestInit) => unknown);
+
+async function boot(opts: {
+  todos?: typeof seededTodos;
+  state?: Record<string, unknown>;
+  width?: number;
+  /** Extra /api routes, either a static body or a function of the request. */
+  routes?: Record<string, Route>;
+} = {}) {
   const width = opts.width ?? 1280;
   const window = new Window({ url: "http://127.0.0.1:4611/#test-token", width, height: 900 });
   windows.push(window);
@@ -81,20 +89,26 @@ async function boot(opts: { todos?: typeof seededTodos; state?: Record<string, u
   w.DOMPurify = { sanitize: (value: string) => value };
 
   const state = { ...baseState, ...opts.state, todos: opts.todos ?? [] };
+  const routes: Record<string, Route> = {
+    "/api/sessions": [],
+    "/api/models": [],
+    "/api/api-profiles": { profiles: [], hasLegacyKey: false },
+    "/api/background": { tasks: [] },
+    ...opts.routes,
+  };
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   w.fetch = async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     calls.push({ url, init });
+    const route = routes[url];
     const body =
-      url === "/api/state"
-        ? state
-        : url === "/api/sessions" || url === "/api/models"
-          ? []
-          : url === "/api/api-profiles"
-            ? { profiles: [], hasLegacyKey: false }
-            : url === "/api/background"
-              ? { tasks: [] }
-              : {};
+      route !== undefined
+        ? typeof route === "function"
+          ? (route as (u: string, i?: RequestInit) => unknown)(url, init)
+          : route
+        : url === "/api/state"
+          ? state
+          : {};
     return { ok: true, status: 200, json: async () => body };
   };
   w.EventSource = FakeEventSource;
@@ -211,5 +225,198 @@ describe("GUI interactions (happy-dom)", () => {
     const chat = calls.find((c) => c.url === "/api/chat")!;
     expect(JSON.parse(String(chat.init?.body))).toEqual({ text: "hello from dom" });
     expect(input.value).toBe("");
+  });
+
+  it("renders retry notices pushed over SSE", async () => {
+    const { window } = await boot();
+    FakeEventSource.instances[0].emit("retry", {
+      attempt: 2,
+      maxAttempts: 3,
+      delayMs: 7000,
+      status: 503,
+      reason: "server",
+    });
+
+    expect(window.document.querySelector("#transcript")?.textContent).toContain("7 秒后重试（2/3 · 服务端错误 503）");
+  });
+
+  it("adds MCP servers and permission rules through the manage dialog", async () => {
+    const servers = [
+      {
+        name: "filesystem",
+        scope: "global",
+        command: "npx",
+        args: ["-y", "@modelcontextprotocol/server-filesystem"],
+        env: {},
+        disabled: false,
+        shadowed: false,
+        status: "connected",
+        toolCount: 4,
+        error: null,
+      },
+    ];
+    const rules = {
+      global: [{ match: "WebFetch(*)", decision: "deny" }],
+      project: [{ match: "Bash(npm test)", decision: "allow" }],
+      mode: "default",
+    };
+    const { window, calls } = await boot({
+      routes: {
+        "/api/mcp": () => ({ servers, disabled: false }),
+        "/api/permissions": () => rules,
+        "/api/mcp/save": (_url, init) => {
+          const req = JSON.parse(String(init?.body));
+          servers.push({
+            name: req.name,
+            scope: req.scope,
+            command: req.config.command,
+            args: req.config.args,
+            env: req.config.env,
+            disabled: false,
+            shadowed: false,
+            status: "connected",
+            toolCount: 2,
+            error: null,
+          });
+          return { servers, disabled: false };
+        },
+        "/api/permissions/add": (_url, init) => {
+          const req = JSON.parse(String(init?.body));
+          (req.scope === "project" ? rules.project : rules.global).push({
+            match: req.match,
+            decision: req.decision,
+          });
+          return rules;
+        },
+      },
+    });
+    const doc = window.document;
+
+    (doc.querySelector("#manage-btn") as HTMLElement).click();
+    await vi.waitFor(() => expect(doc.querySelectorAll("#mcp-list .profile-row")).toHaveLength(1));
+    expect(doc.querySelector("#manage-modal")?.classList.contains("hidden")).toBe(false);
+    expect(doc.querySelector("#mcp-list")?.textContent).toContain("filesystem");
+    expect(doc.querySelector("#mcp-list")?.textContent).toContain("已连接 · 4 个工具");
+
+    (doc.querySelector("#mcp-add") as HTMLElement).click();
+    expect(doc.querySelector("#mcp-editor")?.classList.contains("hidden")).toBe(false);
+    (doc.querySelector("#mcp-name") as HTMLInputElement).value = "github";
+    (doc.querySelector("#mcp-scope") as HTMLSelectElement).value = "project";
+    (doc.querySelector("#mcp-command") as HTMLInputElement).value = "npx";
+    (doc.querySelector("#mcp-args") as HTMLTextAreaElement).value = "-y\nserver-github";
+    (doc.querySelector("#mcp-env") as HTMLTextAreaElement).value = "TOKEN=secret";
+    (doc.querySelector("#mcp-save") as HTMLElement).click();
+
+    await vi.waitFor(() => expect(doc.querySelectorAll("#mcp-list .profile-row")).toHaveLength(2));
+    const save = calls.find((c) => c.url === "/api/mcp/save")!;
+    expect(JSON.parse(String(save.init?.body))).toEqual({
+      name: "github",
+      scope: "project",
+      config: { command: "npx", args: ["-y", "server-github"], env: { TOKEN: "secret" }, disabled: false },
+    });
+    expect(doc.querySelector("#mcp-editor")?.classList.contains("hidden")).toBe(true);
+
+    (doc.querySelector('#manage-tabs button[data-tab="perm"]') as HTMLElement).click();
+    expect(doc.querySelector("#mcp-pane")?.classList.contains("hidden")).toBe(true);
+    expect(doc.querySelector("#perm-pane")?.classList.contains("hidden")).toBe(false);
+    expect(doc.querySelectorAll("#perm-list .profile-row")).toHaveLength(2);
+    expect(doc.querySelector("#perm-list")?.textContent).toContain("Bash(npm test)");
+    expect(doc.querySelector("#perm-list")?.textContent).toContain("WebFetch(*)");
+
+    (doc.querySelector("#perm-add") as HTMLElement).click();
+    (doc.querySelector("#perm-match") as HTMLInputElement).value = "Bash(git push *)";
+    (doc.querySelector("#perm-decision") as HTMLSelectElement).value = "deny";
+    (doc.querySelector("#perm-scope") as HTMLSelectElement).value = "global";
+    (doc.querySelector("#perm-save") as HTMLElement).click();
+
+    await vi.waitFor(() => expect(doc.querySelectorAll("#perm-list .profile-row")).toHaveLength(3));
+    const add = calls.find((c) => c.url === "/api/permissions/add")!;
+    expect(JSON.parse(String(add.init?.body))).toEqual({
+      scope: "global",
+      match: "Bash(git push *)",
+      decision: "deny",
+    });
+    expect(doc.querySelector("#perm-editor")?.classList.contains("hidden")).toBe(true);
+  });
+
+  it("renders the usage dashboard and saves a session budget", async () => {
+    const usage = {
+      totals: {
+        usd: 12.34,
+        requests: 42,
+        sessions: 3,
+        days: 5,
+        cacheShare: 0.42,
+        cacheRead: 123456,
+        cacheWrite: 2345,
+        input: 12345,
+        output: 6789,
+        unpriced: 0,
+      },
+      session: { usd: 1.5, requests: 4, budgetUsd: 5 },
+      byModel: [
+        { key: "claude-sonnet-4-5", usd: 12.34, requests: 42, input: 12345, output: 6789, cacheRead: 123456, cacheWrite: 2345 },
+      ],
+      byDay: [{ key: "2026-10-21", usd: 12.34, requests: 42, input: 12345, output: 6789, cacheRead: 123456, cacheWrite: 2345 }],
+      bySession: [
+        { key: "abcd1234", title: "重构会话", usd: 12.34, requests: 42, input: 12345, output: 6789, cacheRead: 123456, cacheWrite: 2345 },
+      ],
+      ledger: "~/.node-agent/usage.jsonl",
+    };
+    const { window, calls } = await boot({
+      routes: { "/api/usage": usage, "/api/usage/budget": { ok: true } },
+    });
+    const doc = window.document;
+
+    (doc.querySelector("#usage-btn") as HTMLElement).click();
+    await vi.waitFor(() => expect(doc.querySelectorAll("#usage-cards .usage-stat")).toHaveLength(4));
+    expect(doc.querySelector("#usage-modal")?.classList.contains("hidden")).toBe(false);
+    expect([...doc.querySelectorAll("#usage-cards .u-value")].map((n) => n.textContent)).toEqual([
+      "$12.34",
+      "42.0%",
+      "12k",
+      "6.8k",
+    ]);
+    expect(doc.querySelector("#budget-note")?.textContent).toContain("已用 30%");
+    expect((doc.querySelector("#budget-input") as HTMLInputElement).value).toBe("5");
+    expect(doc.querySelector("#usage-models")?.textContent).toContain("claude-sonnet-4-5");
+    expect(doc.querySelector("#usage-sessions")?.textContent).toContain("重构会话");
+    expect(doc.querySelector("#usage-ledger")?.textContent).toContain("~/.node-agent/usage.jsonl");
+
+    (doc.querySelector("#budget-input") as HTMLInputElement).value = "8";
+    (doc.querySelector("#budget-save") as HTMLElement).click();
+    await vi.waitFor(() => expect(calls.filter((c) => c.url === "/api/usage")).toHaveLength(2));
+    const save = calls.find((c) => c.url === "/api/usage/budget")!;
+    expect(JSON.parse(String(save.init?.body))).toEqual({ usd: 8 });
+  });
+
+  it("switches projects from the recent list", async () => {
+    let current = { ...baseState, todos: [] as typeof seededTodos };
+    const { window, calls } = await boot({
+      routes: {
+        "/api/state": () => current,
+        "/api/recent-projects": [
+          { name: "mojo", path: "D:\\proj" },
+          { name: "other", path: "D:\\proj2" },
+        ],
+        "/api/project": (_url, init) => {
+          const req = JSON.parse(String(init?.body));
+          current = { ...current, cwd: req.cwd, sessionId: "beef5678" };
+          return { cwd: req.cwd };
+        },
+      },
+    });
+    const doc = window.document;
+
+    (doc.querySelector("#open-project") as HTMLElement).click();
+    await vi.waitFor(() => expect(doc.querySelectorAll("#proj-recent .recent-row")).toHaveLength(2));
+    expect(doc.querySelector("#project-modal")?.classList.contains("hidden")).toBe(false);
+    expect(doc.querySelector("#proj-recent")?.textContent).toContain("D:\\proj2");
+
+    (doc.querySelectorAll("#proj-recent .recent-row")[1] as HTMLElement).click();
+    await vi.waitFor(() => expect(doc.querySelector("#crumb-cwd")?.textContent).toBe("D:\\proj2"));
+    expect(doc.querySelector("#project-modal")?.classList.contains("hidden")).toBe(true);
+    const open = calls.find((c) => c.url === "/api/project")!;
+    expect(JSON.parse(String(open.init?.body))).toEqual({ cwd: "D:\\proj2" });
   });
 });
