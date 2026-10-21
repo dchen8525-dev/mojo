@@ -25,6 +25,17 @@ export interface SessionMeta {
   todos?: TodoItem[];
 }
 
+export interface SessionSubCall {
+  /** The parent `task` tool_use this call belongs to. */
+  toolUseId: string;
+  name: string;
+  inputPreview: string;
+  ok?: boolean;
+  result?: string;
+  /** The subagent's own model round (1-based). */
+  round?: number;
+}
+
 function fileFor(id: string) {
   return path.join(SESSION_DIR, `${id}.jsonl`);
 }
@@ -135,15 +146,22 @@ export async function rewriteMessages(id: string, messages: MessageParam[]) {
   const file = fileFor(id);
   await withFileLock(file, async () => {
     let metaLine = "";
+    const extras: string[] = [];
     try {
       const raw = await fs.readFile(file, "utf8");
-      metaLine = raw.split("\n").find((l) => l.trim().startsWith('{"type":"meta"')) ?? "";
+      for (const line of raw.split("\n")) {
+        if (!line.trim()) continue;
+        if (!metaLine && line.trim().startsWith('{"type":"meta"')) metaLine = line;
+        // UI-only records survive compaction so the transcript keeps its chains.
+        else if (line.includes('"type":"subcall"')) extras.push(line);
+      }
     } catch {
       return; // no session file: nothing to rewrite
     }
     if (!metaLine) return;
     const lines = messages.map((m) => JSON.stringify({ type: "message", message: m })).join("\n");
-    await atomicWrite(file, metaLine + "\n" + (lines ? lines + "\n" : ""));
+    const out = [metaLine, ...extras, ...(lines ? [lines] : [])];
+    await atomicWrite(file, out.join("\n") + "\n");
     invalidateSession(id);
   });
 }
@@ -152,6 +170,17 @@ export async function rewriteMessages(id: string, messages: MessageParam[]) {
 export async function appendModel(id: string, model: string) {
   await withFileLock(fileFor(id), async () => {
     await fs.appendFile(fileFor(id), JSON.stringify({ type: "model", model }) + "\n");
+    invalidateSession(id);
+  });
+}
+
+/**
+ * Record one tool call a subagent performed. UI-only: `loadSession` keeps these
+ * out of `messages`, so the model never sees them.
+ */
+export async function appendSubCall(id: string, call: SessionSubCall) {
+  await withFileLock(fileFor(id), async () => {
+    await fs.appendFile(fileFor(id), JSON.stringify({ type: "subcall", ...call }) + "\n", "utf8");
     invalidateSession(id);
   });
 }
@@ -274,6 +303,8 @@ export async function deleteSession(id: string): Promise<boolean> {
 interface ParsedSession {
   meta: SessionMeta;
   messages: MessageParam[];
+  /** Subagent call chains recorded for the UI (never sent to the model). */
+  subCalls: SessionSubCall[];
 }
 
 /** Single-pass parse of a session file; updatedAt comes from the file mtime. */
@@ -301,6 +332,7 @@ async function parseSessionFile(full: string): Promise<ParsedSession | null> {
   const mtimeMs = stat.mtimeMs;
   let meta: SessionMeta | null = null;
   const messages: MessageParam[] = [];
+  const subCalls: SessionSubCall[] = [];
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     try {
@@ -319,12 +351,22 @@ async function parseSessionFile(full: string): Promise<ParsedSession | null> {
         };
       } else if (obj.type === "model" && meta) meta.model = obj.model; // last marker wins
       else if (obj.type === "message" && meta) messages.push(obj.message);
+      else if (obj.type === "subcall" && typeof obj.toolUseId === "string") {
+        subCalls.push({
+          toolUseId: obj.toolUseId,
+          name: typeof obj.name === "string" ? obj.name : "",
+          inputPreview: typeof obj.inputPreview === "string" ? obj.inputPreview : "",
+          ok: obj.ok !== false,
+          result: typeof obj.result === "string" ? obj.result : undefined,
+          round: typeof obj.round === "number" ? obj.round : undefined,
+        });
+      }
     } catch {
       /* skip corrupt line */
     }
   }
 
-  const parsed = meta ? { meta, messages } : null;
+  const parsed = meta ? { meta, messages, subCalls } : null;
   parseCache.delete(full);
   parseCache.set(full, { mtimeMs, size: stat.size, parsed });
   while (parseCache.size > PARSE_CACHE_MAX) {

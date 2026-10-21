@@ -59,6 +59,12 @@ export class AnthropicBackend implements LLMBackend {
         system: [{ type: "text" as const, text: system, cache_control: CACHE_CONTROL }],
         messages: cachedMessages(messages),
         tools: cachedTools(tools),
+        // Opt-in extended thinking (AGENT_THINKING=1). Off by default so
+        // gateways without thinking support keep working; when on, the UI
+        // streams the model's reasoning via onThinkingDelta.
+        ...(/^(1|true)$/i.test(process.env.AGENT_THINKING ?? "")
+          ? { thinking: { type: "enabled" as const, budget_tokens: 4096 } }
+          : {}),
       },
       { signal },
     );

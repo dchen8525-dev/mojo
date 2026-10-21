@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- 01 · m. —— 纸底 + 几何 m + 琥珀句点（直接来自 wordmark） -->
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#faf8f4" stroke="#e0dbcf" stroke-width="1.5"/>
+  <path d="M17 45 V31 a7 7 0 0 1 14 0 V45 M31 45 V31 a7 7 0 0 1 14 0 V45"
+        fill="none" stroke="#1c1917" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="50" cy="45" r="4" fill="#b45309"/>
+</svg>

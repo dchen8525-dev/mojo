@@ -25,14 +25,14 @@ describe("GUI static assets", () => {
     }
     expect(app).toContain("/api/background");
     expect(app).toContain("/api/background/kill");
-    expect(css).toContain("#background-pop");
+    expect(css).toContain(".pop.wide");
   });
 
-  it("wires recent projects into the project dialog", () => {
-    expect(html).toContain('id="proj-recent"');
-    expect(app).toContain('"#proj-recent"');
-    expect(app).toContain("/api/recent-projects");
-    expect(css).toContain(".recent-list");
+  it("wires the workspace menu into the project crumb", () => {
+    expect(html).toContain('id="ws-pop"');
+    expect(app).toContain("renderWorkspaceMenu");
+    expect(app).toContain("pickProjectFolder");
+    expect(app).toContain("/api/project");
   });
 
   it("wires the usage dashboard and budget controls", () => {
@@ -129,7 +129,7 @@ describe("GUI static assets", () => {
   it("binds Ctrl/Cmd+K and Ctrl/Cmd+Enter", () => {
     expect(app).toContain('e.key.toLowerCase() === "k"');
     expect(app).toContain('e.key === "Enter" && (e.ctrlKey || e.metaKey)');
-    expect(app).toContain("openSessionSearch");
+    expect(app).toContain("sessionSearch.focus()");
     expect(app).toContain("sessionSearch.select()");
   });
 
@@ -165,7 +165,6 @@ describe("GUI static assets", () => {
     expect(app).toContain("e.isComposing || e.keyCode === 229");
     expect(app).toContain("todoSyncSeq");
     expect(app).toContain("todoSyncEpoch");
-    expect(app).toContain('$("#model-pop").classList.add("hidden")');
     expect(app).toContain("list.scrollTop = scrollTop");
     expect(html).toContain('aria-controls="sidebar"');
     expect(app).toContain('$("#new-session").focus({ preventScroll: true })');

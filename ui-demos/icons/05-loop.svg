@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- 05 · 环 + 点 —— 纸底 + 墨色圆环 + 琥珀卫星点（智能体循环） -->
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#faf8f4" stroke="#e0dbcf" stroke-width="1.5"/>
+  <circle cx="32" cy="34" r="13" fill="none" stroke="#1c1917" stroke-width="5"/>
+  <circle cx="32" cy="19" r="5.5" fill="#b45309"/>
+</svg>

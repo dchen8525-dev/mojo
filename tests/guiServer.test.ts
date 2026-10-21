@@ -12,6 +12,7 @@ import type { SwitchResult } from "../src/gui/project.js";
 import { rememberRecentProject } from "../src/gui/recentProjects.js";
 import { backgroundManager } from "../src/tools/background.js";
 import type { McpServerStatus } from "../src/mcp.js";
+import type { ProfileInput, PublicProfile } from "../src/llmProfiles.js";
 
 const TOKEN = "testtoken123";
 
@@ -44,7 +45,7 @@ async function withServer(
   serverOverrides: Partial<{
     renameSession: (id: string, title: string) => Promise<boolean>;
     tagSession: (id: string, tags: string[]) => Promise<string[] | null>;
-    deleteSession: (id: string) => Promise<{ ok: boolean; error?: string; activeReplaced?: string }>;
+    deleteSession: (id: string) => Promise<{ ok: boolean; error?: string; activeCleared?: boolean }>;
     searchSessions: (q: string, o?: { regex?: boolean }) => Promise<unknown[]>;
     switchProject: (cwd: string, opts?: { resumeId?: string }) => Promise<SwitchResult>;
     resumeSession: (id: string) => Promise<string | null>;
@@ -53,6 +54,12 @@ async function withServer(
     reloadMcp: () => Promise<McpServerStatus[]>;
     mcpDisabled: boolean;
     usageFile: string;
+    listLlmProfiles: () => Promise<{ activeId?: string; profiles: PublicProfile[]; projectOverrides: boolean }>;
+    saveLlmProfile: (input: ProfileInput) => Promise<{ ok: boolean; id?: string; error?: string }>;
+    deleteLlmProfile: (id: string) => Promise<{ ok: boolean; error?: string }>;
+    activateLlmProfile: (id: string) => Promise<{ ok: boolean; provider?: string; model?: string; error?: string; warning?: string }>;
+    disableLlmProfile: (id: string) => Promise<{ ok: boolean; error?: string }>;
+    listModelsForProfile: (input: ProfileInput) => Promise<{ models?: string[]; error?: string }>;
   }> = {},
 ): Promise<void> {
   const hub = new SseHub();
@@ -86,6 +93,12 @@ async function withServer(
       tagSession: serverOverrides.tagSession ?? (async () => null),
       renameSession: serverOverrides.renameSession ?? (async () => true),
       deleteSession: serverOverrides.deleteSession ?? (async () => ({ ok: true })),
+      listLlmProfiles: serverOverrides.listLlmProfiles ?? (async () => ({ profiles: [], projectOverrides: false })),
+      saveLlmProfile: serverOverrides.saveLlmProfile ?? (async () => ({ ok: true, id: "p_1" })),
+      deleteLlmProfile: serverOverrides.deleteLlmProfile ?? (async () => ({ ok: true })),
+      activateLlmProfile: serverOverrides.activateLlmProfile ?? (async () => ({ ok: true, provider: "anthropic", model: "m" })),
+      disableLlmProfile: serverOverrides.disableLlmProfile ?? (async () => ({ ok: true })),
+      listModelsForProfile: serverOverrides.listModelsForProfile ?? (async () => ({ models: ["m1"] })),
       onQuit: () => {},
     },
     0,
@@ -130,6 +143,47 @@ function req(
 }
 
 describe("gui server", () => {
+  it("broadcasts round and tool events with structured input and result", async () => {
+    await withServer(
+      async (gui) => {
+        const sse = collectSse(gui.port, 4);
+        await sse.ready;
+        await req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "hi" } });
+        const events = (await sse.done).slice(0, 4);
+        expect(events.map((e) => e.event)).toEqual(["turn_start", "round_start", "tool_start", "tool_end"]);
+        expect(events[1].data.round).toBe(1);
+        expect(events[2].data.input).toEqual({ path: "a.ts" });
+        expect(events[3].data.result).toBe("file body");
+      },
+      {
+        chat: async (_text, _signal, events) => {
+          events?.onRoundStart?.(1);
+          events?.onToolStart?.("t1", "read_file", '{"path":"a.ts"}', { path: "a.ts" });
+          events?.onToolEnd?.("t1", "read_file", true, "file body", "file body");
+          return "done";
+        },
+      },
+    );
+  });
+
+  it("serves the vendored marked build", async () => {
+    await withServer(async (gui) => {
+      const r = await req(gui.port, "/vendor/marked.min.js");
+      expect(r.status).toBe(200);
+      expect(r.text).toContain("marked");
+    });
+  });
+
+  it("serves the app icon without a token", async () => {
+    await withServer(async (gui) => {
+      const r = await req(gui.port, "/icon.png");
+      expect(r.status).toBe(200);
+      expect(r.text).toContain("PNG");
+      const ico = await req(gui.port, "/favicon.ico");
+      expect(ico.status).toBe(200);
+    });
+  });
+
   it("rejects /api/* without the token", async () => {
     await withServer(async (gui) => {
       const r = await req(gui.port, "/api/state");
@@ -228,219 +282,11 @@ describe("gui server", () => {
     );
   });
 
-  it("GET /api/api-profiles returns a masked empty view", async () => {
-    const home = await fs.mkdtemp(path.join(os.tmpdir(), "mojo-gui-home-"));
-    try {
-      await withServer(
-        async (gui) => {
-          const r = await req(gui.port, "/api/api-profiles", { token: TOKEN });
-          expect(r.status).toBe(200);
-          expect(r.json.profiles).toEqual([]);
-          expect(r.json.defaultProfileId).toBeNull();
-          expect(r.json.activeProfileId).toBeNull();
-          expect(r.json.config.global).toContain(".node-agent");
-        },
-        {},
-        { home },
-      );
-    } finally {
-      await fs.rm(home, { recursive: true, force: true });
-    }
-  });
 
-  it("POST /api/api-profiles creates a profile, masks the key and applies it", async () => {
-    const home = await fs.mkdtemp(path.join(os.tmpdir(), "mojo-gui-home-"));
-    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "mojo-gui-proj-"));
-    try {
-      await withServer(
-        async (gui) => {
-          const r = await req(gui.port, "/api/api-profiles", {
-            method: "POST",
-            token: TOKEN,
-            body: {
-              name: "Corp",
-              provider: "openai",
-              model: "gpt-4o",
-              baseURL: "https://example.test/v1",
-              apiKey: "sk-test",
-            },
-          });
-          expect(r.status).toBe(200);
-          expect(r.json.profile).toMatchObject({
-            name: "Corp",
-            provider: "openai",
-            model: "gpt-4o",
-            baseURL: "https://example.test/v1",
-            hasKey: true,
-          });
-          expect(r.json.profile.apiKey).toBeUndefined();
-          expect(r.json.applied).toEqual({ provider: "openai", model: "gpt-4o" });
 
-          const raw = JSON.parse(await fs.readFile(path.join(home, ".node-agent", "config.json"), "utf8"));
-          expect(raw.apiProfiles[0]).toMatchObject({ name: "Corp", apiKey: "sk-test" });
-        },
-        {
-          cwd,
-          switchModel: (spec: string) => {
-            const [provider, ...rest] = spec.split(":");
-            return { provider, model: rest.join(":") };
-          },
-        },
-        { home },
-      );
-    } finally {
-      await fs.rm(home, { recursive: true, force: true });
-      await fs.rm(cwd, { recursive: true, force: true });
-    }
-  });
 
-  it("POST /api/api-profiles validates provider, name, model and baseURL", async () => {
-    const home = await fs.mkdtemp(path.join(os.tmpdir(), "mojo-gui-home-"));
-    try {
-      await withServer(
-        async (gui) => {
-          const noProvider = await req(gui.port, "/api/api-profiles", {
-            method: "POST",
-            token: TOKEN,
-            body: { name: "x", provider: "nope", model: "m" },
-          });
-          expect(noProvider.status).toBe(400);
-          const noName = await req(gui.port, "/api/api-profiles", {
-            method: "POST",
-            token: TOKEN,
-            body: { provider: "anthropic", model: "m" },
-          });
-          expect(noName.status).toBe(400);
-          const noModel = await req(gui.port, "/api/api-profiles", {
-            method: "POST",
-            token: TOKEN,
-            body: { name: "x", provider: "anthropic" },
-          });
-          expect(noModel.status).toBe(400);
-          const badURL = await req(gui.port, "/api/api-profiles", {
-            method: "POST",
-            token: TOKEN,
-            body: { name: "x", provider: "anthropic", model: "m", baseURL: "ftp://example.test" },
-          });
-          expect(badURL.status).toBe(400);
-        },
-        {},
-        { home },
-      );
-    } finally {
-      await fs.rm(home, { recursive: true, force: true });
-    }
-  });
 
-  it("POST /api/api-profiles/select stores the project selection and applies it", async () => {
-    const home = await fs.mkdtemp(path.join(os.tmpdir(), "mojo-gui-home-"));
-    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "mojo-gui-proj-"));
-    const apply = (spec: string) => {
-      const [provider, ...rest] = spec.split(":");
-      return { provider, model: rest.join(":") };
-    };
-    try {
-      await withServer(
-        async (gui) => {
-          const first = await req(gui.port, "/api/api-profiles", {
-            method: "POST",
-            token: TOKEN,
-            body: { name: "First", provider: "anthropic", model: "claude-sonnet-4-5", apiKey: "sk-a" },
-          });
-          const second = await req(gui.port, "/api/api-profiles", {
-            method: "POST",
-            token: TOKEN,
-            body: { name: "Second", provider: "openai", model: "gpt-4o", apiKey: "sk-b" },
-          });
-          expect(first.status).toBe(200);
-          expect(second.status).toBe(200);
 
-          const selected = await req(gui.port, "/api/api-profiles/select", {
-            method: "POST",
-            token: TOKEN,
-            body: { scope: "project", id: second.json.profile.id },
-          });
-          expect(selected.status).toBe(200);
-          expect(selected.json.view.projectProfileId).toBe(second.json.profile.id);
-          expect(selected.json.applied).toEqual({ provider: "openai", model: "gpt-4o" });
-
-          const project = JSON.parse(await fs.readFile(path.join(cwd, ".node-agent", "config.json"), "utf8"));
-          expect(project).toEqual({ apiProfile: second.json.profile.id });
-        },
-        { cwd, switchModel: apply },
-        { home },
-      );
-    } finally {
-      await fs.rm(home, { recursive: true, force: true });
-      await fs.rm(cwd, { recursive: true, force: true });
-    }
-  });
-
-  it("POST /api/api-profiles/delete removes a profile and promotes the next default", async () => {
-    const home = await fs.mkdtemp(path.join(os.tmpdir(), "mojo-gui-home-"));
-    try {
-      await withServer(
-        async (gui) => {
-          const first = await req(gui.port, "/api/api-profiles", {
-            method: "POST",
-            token: TOKEN,
-            body: { name: "First", provider: "anthropic", model: "m1", apiKey: "sk-a" },
-          });
-          const second = await req(gui.port, "/api/api-profiles", {
-            method: "POST",
-            token: TOKEN,
-            body: { name: "Second", provider: "openai", model: "m2", apiKey: "sk-b" },
-          });
-
-          const deleted = await req(gui.port, "/api/api-profiles/delete", {
-            method: "POST",
-            token: TOKEN,
-            body: { id: first.json.profile.id },
-          });
-          expect(deleted.status).toBe(200);
-          expect(deleted.json.view.profiles.map((p: { id: string }) => p.id)).toEqual([second.json.profile.id]);
-          expect(deleted.json.view.defaultProfileId).toBe(second.json.profile.id);
-        },
-        {
-          switchModel: (spec: string) => {
-            const [provider, ...rest] = spec.split(":");
-            return { provider, model: rest.join(":") };
-          },
-        },
-        { home },
-      );
-    } finally {
-      await fs.rm(home, { recursive: true, force: true });
-    }
-  });
-
-  it("POST /api/api-profiles reports applyError while keeping the saved profile", async () => {
-    const home = await fs.mkdtemp(path.join(os.tmpdir(), "mojo-gui-home-"));
-    try {
-      await withServer(
-        async (gui) => {
-          const r = await req(gui.port, "/api/api-profiles", {
-            method: "POST",
-            token: TOKEN,
-            body: { name: "P", provider: "anthropic", model: "claude-sonnet-4-5", apiKey: "sk-test" },
-          });
-          expect(r.status).toBe(200);
-          expect(r.json.applyError).toContain("No API key");
-          expect(r.json.profile.name).toBe("P");
-          const raw = JSON.parse(await fs.readFile(path.join(home, ".node-agent", "config.json"), "utf8"));
-          expect(raw.apiProfiles).toHaveLength(1);
-        },
-        {
-          switchModel: () => {
-            throw new Error("No API key for provider anthropic");
-          },
-        },
-        { home },
-      );
-    } finally {
-      await fs.rm(home, { recursive: true, force: true });
-    }
-  });
 
   it("GET /api/fs/dirs lists only subdirectories", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "mojo-dirs-"));
@@ -473,23 +319,6 @@ describe("gui server", () => {
     }
   });
 
-  it("rejects profile changes while a turn is running", async () => {
-    await withServer(async (gui, runtime) => {
-      runtime.busy = true;
-      const saved = await req(gui.port, "/api/api-profiles", {
-        method: "POST",
-        token: TOKEN,
-        body: { name: "x", provider: "anthropic", model: "m", apiKey: "sk" },
-      });
-      expect(saved.status).toBe(409);
-      const selected = await req(gui.port, "/api/api-profiles/select", {
-        method: "POST",
-        token: TOKEN,
-        body: { scope: "project", id: "p1" },
-      });
-      expect(selected.status).toBe(409);
-    });
-  });
 
   it("runs a chat turn and broadcasts SSE events", async () => {
     await withServer(
@@ -958,6 +787,130 @@ describe("gui server", () => {
       },
       {},
       { permissions },
+      );
+  });
+
+  it("/api/llm/profiles passes the masked list through", async () => {
+    await withServer(
+      async (gui) => {
+        const r = await req(gui.port, "/api/llm/profiles", { token: TOKEN });
+        expect(r.status).toBe(200);
+        expect(r.json.activeId).toBe("p_1");
+        expect(r.json.projectOverrides).toBe(false);
+        expect(r.json.profiles[0].keyMasked).toBe("sk-1…cd9f");
+        expect(r.json.profiles[0].apiKey).toBeUndefined();
+      },
+      {},
+      {
+        listLlmProfiles: async () => ({
+          activeId: "p_1",
+          projectOverrides: false,
+          profiles: [
+            { id: "p_1", name: "网关", provider: "openai", model: "glm-4.6", updatedAt: "2026-10-18T00:00:00.000Z", hasKey: true, keyMasked: "sk-1…cd9f" },
+          ],
+        }),
+      },
+    );
+  });
+
+  it("/api/llm/profile/save rejects a missing model and trims what it forwards", async () => {
+    const seen: ProfileInput[] = [];
+    await withServer(
+      async (gui) => {
+        const bad = await req(gui.port, "/api/llm/profile/save", { method: "POST", token: TOKEN, body: { name: "只有名字" } });
+        expect(bad.status).toBe(400);
+        expect(seen).toHaveLength(0);
+
+        const ok = await req(gui.port, "/api/llm/profile/save", {
+          method: "POST",
+          token: TOKEN,
+          body: { id: "p_1", name: " 网关 ", provider: "openai", baseURL: " https://gw.example/v1 ", apiKey: " sk-abc ", model: " glm-4.6 " },
+        });
+        expect(ok.status).toBe(200);
+        expect(ok.json).toEqual({ ok: true, id: "p_9" });
+        expect(seen[0]).toEqual({
+          id: "p_1",
+          name: "网关",
+          provider: "openai",
+          baseURL: "https://gw.example/v1",
+          apiKey: "sk-abc",
+          model: "glm-4.6",
+        });
+      },
+      {},
+      {
+        saveLlmProfile: async (input) => {
+          seen.push(input);
+          return { ok: true, id: "p_9" };
+        },
+      },
+    );
+  });
+
+  it("/api/llm/profile/activate maps busy to 409 and a missing profile to 404", async () => {
+    await withServer(
+      async (gui) => {
+        const busy = await req(gui.port, "/api/llm/profile/activate", { method: "POST", token: TOKEN, body: { id: "p_1" } });
+        expect(busy.status).toBe(409);
+        expect(busy.json.error).toBe("busy");
+
+        const gone = await req(gui.port, "/api/llm/profile/activate", { method: "POST", token: TOKEN, body: { id: "nope" } });
+        expect(gone.status).toBe(404);
+      },
+      {},
+      {
+        activateLlmProfile: async (id) => (id === "nope" ? { ok: false, error: "not found" } : { ok: false, error: "busy" }),
+      },
+    );
+  });
+
+  it("/api/llm/profile/delete reports an unknown id as 404", async () => {
+    await withServer(
+      async (gui) => {
+        const missing = await req(gui.port, "/api/llm/profile/delete", { method: "POST", token: TOKEN, body: { id: "nope" } });
+        expect(missing.status).toBe(404);
+        const ok = await req(gui.port, "/api/llm/profile/delete", { method: "POST", token: TOKEN, body: { id: "p_1" } });
+        expect(ok.status).toBe(200);
+      },
+      {},
+      { deleteLlmProfile: async (id) => (id === "p_1" ? { ok: true } : { ok: false, error: "not found" }) },
+    );
+  });
+
+  it("/api/llm/profile/disable reports an unknown id as 404", async () => {
+    await withServer(
+      async (gui) => {
+        const missing = await req(gui.port, "/api/llm/profile/disable", { method: "POST", token: TOKEN, body: { id: "nope" } });
+        expect(missing.status).toBe(404);
+        const ok = await req(gui.port, "/api/llm/profile/disable", { method: "POST", token: TOKEN, body: { id: "p_1" } });
+        expect(ok.status).toBe(200);
+        expect(ok.json).toEqual({ ok: true });
+      },
+      {},
+      { disableLlmProfile: async (id) => (id === "p_1" ? { ok: true } : { ok: false, error: "not found" }) },
+    );
+  });
+
+  it("/api/llm/models lists a draft config and maps an endpoint failure to 502", async () => {
+    await withServer(
+      async (gui) => {
+        const ok = await req(gui.port, "/api/llm/models", {
+          method: "POST",
+          token: TOKEN,
+          body: { provider: "openai", model: "", apiKey: "sk-x" },
+        });
+        expect(ok.status).toBe(200);
+        expect(ok.json.models).toEqual(["m1"]);
+
+        // An empty key is dropped by the parser, so the callback reports failure.
+        const bad = await req(gui.port, "/api/llm/models", { method: "POST", token: TOKEN, body: { provider: "openai", model: "", apiKey: "" } });
+        expect(bad.status).toBe(502);
+        expect(bad.json.error).toMatch(/401/);
+      },
+      {},
+      {
+        listModelsForProfile: async (input) => (input.apiKey ? { models: ["m1"] } : { error: "401 unauthorized" }),
+      },
     );
   });
 });

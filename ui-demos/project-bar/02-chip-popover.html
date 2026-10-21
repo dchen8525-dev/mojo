@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>mojo · 项目入口 V2 药丸 + 最近项目面板</title>
+<link rel="stylesheet" href="base.css" />
+<style>
+/* ============================================================
+   V2 · 药丸 Chip + 最近项目面板
+   项目 = 底栏里一枚带边框/浅底的 chip「📁 mojo ▾」（显示目录名而非全路径），
+   与模式分段控件、模型下拉并列，视觉权重一致。点击在上面展开一个带
+   搜索框 + 最近项目列表的宽面板（320px）。
+   ============================================================ */
+#proj-btn{
+  display:inline-flex;align-items:center;gap:7px;background:var(--paper-2);
+  border:1px solid var(--line-2);border-radius:999px;padding:3px 10px 3px 9px;
+  max-width:220px;font-size:12px;color:var(--dim);transition:.15s;
+}
+#proj-btn:hover,#proj-btn.open{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.proj-ico{font-size:11px;flex:0 0 auto}
+.proj-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+.proj-caret{font-size:9px;line-height:1;opacity:.7;flex:0 0 auto}
+#proj-pop{left:0;bottom:calc(100% + 10px);min-width:320px;padding:10px}
+.pop-empty{padding:10px 8px;color:var(--faint);font-size:12px}
+.pop-hint{padding:2px 8px 4px;color:var(--faint);font-size:11px}
+</style>
+</head>
+<body data-view="transcript">
+<div id="app">
+  <aside id="sidebar">
+    <div class="side-head"><span class="brand">mojo<i>.</i></span><span class="ver">v0.1.0</span></div>
+    <div class="side-new"><button id="new-session">＋ 新建任务</button></div>
+    <div class="side-search"><input id="session-search" placeholder="搜索历史会话…" /></div>
+    <div class="side-label">任务</div>
+    <div class="session-list">
+      <div class="session-item active">
+        <div class="s-title">修复 WebSocket 超时重连</div>
+        <div class="s-meta"><span>D:\work\mojo</span><span>刚刚</span></div>
+        <div class="s-tags">#bug #ws</div>
+      </div>
+      <div class="session-item">
+        <div class="s-title">把 multi_edit 的 diff 合并逻辑抽出来</div>
+        <div class="s-meta"><span>D:\work\web-console</span><span>2 小时前</span></div>
+        <div class="s-tags">#refactor</div>
+      </div>
+      <div class="session-item">
+        <div class="s-title">压缩：交接笔记信息衰减</div>
+        <div class="s-meta"><span>D:\work\mojo</span><span>昨天</span></div>
+      </div>
+      <div class="session-item">
+        <div class="s-title">Windows 下 pwsh 危险命令检测</div>
+        <div class="s-meta"><span>C:\Users\admin\code\rag-lab</span><span>周三</span></div>
+        <div class="s-tags">#win</div>
+      </div>
+    </div>
+    <div class="side-foot"><button class="quit">⏻ 退出</button></div>
+  </aside>
+
+  <main id="main">
+    <div class="topbar">
+      <span class="t-title">修复 WebSocket 超时重连</span>
+      <span class="sp"></span>
+      <span class="crumb">ses_a91f3c</span>
+    </div>
+
+    <section id="welcome" class="welcome">
+      <h1>mojo，<em>帮你</em>。</h1>
+      <p>一个会话、一条命令。把仓库、报错、设计稿交给它，剩下的交给一轮轮工具调用。</p>
+      <div class="hints">
+        <button class="hint">解释这个仓库的架构</button>
+        <button class="hint">/review main 并发安全</button>
+        <button class="hint">修一下失败的测试</button>
+        <button class="hint">@src/llm/openai.ts 流式解析</button>
+      </div>
+    </section>
+
+    <section id="transcript">
+      <div class="msg user">帮我看看 src/llm/openai.ts —— 流式解析在断线重连之后，会把已经吐过的那一段再重复输出一次。找下根因。</div>
+
+      <div class="tool-card">
+        <div class="tool-head"><span class="think-icon">✻</span><span class="tool-name">思考</span><span class="tool-preview">重连时 buffer 没清空，已 flush 的 delta 再次进入拼接…</span></div>
+        <div class="tool-body"><pre>两条线索：
+1. 重试循环是否复用了上一次的 partial text buffer
+2. 断点恢复时 lastEmittedIndex 是否被重置为 0</pre></div>
+      </div>
+
+      <div class="tool-card open">
+        <div class="tool-head"><span class="tool-status ok"></span><span class="tool-name">read_file</span><span class="tool-preview">src/llm/openai.ts · 1–160</span></div>
+        <div class="tool-body"><pre>export async function* streamChat(req: ChatRequest, signal?: AbortSignal) {
+  let emitted = "";
+  let retries = 0;
+  while (true) {
+    try {
+      const stream = await client.chat.completions.create({ ...req, stream: true });
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta?.content ?? "";
+        if (!delta) continue;
+        emitted += delta;          // ← 重连后 emitted 未重置
+        yield { type: "delta", text: delta };
+      }
+      return;
+    } catch (err) {
+      if (++retries > 3) throw err;
+    }
+  }
+}</pre></div>
+      </div>
+
+      <div class="msg assistant">
+        <div class="who">mojo</div>
+        <div class="md">
+          <p>根因在重试循环里：<code>emitted</code> 是<strong>循环外</strong>声明的，重连成功后会从断点继续累加，而上层把它当作「本轮全部产出」重新回填了一遍。</p>
+          <h3>修法</h3>
+          <p>把「已发出去的长度」当锚点，重连后只 yield 增量：</p>
+          <pre><code>catch (err) {
+  if (++retries &gt; 3) throw err;
+  emitted = emitted.slice(0, lastYielded);
+}</code></pre>
+          <ul>
+            <li><code>lastYielded</code> 在每次 <code>yield</code> 之后同步</li>
+            <li>退避重试保留，但不再污染文本流</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="msg assistant"><div class="wait"><i></i><i></i><i></i><span style="margin-left:6px">正在应用修改…</span></div></div>
+    </section>
+
+    <footer id="statusbar">
+      <b>D:\work\mojo</b><span class="sep">·</span>claude-sonnet-4-5<span class="sep">·</span>ctx 42%<span class="sep">·</span>$0.83
+    </footer>
+
+    <div id="composer">
+      <div class="composer-box">
+        <div class="pop hidden" id="proj-pop">
+          <input class="pop-search" placeholder="搜索项目路径…" />
+          <div class="pop-head">最近项目</div>
+          <button class="pop-item" data-set=".proj-label" data-label="mojo">
+            <span class="p-ico">▸</span><span class="p-path">D:\work\mojo</span><span class="p-cur">当前</span>
+          </button>
+          <button class="pop-item" data-set=".proj-label" data-label="web-console">
+            <span class="p-ico">▸</span><span class="p-path">D:\work\web-console</span><span class="p-when">2 小时前</span>
+          </button>
+          <button class="pop-item" data-set=".proj-label" data-label="rag-lab">
+            <span class="p-ico">▸</span><span class="p-path">C:\Users\admin\code\rag-lab</span><span class="p-when">昨天</span>
+          </button>
+          <button class="pop-item" data-set=".proj-label" data-label="mojo-docs">
+            <span class="p-ico">▸</span><span class="p-path">D:\docs\mojo-docs</span><span class="p-when">上周</span>
+          </button>
+          <div class="pop-hint">切换会新建一个属于该目录的会话</div>
+          <div class="pop-foot">
+            <button class="solid">浏览目录…</button>
+            <button>输入路径…</button>
+          </div>
+        </div>
+
+        <textarea id="input" rows="1" placeholder="今天帮你做些什么？输入 / 调用命令"></textarea>
+        <div class="composer-bar">
+          <div class="bar-left">
+            <button id="attach" title="添加图片">＋</button>
+            <button id="proj-btn" data-pop="proj-pop" title="切换项目目录 · D:\work\mojo">
+              <span class="proj-ico">📁</span>
+              <span class="proj-label">mojo</span>
+              <span class="proj-caret">▾</span>
+            </button>
+            <div class="mode-picker">
+              <button>默认</button><button class="active">自动</button><button>YOLO</button>
+            </div>
+            <label class="plan-toggle"><input type="checkbox" /> PLAN</label>
+          </div>
+          <div class="bar-right">
+            <div class="ctx" title="上下文占用"><span>42%</span><div class="track"><div class="fill"></div></div></div>
+            <div class="model-picker">
+              <select>
+                <option>claude-sonnet-4-5</option>
+                <option>claude-opus-4-1</option>
+                <option>openai:gpt-4o</option>
+              </select>
+            </div>
+            <button id="send" title="发送">↑</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div id="perm-modal" class="modal hidden">
+  <div class="modal-card">
+    <div class="perm-head"><span class="badge high">高风险</span><span class="perm-desc">写入 src/llm/openai.ts</span></div>
+    <pre class="perm-preview">  <span class="del">-      emitted += delta;</span>
+<span class="add">+      emitted += delta;</span>
+<span class="add">+      lastYielded = emitted.length;</span>
+   }
+   return;
+ } catch (err) {
+<span class="del">-      if (++retries &gt; 3) throw err;</span>
+<span class="add">+      if (++retries &gt; 3) throw err;</span>
+<span class="add">+      emitted = emitted.slice(0, lastYielded);</span>
+ }</pre>
+    <div class="perm-actions">
+      <button class="primary">允许一次<kbd>Y</kbd></button>
+      <button>总是允许<kbd>A</kbd></button>
+      <button>拒绝一次<kbd>N</kbd></button>
+      <button class="danger">总是拒绝<kbd>D</kbd></button>
+    </div>
+  </div>
+</div>
+
+<div class="demo-switch">
+  <span>V2 · 药丸 + 面板</span>
+  <button data-view="welcome">欢迎页</button>
+  <button data-view="transcript" class="active">对话</button>
+  <button data-view="perm">授权弹窗</button>
+</div>
+<script src="demo.js"></script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- 03 · M —— 琥珀底 + 白色几何 M（对比度最高，最像"应用"） -->
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#b45309"/>
+  <path d="M17 46 V20 L32 38 L47 20 V46"
+        fill="none" stroke="#fffaf0" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

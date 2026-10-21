@@ -92,7 +92,6 @@ async function boot(opts: {
   const routes: Record<string, Route> = {
     "/api/sessions": [],
     "/api/models": [],
-    "/api/api-profiles": { profiles: [], hasLegacyKey: false },
     "/api/background": { tasks: [] },
     ...opts.routes,
   };
@@ -116,11 +115,11 @@ async function boot(opts: {
   window.eval(appJs);
 
   // Boot is async: wait until refreshState applied the todos and the later
-  // loaders populated the API selector.
+  // loaders populated the model selector.
   await vi.waitFor(
     () => {
       expect(window.document.querySelectorAll("#todo-list .todo-row").length).toBe(state.todos.length);
-      expect(window.document.querySelectorAll("#api-select option").length).toBeGreaterThan(0);
+      expect(window.document.querySelectorAll("#model-select option").length).toBeGreaterThan(0);
     },
     { timeout: 3000 },
   );
@@ -427,15 +426,16 @@ describe("GUI interactions (happy-dom)", () => {
     expect(JSON.parse(String(save.init?.body))).toEqual({ usd: 8 });
   });
 
-  it("switches projects from the recent list", async () => {
+  it("switches projects from the workspace menu", async () => {
     let current = { ...baseState, todos: [] as typeof seededTodos };
+    const sessions = [
+      { id: "s1", cwd: "D:\\proj", updatedAt: "2026-10-21T10:00:00.000Z" },
+      { id: "s2", cwd: "D:\\proj2", updatedAt: "2026-10-21T09:00:00.000Z" },
+    ];
     const { window, calls } = await boot({
       routes: {
+        "/api/sessions": () => sessions,
         "/api/state": () => current,
-        "/api/recent-projects": [
-          { name: "mojo", path: "D:\\proj" },
-          { name: "other", path: "D:\\proj2" },
-        ],
         "/api/project": (_url, init) => {
           const req = JSON.parse(String(init?.body));
           current = { ...current, cwd: req.cwd, sessionId: "beef5678" };
@@ -446,13 +446,14 @@ describe("GUI interactions (happy-dom)", () => {
     const doc = window.document;
 
     (doc.querySelector("#open-project") as HTMLElement).click();
-    await vi.waitFor(() => expect(doc.querySelectorAll("#proj-recent .recent-row")).toHaveLength(2));
-    expect(doc.querySelector("#project-modal")?.classList.contains("hidden")).toBe(false);
-    expect(doc.querySelector("#proj-recent")?.textContent).toContain("D:\\proj2");
+    await vi.waitFor(() => expect(doc.querySelectorAll("#ws-pop .pop-item").length).toBeGreaterThan(1));
+    expect(doc.querySelector("#ws-pop")?.classList.contains("hidden")).toBe(false);
+    expect(doc.querySelector("#ws-pop")?.textContent).toContain("D:\\proj2");
 
-    (doc.querySelectorAll("#proj-recent .recent-row")[1] as HTMLElement).click();
-    await vi.waitFor(() => expect(doc.querySelector("#crumb-cwd")?.textContent).toBe("D:\\proj2"));
-    expect(doc.querySelector("#project-modal")?.classList.contains("hidden")).toBe(true);
+    const rows = [...doc.querySelectorAll("#ws-pop .pop-item")];
+    (rows[1] as HTMLElement).click();
+    await vi.waitFor(() => expect(doc.querySelector("#crumb-cwd")?.textContent).toBe("proj2"));
+    expect(doc.querySelector("#ws-pop")?.classList.contains("hidden")).toBe(true);
     const open = calls.find((c) => c.url === "/api/project")!;
     expect(JSON.parse(String(open.init?.body))).toEqual({ cwd: "D:\\proj2" });
   });

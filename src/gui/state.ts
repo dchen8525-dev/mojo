@@ -3,7 +3,7 @@ import type { Agent } from "../agent.js";
 import type { PermissionManager } from "../permissions.js";
 import type { Risk } from "../types.js";
 import type { SseHub } from "./sse.js";
-import type { UiTurn } from "./transcript.js";
+import type { UiSubCall, UiTurn } from "./transcript.js";
 
 export type PermissionDecision = "yes" | "no" | "always" | "always_deny";
 
@@ -24,11 +24,32 @@ export class GuiRuntime {
   commandController: AbortController | null = null;
   /** In-flight turn, accumulated from events so a reconnecting tab can recover. */
   liveTurn: UiTurn | null = null;
+  /**
+   * Subagent call chains keyed by the parent `task` tool id. Kept here so a
+   * refresh — which rebuilds the transcript from session history — still shows
+   * what the child did (the child's own messages are discarded).
+   */
+  readonly subCalls = new Map<string, UiSubCall[]>();
   agent!: Agent;
   permissions!: PermissionManager;
   private pending = new Map<string, { resolve: (d: PermissionDecision) => void; description: string; risk: Risk; preview?: string }>();
 
   constructor(readonly hub: SseHub) {}
+
+  /** Append one subagent call; bounded so a long session cannot grow without limit. */
+  recordSubCall(toolId: string, call: UiSubCall): void {
+    const list = this.subCalls.get(toolId);
+    if (list) {
+      if (list.length < 200) list.push(call);
+      return;
+    }
+    // Tool ids are unique per call, so an evicted entry is never matched again.
+    if (this.subCalls.size >= 500) {
+      const oldest = this.subCalls.keys().next().value;
+      if (oldest !== undefined) this.subCalls.delete(oldest);
+    }
+    this.subCalls.set(toolId, [call]);
+  }
 
   /** Wire the agent + permission manager once they exist (backend assembly order). */
   attach(agent: Agent, permissions: PermissionManager): void {

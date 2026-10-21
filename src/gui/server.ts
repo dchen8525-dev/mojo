@@ -8,14 +8,16 @@ import type { AgentEvents } from "../agent.js";
 import { renderCommand, expandFileReferences } from "../commands.js";
 import { runAgentCommand, type CommandResult } from "../agentCommands.js";
 import {
-  deleteApiProfile,
-  listApiProfiles,
-  resolveSettings,
-  saveApiProfile,
-  selectApiProfile,
-  setModelOverride,
-} from "../llm.js";
-import { toUiTranscript, type UiTurn } from "./transcript.js";
+  toUiTranscript,
+  clipInput,
+  clipText,
+  RESULT_CLIP,
+  type UiItem,
+  type UiSubCall,
+  type UiTurn,
+} from "./transcript.js";
+import { appendSubCall } from "../session.js";
+import type { ProfileInput, PublicProfile } from "../llmProfiles.js";
 import { SseHub } from "./sse.js";
 import { GuiRuntime, type PermissionDecision } from "./state.js";
 import { resolveProjectDir, type ProjectContext, type SwitchResult } from "./project.js";
@@ -24,7 +26,6 @@ import { backgroundManager } from "../tools/background.js";
 import {
   deleteMcpServer,
   loadMcpConfigScoped,
-  normalizeMcpConfig,
   saveMcpServer,
   type McpScope,
   type McpServerConfig,
@@ -48,14 +49,16 @@ export interface GuiServerOptions {
   /** Resume a stored session into the agent. Returns an error string or null. */
   resumeSession: (id: string) => Promise<string | null>;
   /** List sessions for the sidebar. */
-  listSessions: () => Promise<Array<{ id: string; cwd: string; updatedAt: string; model?: string; title?: string; tags?: string[] }>>;
+  listSessions: () => Promise<
+    Array<{ id: string; cwd: string; updatedAt: string; model?: string; title?: string; tags?: string[]; preview?: string }>
+  >;
   /** Full-text search over saved sessions (sidebar quick search). */
   searchSessions: (
     q: string,
     o?: { regex?: boolean },
   ) => Promise<
     Array<{
-      meta: { id: string; cwd: string; updatedAt: string; model?: string; title?: string; tags?: string[] };
+      meta: { id: string; cwd: string; updatedAt: string; model?: string; title?: string; tags?: string[]; preview?: string };
       matches: number;
       snippet: string;
       titleMatch: boolean;
@@ -66,8 +69,20 @@ export interface GuiServerOptions {
   renameSession: (id: string, title: string) => Promise<boolean>;
   /** Replace a stored session's tags. Returns the stored tags or null. */
   tagSession: (id: string, tags: string[]) => Promise<string[] | null>;
-  /** Delete a stored session; replaces the agent's session when it was active. */
-  deleteSession: (id: string) => Promise<{ ok: boolean; error?: string; activeReplaced?: string }>;
+  /** Delete a stored session; when it was the active one the agent drops back to "no session". */
+  deleteSession: (id: string) => Promise<{ ok: boolean; error?: string; activeCleared?: boolean }>;
+  /** LLM profiles behind the 模型配置 panel; keys are never sent in the clear. */
+  listLlmProfiles?: () => Promise<{ activeId?: string; profiles: PublicProfile[]; projectOverrides: boolean }>;
+  saveLlmProfile?: (input: ProfileInput) => Promise<{ ok: boolean; id?: string; error?: string }>;
+  deleteLlmProfile?: (id: string) => Promise<{ ok: boolean; error?: string }>;
+  /** Switch the whole runtime to a saved profile (persists + rebuilds the client). */
+  activateLlmProfile?: (id: string) => Promise<{ ok: boolean; provider?: string; model?: string; error?: string; warning?: string }>;
+  /** Turn a profile off: clears the active marker and the values it persists. */
+  disableLlmProfile?: (id: string) => Promise<{ ok: boolean; error?: string }>;
+  /** Model ids served by a draft (unsaved) config, for the 「拉取列表」 button. */
+  listModelsForProfile?: (input: ProfileInput) => Promise<{ models?: string[]; note?: string; error?: string }>;
+  /** Fire-and-forget: re-read the model's context window from the endpoint. */
+  refreshModelMeta?: () => void;
   /** Re-read MCP config and reconnect every server (GUI management). */
   reloadMcp?: () => Promise<McpServerStatus[]>;
   /** True when the backend was started with --no-mcp. */
@@ -78,10 +93,39 @@ export interface GuiServerOptions {
   onQuit: () => void;
 }
 
+/** Re-attach in-memory subagent chains to the cards rebuilt from history. */
+function attachSubCalls(items: UiItem[], chains: Map<string, UiSubCall[]>): UiItem[] {
+  for (const item of items) {
+    if (item.kind !== "tool" || !item.tool) continue;
+    const calls = chains.get(item.tool.id);
+    if (calls?.length) item.tool.subCalls = calls;
+  }
+  return items;
+}
+
+/** Validate the body of an LLM-profile request. `model` is required to save a
+ *  profile, but optional when only listing an endpoint's models. */
+function parseProfileInput(body: Record<string, unknown>, requireModel: boolean): ProfileInput | null {
+  const model = typeof body.model === "string" ? body.model.trim() : "";
+  if (requireModel && !model) return null;
+  const provider = body.provider === "openai" ? "openai" : "anthropic";
+  const rawName = typeof body.name === "string" ? body.name.trim() : "";
+  const out: ProfileInput = { name: rawName || model, provider, model };
+  if (typeof body.id === "string" && body.id.trim()) out.id = body.id.trim();
+  if (typeof body.baseURL === "string" && body.baseURL.trim()) out.baseURL = body.baseURL.trim();
+  if (typeof body.apiKey === "string" && body.apiKey.trim()) out.apiKey = body.apiKey.trim();
+  const rawCtx = body.contextWindow;
+  const ctx = typeof rawCtx === "number" ? rawCtx : typeof rawCtx === "string" ? Number(rawCtx) : NaN;
+  if (Number.isFinite(ctx) && ctx > 0) out.contextWindow = Math.floor(ctx);
+  return out;
+}
+
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
 };
 
 /** The page has no inline scripts, so scripts can be locked to same-origin. */
@@ -113,7 +157,10 @@ async function readStatic(name: string): Promise<Buffer> {
 
 function markedPath(): string {
   const req = createRequire(import.meta.url);
-  return req.resolve("marked/marked.min.js");
+  // marked 18+ ships only the ESM entry plus a UMD bundle (no marked.min.js).
+  // Serve the UMD build so a plain <script> tag still gets a `marked` global.
+  const pkgDir = path.dirname(req.resolve("marked/package.json"));
+  return path.join(pkgDir, "lib", "marked.umd.js");
 }
 
 function purifyPath(): string {
@@ -279,31 +326,61 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
     return {
       onTextDelta: (d) => {
         turn.text += d;
+        const seg = turn.rounds?.[turn.rounds.length - 1];
+        if (seg) seg.text += d;
         hub.broadcast("text_delta", { d });
+      },
+      onRoundStart: (round) => {
+        turn.round = round;
+        (turn.rounds ??= []).push({ round, text: "", thinking: "" });
+        hub.broadcast("round_start", { round });
       },
       onToolUseStart: (name, id) => {
         // The model has begun emitting this tool call (args still streaming);
         // show a pending card immediately so the UI never looks frozen.
-        if (!turn.tools.some((t) => t.id === id)) turn.tools.push({ id, name, inputPreview: "" });
-        hub.broadcast("tool_use_start", { name, id });
+        if (!turn.tools.some((t) => t.id === id)) {
+          turn.tools.push({ id, name, round: turn.round ?? 1, inputPreview: "" });
+        }
+        hub.broadcast("tool_use_start", { name, id, round: turn.round ?? 1 });
       },
       onThinkingDelta: (d) => {
         turn.thinking += d;
+        const seg = turn.rounds?.[turn.rounds.length - 1];
+        if (seg) seg.thinking += d;
         hub.broadcast("thinking_delta", { d });
       },
-      onToolStart: (id, name, inputPreview) => {
-        const t = turn.tools.find((x) => x.id === id);
-        if (t) t.inputPreview = inputPreview;
-        else turn.tools.push({ id, name, inputPreview });
-        hub.broadcast("tool_start", { id, name, inputPreview });
-      },
-      onToolEnd: (id, name, ok, preview) => {
+      onToolStart: (id, name, inputPreview, input) => {
+        const clipped = input ? clipInput(input) : undefined;
         const t = turn.tools.find((x) => x.id === id);
         if (t) {
-          t.result = preview;
+          t.inputPreview = inputPreview;
+          if (clipped) t.input = clipped;
+        } else {
+          turn.tools.push({ id, name, round: turn.round ?? 1, inputPreview, input: clipped });
+        }
+        hub.broadcast("tool_start", { id, name, inputPreview, input: clipped });
+      },
+      onToolEnd: (id, name, ok, preview, result) => {
+        const full = result === undefined ? preview : clipText(result, RESULT_CLIP);
+        const t = turn.tools.find((x) => x.id === id);
+        if (t) {
+          t.result = full;
           t.ok = ok;
         }
-        hub.broadcast("tool_end", { id, name, ok, preview });
+        hub.broadcast("tool_end", { id, name, ok, preview, result: full });
+      },
+      onSubTool: (parentId, name, inputPreview, ok, preview, round) => {
+        // Keep the chain out-of-band as well: the live turn is dropped at
+        // turn_end, but the card is rebuilt from history right after.
+        const call: UiSubCall = { name, inputPreview, ok, result: preview };
+        if (round) call.round = round;
+        runtime.recordSubCall(parentId, call);
+        // Persist it (UI-only line) so a restart or /resume keeps the chain.
+        const sessionId = project.agent.sessionId;
+        if (sessionId) void appendSubCall(sessionId, { toolUseId: parentId, ...call }).catch(() => {});
+        const t = turn.tools.find((x) => x.id === parentId);
+        if (t) (t.subCalls ??= []).push(call);
+        hub.broadcast("sub_tool", { id: parentId, name, inputPreview, ok, preview, round });
       },
       onUsage: (input, output) => hub.broadcast("usage", { input, output }),
       onCostWarning: (message) => hub.broadcast("cost_warning", { message }),
@@ -356,6 +433,8 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
           notify: (m) => hub.broadcast("system", { text: m }),
           signal: controller.signal,
         });
+        // A model switch may change the context window.
+        if (cmd === "model" && result.kind === "ok") opts.refreshModelMeta?.();
         if (cmd === "clear" || cmd === "fork") {
           sessionChanged = true;
           sidebarChanged = true;
@@ -427,7 +506,6 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
   }
 
   function stateSnapshot() {
-    const api = resolveSettings({ cwd: project.cwd, home });
     return {
       sessionId: project.agent.sessionId,
       cwd: project.agent.cwd,
@@ -441,33 +519,13 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       switching: runtime.switching,
       todos: project.agent.currentTodos(),
       cost: project.agent.costs.format(),
-      api: {
-        hasKey: !!api.apiKey,
-        baseURL: api.baseURL ?? "",
-        profile: api.profile ? { id: api.profile.id, name: api.profile.name } : null,
-      },
-      transcript: toUiTranscript(project.agent.getMessages()),
+      /** Still-running background shells (shown in the composer toolbar). */
+      backgroundTasks: backgroundManager.list().filter((t) => !t.done).length,
+      transcript: attachSubCalls(toUiTranscript(project.agent.getMessages()), runtime.subCalls),
       liveTurn: runtime.liveTurn,
       pendingPermissions: runtime.pendingPermissions(),
       customCommands: [...project.customCommands.values()].map((c) => ({ name: c.name, description: c.description })),
     };
-  }
-
-  /**
-   * Clear the session-level /model override and rebuild the backend from the
-   * currently selected profile (or legacy config). Used whenever the effective
-   * API configuration changes.
-   */
-  function applyResolvedSettings(): { applied?: { provider: string; model: string }; applyError?: string } {
-    setModelOverride(null);
-    try {
-      const s = resolveSettings({ cwd: project.cwd, home });
-      const r = project.agent.switchModel(`${s.provider}:${s.model}`);
-      hub.broadcast("settings_changed", { provider: r.provider, model: r.model });
-      return { applied: { provider: r.provider, model: r.model } };
-    } catch (err) {
-      return { applyError: err instanceof Error ? err.message : String(err) };
-    }
   }
 
   return async function handler(req, res) {
@@ -480,6 +538,12 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       if (method === "GET" && (p === "/" || p === "/index.html")) {
         res.writeHead(200, { "content-type": MIME[".html"], ...SECURITY_HEADERS });
         res.end(await cachedStatic("index.html"));
+        return;
+      }
+      if (method === "GET" && (p === "/icon.png" || p === "/favicon.ico")) {
+        const name = p === "/favicon.ico" ? "icon.ico" : "icon.png";
+        res.writeHead(200, { "content-type": MIME[path.extname(name)], "x-content-type-options": "nosniff" });
+        res.end(await cachedStatic(name));
         return;
       }
       if (method === "GET" && (p === "/app.js" || p === "/style.css")) {
@@ -546,8 +610,9 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       return sendJson(res, 200, { tasks, running: tasks.filter((t) => t.running).length });
     }
 
-    if (method === "GET" && p === "/api/api-profiles") {
-      return sendJson(res, 200, listApiProfiles(project.cwd, home));
+    if (method === "GET" && p === "/api/llm/profiles") {
+      if (!opts.listLlmProfiles) return sendJson(res, 501, { error: "not supported" });
+      return sendJson(res, 200, await opts.listLlmProfiles());
     }
 
     if (method === "GET" && p === "/api/fs/dirs") {
@@ -652,6 +717,8 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
           notify: (m) => hub.broadcast("system", { text: m }),
         });
         if (r.quit) opts.onQuit();
+        // A model switch may change the context window.
+        if (/^\/model\b/.test(line.trim())) opts.refreshModelMeta?.();
         return sendJson(res, 200, { text: r.text, kind: r.kind, quit: !!r.quit, highlight: r.highlight });
       }
 
@@ -661,77 +728,39 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
         return sendJson(res, 200, { ok: true, planMode: project.agent.planMode, mode: project.permissions.mode });
       }
 
-      if (p === "/api/api-profiles") {
-        if (runtime.busy || runtime.commandBusy || runtime.switching) return sendJson(res, 409, { error: "busy" });
-        const provider = body.provider === "openai" ? "openai" : body.provider === "anthropic" ? "anthropic" : null;
-        const name = typeof body.name === "string" ? body.name.trim() : "";
-        const model = typeof body.model === "string" ? body.model.trim() : "";
-        const baseURL = typeof body.baseURL === "string" ? body.baseURL.trim() : "";
-        const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
-        const id = typeof body.id === "string" && body.id ? body.id : undefined;
-        if (!provider) return sendJson(res, 400, { error: "provider must be anthropic or openai" });
-        if (!name) return sendJson(res, 400, { error: "missing name" });
-        if (!model) return sendJson(res, 400, { error: "missing model" });
-        if (baseURL && !/^https?:\/\//i.test(baseURL))
-          return sendJson(res, 400, { error: "baseURL must start with http:// or https://" });
-
-        let saved: Awaited<ReturnType<typeof saveApiProfile>>;
-        try {
-          saved = await saveApiProfile(
-            { id, name, provider, model, baseURL, ...(apiKey ? { apiKey } : {}) },
-            { cwd: project.cwd, home },
-          );
-        } catch (err) {
-          return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
-        }
-
-        const active = saved.view.activeProfileId === saved.profile.id;
-        const applied = active ? applyResolvedSettings() : {};
-        if (!active) hub.broadcast("settings_changed", {});
-        return sendJson(res, 200, {
-          ok: true,
-          profile: saved.view.profiles.find((p) => p.id === saved.profile.id) ?? null,
-          view: saved.view,
-          ...applied,
-        });
+      if (p === "/api/llm/profile/save") {
+        if (!opts.saveLlmProfile) return sendJson(res, 501, { error: "not supported" });
+        const input = parseProfileInput(body, true);
+        if (!input) return sendJson(res, 400, { error: "name and model are required" });
+        const r = await opts.saveLlmProfile(input);
+        return sendJson(res, r.ok ? 200 : 400, r);
       }
 
-      if (p === "/api/api-profiles/delete") {
-        if (runtime.busy || runtime.commandBusy || runtime.switching) return sendJson(res, 409, { error: "busy" });
-        const id = typeof body.id === "string" ? body.id : "";
-        if (!id) return sendJson(res, 400, { error: "missing id" });
-        const before = listApiProfiles(project.cwd, home);
-        let result: Awaited<ReturnType<typeof deleteApiProfile>>;
-        try {
-          result = await deleteApiProfile(id, { cwd: project.cwd, home });
-        } catch (err) {
-          return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
-        }
-        if (!result.deleted) return sendJson(res, 404, { error: "profile not found" });
-        const wasActive = before.activeProfileId === id;
-        const applied = wasActive ? applyResolvedSettings() : {};
-        if (!wasActive) hub.broadcast("settings_changed", {});
-        return sendJson(res, 200, { ok: true, view: result.view, ...applied });
+      if (p === "/api/llm/profile/delete") {
+        if (!opts.deleteLlmProfile) return sendJson(res, 501, { error: "not supported" });
+        const r = await opts.deleteLlmProfile(typeof body.id === "string" ? body.id : "");
+        return sendJson(res, r.ok ? 200 : 404, r);
       }
 
-      if (p === "/api/api-profiles/select") {
-        if (runtime.busy || runtime.commandBusy || runtime.switching) return sendJson(res, 409, { error: "busy" });
-        const scope = body.scope === "project" ? "project" : body.scope === "default" ? "default" : null;
-        const id = typeof body.id === "string" && body.id ? body.id : null;
-        if (!scope) return sendJson(res, 400, { error: "scope must be project or default" });
-        let view: Awaited<ReturnType<typeof selectApiProfile>>;
-        try {
-          view = await selectApiProfile(project.cwd, scope, id, { home });
-        } catch (err) {
-          return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
-        }
-        const affectsProject = scope === "project" || !view.projectProfileId;
-        const applied = affectsProject ? applyResolvedSettings() : {};
-        if (!affectsProject) hub.broadcast("settings_changed", {});
-        const active = view.activeProfileId
-          ? (view.profiles.find((p) => p.id === view.activeProfileId) ?? null)
-          : null;
-        return sendJson(res, 200, { ok: true, view, profile: active, ...applied });
+      if (p === "/api/llm/profile/activate") {
+        if (!opts.activateLlmProfile) return sendJson(res, 501, { error: "not supported" });
+        const r = await opts.activateLlmProfile(typeof body.id === "string" ? body.id : "");
+        const status = r.ok ? 200 : r.error === "busy" ? 409 : r.error === "not found" ? 404 : 400;
+        return sendJson(res, status, r);
+      }
+
+      if (p === "/api/llm/profile/disable") {
+        if (!opts.disableLlmProfile) return sendJson(res, 501, { error: "not supported" });
+        const r = await opts.disableLlmProfile(typeof body.id === "string" ? body.id : "");
+        return sendJson(res, r.ok ? 200 : 404, r);
+      }
+
+      if (p === "/api/llm/models") {
+        if (!opts.listModelsForProfile) return sendJson(res, 501, { error: "not supported" });
+        const input = parseProfileInput(body, false);
+        if (!input) return sendJson(res, 400, { error: "provider is required" });
+        const r = await opts.listModelsForProfile(input);
+        return sendJson(res, r.models ? 200 : 502, r);
       }
 
       if (p === "/api/background/kill") {

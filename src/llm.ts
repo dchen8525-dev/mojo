@@ -1,46 +1,31 @@
-import { randomBytes } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import { promises as fs, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import type { MessageParam, Tool, ContentBlock } from "./types.js";
 import type { AssistantTurn, LLMBackend, Provider, RetryReason, StreamEvents } from "./llm/types.js";
 import { StreamInterrupted } from "./llm/types.js";
 import { AnthropicBackend } from "./llm/anthropic.js";
 import { OpenAiBackend } from "./llm/openai.js";
 import { lookupModel } from "./llm/models.js";
+import { fetchModelMeta, getModelMeta, setModelMeta, type ModelMeta } from "./modelMeta.js";
 
 export type { AssistantTurn, StreamEvents, Provider } from "./llm/types.js";
 export { knownModelNames, lookupModel } from "./llm/models.js";
-
-export interface ApiProfile {
-  id: string;
-  name: string;
-  provider: Provider;
-  model: string;
-  baseURL?: string;
-  apiKey: string;
-}
 
 export interface Config {
   provider?: Provider;
   model?: string;
   baseURL?: string;
   apiKey?: string;
+  /** Override the model's context window (tokens) instead of guessing it. */
+  contextWindow?: number;
   /** UI theme: "dark" | "light" | "auto" (see src/ui/theme.ts). */
   theme?: string;
-  /** Global registry of named API configurations. */
-  apiProfiles?: ApiProfile[];
-  /** Global default profile id, used when a project has no selection. */
-  defaultApiProfile?: string;
-  /** Project-scoped profile id. */
-  apiProfile?: string;
 }
 
 export interface LLMOptions extends Config {
   /** Project root used to locate .node-agent/config.json (default: process.cwd()). */
   cwd?: string;
-  /** Home directory override (tests / embedded use). */
-  home?: string;
 }
 
 function readConfigFile(p: string): Config {
@@ -73,245 +58,19 @@ export function loadConfigFiles(cwd: string = process.cwd(), home: string = os.h
   return { ...global, ...project };
 }
 
-function defaultModel(provider: Provider): string {
-  return provider === "openai" ? "gpt-4o" : "claude-sonnet-4-5";
-}
-
-function isValidProfile(value: unknown): value is ApiProfile {
-  const p = value as Partial<ApiProfile>;
-  return (
-    !!p &&
-    typeof p.id === "string" &&
-    typeof p.name === "string" &&
-    (p.provider === "anthropic" || p.provider === "openai") &&
-    typeof p.model === "string" &&
-    typeof p.apiKey === "string"
-  );
-}
-
-function profilesOf(config: Config): ApiProfile[] {
-  return Array.isArray(config.apiProfiles) ? config.apiProfiles.filter(isValidProfile) : [];
-}
-
-/** Read one config file. Missing -> null; corrupt -> throw (never overwrite silently). */
-function readConfigObject(file: string): (Config & Record<string, unknown>) | null {
-  let raw: string;
-  try {
-    raw = readFileSync(file, "utf8");
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw err;
-  }
-  try {
-    const parsed = JSON.parse(raw.replace(/^\uFEFF/, ""));
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
-    return parsed as Config & Record<string, unknown>;
-  } catch {
-    throw new Error(`${file} exists but is not valid JSON — fix it before saving API settings (refused to overwrite)`);
-  }
-}
-
-export interface PublicApiProfile {
-  id: string;
-  name: string;
-  provider: Provider;
-  model: string;
-  baseURL?: string;
-  hasKey: boolean;
-}
-
-export interface ApiProfilesView {
-  profiles: PublicApiProfile[];
-  defaultProfileId: string | null;
-  projectProfileId: string | null;
-  /** Effective profile (project selection, else global default), or null. */
-  activeProfileId: string | null;
-  activeProfileName: string | null;
-  /** A project selection that no longer exists in the registry. */
-  missingProfileId: string | null;
-  /** The global default points at a profile that no longer exists. */
-  missingDefaultProfileId: string | null;
-  /** Legacy top-level credentials exist but no profiles are registered. */
-  hasLegacyKey: boolean;
-  config: { global: string; project: string };
-}
-
-/** Masked profile list for the UI: never returns API keys. */
-export function listApiProfiles(cwd: string = process.cwd(), home: string = os.homedir()): ApiProfilesView {
-  const { global, project } = loadConfigLayers(cwd, home);
-  const profiles = profilesOf(global);
-  const projectProfileId = typeof project.apiProfile === "string" && project.apiProfile ? project.apiProfile : null;
-  const defaultProfileId =
-    typeof global.defaultApiProfile === "string" && global.defaultApiProfile ? global.defaultApiProfile : null;
-  const projectProfile = projectProfileId ? profiles.find((p) => p.id === projectProfileId) : undefined;
-  const defaultProfile = defaultProfileId ? profiles.find((p) => p.id === defaultProfileId) : undefined;
-  const active = projectProfile ?? defaultProfile;
-
-  return {
-    profiles: profiles.map((p) => ({
-      id: p.id,
-      name: p.name,
-      provider: p.provider,
-      model: p.model,
-      ...(p.baseURL ? { baseURL: p.baseURL } : {}),
-      hasKey: !!p.apiKey,
-    })),
-    defaultProfileId,
-    projectProfileId,
-    activeProfileId: active?.id ?? null,
-    activeProfileName: active?.name ?? null,
-    missingProfileId: projectProfileId && !projectProfile ? projectProfileId : null,
-    missingDefaultProfileId: defaultProfileId && !defaultProfile ? defaultProfileId : null,
-    hasLegacyKey: !!(global.apiKey || project.apiKey),
-    config: {
-      global: path.join(home, ".node-agent", "config.json"),
-      project: path.join(cwd, ".node-agent", "config.json"),
-    },
-  };
-}
-
-export interface ApiProfileInput {
-  /** Existing profile id; omit to create a new one. */
-  id?: string;
-  name: string;
-  provider: Provider;
-  model: string;
-  baseURL?: string;
-  /** Required when creating; blank on update keeps the stored key. */
-  apiKey?: string;
-}
-
-function newProfileId(): string {
-  return `p${randomBytes(4).toString("hex")}`;
-}
-
-function globalConfigFile(home: string): string {
-  return path.join(home, ".node-agent", "config.json");
-}
-
-async function writeConfigFile(file: string, config: Record<string, unknown>): Promise<void> {
-  await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  await fs.writeFile(file, `${JSON.stringify(config, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  // Existing files keep their old mode; config may hold API keys, so force private.
-  await fs.chmod(file, 0o600).catch(() => {});
-}
-
-/** Create or update a profile in the global registry. */
-export async function saveApiProfile(
-  input: ApiProfileInput,
-  opts: { home?: string; cwd?: string } = {},
-): Promise<{ profile: ApiProfile; created: boolean; view: ApiProfilesView }> {
-  const home = opts.home ?? os.homedir();
-  const file = globalConfigFile(home);
-  const existing = readConfigObject(file) ?? {};
-  const profiles = profilesOf(existing);
-  const index = input.id ? profiles.findIndex((p) => p.id === input.id) : -1;
-  const created = index === -1;
-  const apiKey = input.apiKey?.trim();
-  if (created && !apiKey) throw new Error("API key is required for a new profile");
-
-  const profile: ApiProfile = {
-    id: created ? newProfileId() : profiles[index].id,
-    name: input.name.trim().slice(0, 60) || `${input.provider}:${input.model.trim()}`,
-    provider: input.provider,
-    model: input.model.trim(),
-    ...(input.baseURL?.trim() ? { baseURL: input.baseURL.trim() } : {}),
-    apiKey: apiKey || (created ? "" : profiles[index].apiKey),
-  };
-
-  if (created) profiles.push(profile);
-  else profiles[index] = profile;
-
-  const next: Config & Record<string, unknown> = { ...existing, apiProfiles: profiles };
-  if (
-    typeof next.defaultApiProfile !== "string" ||
-    !profiles.some((p) => p.id === next.defaultApiProfile)
-  ) {
-    next.defaultApiProfile = profile.id;
-  }
-  await writeConfigFile(file, next);
-
-  return { profile, created, view: listApiProfiles(opts.cwd ?? process.cwd(), home) };
-}
-
-/** Remove a profile. Project selections pointing at it fall back at resolve time. */
-export async function deleteApiProfile(
-  id: string,
-  opts: { home?: string; cwd?: string } = {},
-): Promise<{ deleted: boolean; view: ApiProfilesView }> {
-  const home = opts.home ?? os.homedir();
-  const file = globalConfigFile(home);
-  const existing = readConfigObject(file);
-  const view = () => listApiProfiles(opts.cwd ?? process.cwd(), home);
-  if (!existing) return { deleted: false, view: view() };
-
-  const profiles = profilesOf(existing);
-  const nextProfiles = profiles.filter((p) => p.id !== id);
-  if (nextProfiles.length === profiles.length) return { deleted: false, view: view() };
-
-  const next: Config & Record<string, unknown> = { ...existing, apiProfiles: nextProfiles };
-  if (next.defaultApiProfile === id) {
-    if (nextProfiles.length) next.defaultApiProfile = nextProfiles[0].id;
-    else delete next.defaultApiProfile;
-  }
-  await writeConfigFile(file, next);
-  return { deleted: true, view: view() };
-}
-
-/** Point a project (or the global default) at a profile; null clears the choice. */
-export async function selectApiProfile(
-  cwd: string,
-  scope: "project" | "default",
-  id: string | null,
-  opts: { home?: string } = {},
-): Promise<ApiProfilesView> {
-  const home = opts.home ?? os.homedir();
-  const file = scope === "project" ? path.join(cwd, ".node-agent", "config.json") : globalConfigFile(home);
-  if (id) {
-    const profiles = profilesOf(loadConfigLayers(cwd, home).global);
-    if (!profiles.some((p) => p.id === id)) throw new Error("unknown API profile");
-  }
-
-  const existing = readConfigObject(file) ?? {};
-  const next: Config & Record<string, unknown> = { ...existing };
-  const key = scope === "project" ? "apiProfile" : "defaultApiProfile";
-  if (id) next[key] = id;
-  else delete next[key];
-  await writeConfigFile(file, next);
-  return listApiProfiles(cwd, home);
-}
-
 /**
  * Resolve provider/model/credentials from (in priority order):
- * explicit opts > runtime override (set via /model) > selected API profile >
- * environment > <cwd>/.node-agent/config.json > ~/.node-agent/config.json.
- *
- * A selected profile is a coherent bundle: when its provider matches the
- * effective provider, its model/baseURL/key are used and ambient env/config
- * credentials do not override them. A /model switch still overrides the
- * provider/model, and then falls back to the legacy resolution path.
+ * explicit opts > runtime override (set via /model) > environment >
+ * <cwd>/.node-agent/config.json > ~/.node-agent/config.json > defaults.
  */
 export function resolveSettings(opts: LLMOptions = {}) {
-  const { global, project } = loadConfigLayers(opts.cwd, opts.home);
-  const file = { ...global, ...project };
+  const file = loadConfigFiles(opts.cwd);
   const env = process.env;
   const ov = activeOverride ?? {};
 
-  const profiles = profilesOf(global);
-  const projectId =
-    typeof project.apiProfile === "string" && project.apiProfile ? project.apiProfile : undefined;
-  const defaultId =
-    typeof global.defaultApiProfile === "string" && global.defaultApiProfile
-      ? global.defaultApiProfile
-      : undefined;
-  const selected =
-    (projectId ? profiles.find((p) => p.id === projectId) : undefined) ??
-    (defaultId ? profiles.find((p) => p.id === defaultId) : undefined);
-
-  let provider: Provider =
+  let provider =
     opts.provider ??
     ov.provider ??
-    selected?.provider ??
     (env.AGENT_PROVIDER as Provider | undefined) ??
     file.provider ??
     // infer: OPENAI_* present and no ANTHROPIC_* -> openai, else anthropic
@@ -319,31 +78,14 @@ export function resolveSettings(opts: LLMOptions = {}) {
 
   if (provider !== "anthropic" && provider !== "openai") provider = "anthropic";
 
-  const useProfile = !!selected && selected.provider === provider;
-  let model: string;
-  let baseURL: string | undefined;
-  let apiKey: string | undefined;
+  const model = opts.model ?? ov.model ?? env.AGENT_MODEL ?? file.model ?? (provider === "openai" ? "gpt-4o" : "claude-sonnet-4-5");
+  const baseURL =
+    opts.baseURL ?? ov.baseURL ?? env.AGENT_BASE_URL ?? (provider === "openai" ? env.OPENAI_BASE_URL : env.ANTHROPIC_BASE_URL) ?? file.baseURL;
+  const apiKey =
+    opts.apiKey ?? ov.apiKey ?? (provider === "openai" ? env.OPENAI_API_KEY : env.ANTHROPIC_API_KEY) ?? file.apiKey;
+  const contextWindow = opts.contextWindow ?? ov.contextWindow ?? file.contextWindow;
 
-  if (useProfile) {
-    model = opts.model ?? ov.model ?? (selected.model || env.AGENT_MODEL || file.model || defaultModel(provider));
-    baseURL = opts.baseURL ?? ov.baseURL ?? selected.baseURL;
-    apiKey = opts.apiKey ?? ov.apiKey ?? selected.apiKey;
-  } else {
-    model = opts.model ?? ov.model ?? env.AGENT_MODEL ?? file.model ?? defaultModel(provider);
-    baseURL =
-      opts.baseURL ??
-      ov.baseURL ??
-      env.AGENT_BASE_URL ??
-      (provider === "openai" ? env.OPENAI_BASE_URL : env.ANTHROPIC_BASE_URL) ??
-      file.baseURL;
-    apiKey =
-      opts.apiKey ??
-      ov.apiKey ??
-      (provider === "openai" ? env.OPENAI_API_KEY : env.ANTHROPIC_API_KEY) ??
-      file.apiKey;
-  }
-
-  return { provider, model, baseURL, apiKey, profile: useProfile ? selected : undefined };
+  return { provider, model, baseURL, apiKey, contextWindow };
 }
 
 /**
@@ -385,17 +127,28 @@ export function parseModelSpec(spec: string, currentProvider: Provider): Config 
 export class LLM {
   private backend: LLMBackend;
   private cwd: string;
-  private home?: string;
-  provider: Provider;
-  model: string;
+  /** Credentials/baseURL for the *current* model, kept for metadata lookups. */
+  private baseURL?: string;
+  private apiKey?: string;
+  /** Explicit window from config — wins over endpoint metadata and the table. */
+  private ctxWindow?: number;
+  provider!: Provider;
+  model!: string;
 
   constructor(opts: LLMOptions = {}) {
     this.cwd = opts.cwd ?? process.cwd();
-    this.home = opts.home;
     const s = resolveSettings(opts);
+    this.adopt(s);
+    this.backend = this.build(s);
+  }
+
+  /** Point this instance at a resolved settings object. */
+  private adopt(s: { provider: Provider; model: string; baseURL?: string; apiKey?: string; contextWindow?: number }): void {
     this.provider = s.provider;
     this.model = s.model;
-    this.backend = this.build(s);
+    this.baseURL = s.baseURL;
+    this.apiKey = s.apiKey;
+    this.ctxWindow = s.contextWindow;
   }
 
   private build(s: { provider: Provider; model: string; baseURL?: string; apiKey?: string }): LLMBackend {
@@ -411,15 +164,14 @@ export class LLM {
    */
   switchModel(spec: string): { provider: Provider; model: string } {
     const parsed = parseModelSpec(spec, this.provider);
-    const s = resolveSettings({ ...parsed, cwd: this.cwd, home: this.home });
+    const s = resolveSettings({ ...parsed, cwd: this.cwd });
     if (!s.apiKey) {
       throw new Error(
         `No API key for provider "${s.provider}" - set ${s.provider === "openai" ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY"} before switching.`,
       );
     }
     this.backend = this.build(s);
-    this.provider = s.provider;
-    this.model = s.model;
+    this.adopt(s);
     // Only provider+model are pinned session-wide; credentials/baseURL always
     // resolve per-provider from env/config so switching back picks up the
     // right key for each provider.
@@ -427,9 +179,53 @@ export class LLM {
     return { provider: this.provider, model: this.model };
   }
 
-  /** Total input context window for the current model, in tokens. */
+  /**
+   * Rebind this instance to an explicit config (the GUI's LLM profile picker).
+   * Unlike `switchModel` this pins the *whole* config — baseURL and apiKey
+   * included — into the module-level override, so the rest of this process
+   * (subagents included) uses exactly that profile rather than whatever env or
+   * a project-level config.json would otherwise supply.
+   * Throws before changing anything if the config resolves to no API key.
+   */
+  applyConfig(cfg: Config): { provider: Provider; model: string } {
+    const s = resolveSettings({ ...cfg, cwd: this.cwd });
+    if (!s.apiKey) {
+      throw new Error(`No API key for provider "${s.provider}" - fill in an API key for this configuration.`);
+    }
+    this.backend = this.build(s);
+    this.adopt(s);
+    setModelOverride(cfg);
+    return { provider: this.provider, model: this.model };
+  }
+
+  /**
+   * Context window for the current model, in tokens:
+   *   explicit config (`contextWindow`) > endpoint /models metadata > local table.
+   */
   get contextWindow(): number {
-    return lookupModel(this.model).contextWindow;
+    if (this.ctxWindow) return this.ctxWindow;
+    const meta = getModelMeta(this.provider, this.baseURL, this.model);
+    return meta?.contextWindow ?? lookupModel(this.model).contextWindow;
+  }
+
+  /**
+   * Ask the endpoint's model list for a context window. Cheap to call: a
+   * per-(provider, endpoint, model) cache short-circuits repeat lookups.
+   * Never throws — the static table stays the fallback.
+   */
+  async refreshModelMeta(force = false): Promise<ModelMeta | null> {
+    if (!force) {
+      const hit = getModelMeta(this.provider, this.baseURL, this.model);
+      if (hit) return hit;
+    }
+    const meta = await fetchModelMeta({
+      provider: this.provider,
+      model: this.model,
+      baseURL: this.baseURL,
+      apiKey: this.apiKey,
+    });
+    if (meta) setModelMeta(this.provider, this.baseURL, this.model, meta);
+    return meta;
   }
 
   /** Model ids served by the current endpoint (may throw if unsupported). */

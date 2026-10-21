@@ -164,13 +164,16 @@ export const taskTool: Tool = {
         const results = [];
         for (const tu of turn.toolUses) {
           const tool = subTools.find((t) => t.name === tu.name);
+          const inputPreview = JSON.stringify(tu.input).slice(0, 160);
           if (!tool) {
+            const msg = `Unknown tool "${tu.name}" - you only have: ${subTools.map((t) => t.name).join(", ")}.`;
             results.push({
               type: "tool_result" as const,
               tool_use_id: tu.id,
-              content: `Unknown tool "${tu.name}" - you only have: ${subTools.map((t) => t.name).join(", ")}.`,
+              content: msg,
               is_error: true,
             });
+            ctx.onSubTool?.(tu.name, inputPreview, false, msg.slice(0, 200), iterations);
             continue;
           }
           try {
@@ -187,13 +190,16 @@ export const taskTool: Tool = {
                 : async () => true,
             });
             results.push({ type: "tool_result" as const, tool_use_id: tu.id, content: r.content, is_error: r.isError });
+            ctx.onSubTool?.(tu.name, inputPreview, !r.isError, r.content.slice(0, 200), iterations);
           } catch (err) {
+            const msg = `Tool crashed: ${describeError(err)}`;
             results.push({
               type: "tool_result" as const,
               tool_use_id: tu.id,
-              content: `Tool crashed: ${describeError(err)}`,
+              content: msg,
               is_error: true,
             });
+            ctx.onSubTool?.(tu.name, inputPreview, false, msg.slice(0, 200), iterations);
           }
         }
         messages.push({ role: "user", content: results });

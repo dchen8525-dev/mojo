@@ -4,7 +4,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { ContentBlock, ImageBlockParam, MessageParam, ToolResultBlockParam, ToolUseBlock } from "./types.js";
 import { validateToolInput } from "./types.js";
-import { LLM, type StreamEvents } from "./llm.js";
+import { LLM, type Config, type StreamEvents } from "./llm.js";
 import { lookupModel } from "./llm/models.js";
 import { getTool, tools, todoStore } from "./tools/index.js";
 import { exitPlanTool } from "./tools/exitPlan.js";
@@ -17,7 +17,7 @@ import { logUsage } from "./usage.js";
 import { appendMemoryNote, renderMemory } from "./memory.js";
 import { buildReviewPrompt, collectReview, REVIEW_SYSTEM } from "./review.js";
 import { truncate } from "./tools/utils.js";
-import { appendMessages, appendModel, forkSession, rewriteMessages, saveTodos } from "./session.js";
+import { appendMessages, appendModel, createSession, forkSession, rewriteMessages, saveTodos } from "./session.js";
 import type { TodoItem } from "./tools/todo.js";
 import {
   buildAckMessage,
@@ -38,8 +38,12 @@ export const COMPACT_RATIO = 0.75; // compact when estimate exceeds this share o
 const COMPACT_TARGET_RATIO = 0.5; // aim to land here so we don't re-compact next turn
 
 export interface AgentEvents extends StreamEvents {
-  onToolStart?: (id: string, name: string, inputPreview: string) => void;
-  onToolEnd?: (id: string, name: string, ok: boolean, preview: string) => void;
+  /** A new model round begins (one response + the tools it requests). 1-based. */
+  onRoundStart?: (round: number) => void;
+  onToolStart?: (id: string, name: string, inputPreview: string, input?: Record<string, unknown>) => void;
+  onToolEnd?: (id: string, name: string, ok: boolean, preview: string, result?: string) => void;
+  /** One tool call performed *inside* a tool (the subagent's chain). */
+  onSubTool?: (parentId: string, name: string, inputPreview: string, ok: boolean, preview: string, round?: number) => void;
   onUsage?: (input: number, output: number) => void;
   onCostWarning?: (message: string) => void;
   onCompacting?: () => void;
@@ -84,6 +88,10 @@ export class Agent {
   }
   switchModel(spec: string): { provider: string; model: string } {
     return this.llm.switchModel(spec);
+  }
+  /** Rebind to an explicit LLM config (provider/model/baseURL/apiKey). */
+  applyLlmConfig(cfg: Config): { provider: string; model: string } {
+    return this.llm.applyConfig(cfg);
   }
   listModels(signal?: AbortSignal): Promise<string[]> {
     return this.llm.listModels(signal);
@@ -227,6 +235,11 @@ Rules:
     return this.llm.contextWindow;
   }
 
+  /** Best-effort: learn the context window from the endpoint (cached per model). */
+  async refreshModelMeta(force = false): Promise<void> {
+    await this.llm.refreshModelMeta(force);
+  }
+
   /** Force a compaction now (the /compact command). Returns false if history is too small. */
   async compactNow(events?: AgentEvents, signal?: AbortSignal): Promise<boolean> {
     if (this.messages.length < 6) return false;
@@ -362,6 +375,10 @@ Rules:
    * user; they ride along in the first user message.
    */
   async chat(userText: string, signal?: AbortSignal, events?: AgentEvents, images?: ImageBlockParam[]): Promise<string> {
+    // The session file is created on demand. Opening the app (or "new task")
+    // must not litter the sidebar with empty sessions; a session exists once
+    // the user actually sends something.
+    await this.ensureSession();
     this.systemPromptCache = null; // fresh git status / memory for each user turn
     let prompt = userText;
     if (this.hooks) {
@@ -381,6 +398,7 @@ Rules:
 
     while (iterations < MAX_TOOL_ITERATIONS) {
       if (signal?.aborted) throw new Error("aborted");
+      events?.onRoundStart?.(iterations + 1);
       if (this.tokenEstimate() > this.llm.contextWindow * COMPACT_RATIO) await this.compact(events, signal);
 
       const sent = this.messages.length;
@@ -486,13 +504,13 @@ Rules:
     // exit_plan is injected only in plan mode and lives outside the global registry.
     const tool = getTool(tu.name) ?? (tu.name === exitPlanTool.name ? exitPlanTool : undefined);
     const preview = JSON.stringify(tu.input).slice(0, 160);
-    events?.onToolStart?.(tu.id, tu.name, preview);
+    events?.onToolStart?.(tu.id, tu.name, preview, tu.input as Record<string, unknown>);
     if (!tool) {
       return { type: "tool_result", tool_use_id: tu.id, content: `Unknown tool "${tu.name}".`, is_error: true };
     }
     const invalid = validateToolInput(tool.inputSchema, tu.input as Record<string, unknown>);
     if (invalid) {
-      events?.onToolEnd?.(tu.id, tu.name, false, invalid);
+      events?.onToolEnd?.(tu.id, tu.name, false, invalid, invalid);
       return { type: "tool_result", tool_use_id: tu.id, content: `Invalid input for "${tu.name}": ${invalid}`, is_error: true };
     }
     if (this.planMode && !tool.isReadOnly && tool.name !== "exit_plan") {
@@ -507,7 +525,7 @@ Rules:
       const hr = await this.hooks.run("PreToolUse", { cwd: this.cwd, session_id: this.sessionId, tool_input: tu.input as Record<string, unknown> }, tu.name);
       if (hr.reason) events?.onHook?.("PreToolUse", hr.reason);
       if (hr.blocked) {
-        events?.onToolEnd?.(tu.id, tu.name, false, `blocked by hook: ${hr.reason}`);
+        events?.onToolEnd?.(tu.id, tu.name, false, `blocked by hook: ${hr.reason}`, `blocked by hook: ${hr.reason}`);
         return { type: "tool_result", tool_use_id: tu.id, content: `Blocked by PreToolUse hook: ${hr.reason}`, is_error: true };
       }
     }
@@ -518,6 +536,7 @@ Rules:
         askPermission: (desc, risk, preview) => this.permissions.check(desc, risk, tool.isReadOnly, preview),
         checkpoint: (absPath, label) => this.checkpoints.capture(absPath, label).then(() => undefined),
         reportUsage: (usage) => this.costs.record(`${this.llm.provider}:${this.llm.model}`, usage),
+        onSubTool: (n, p, ok, r, round) => events?.onSubTool?.(tu.id, n, p, ok, r, round),
         planMode: this.planMode,
         approvePlan: () => {
           this.planMode = false;
@@ -527,7 +546,7 @@ Rules:
       if (tu.name === "todo_write" && !result.isError) {
         await saveTodos(this.sessionId, todoStore.items);
       }
-      events?.onToolEnd?.(tu.id, tu.name, !result.isError, result.content.slice(0, 200));
+      events?.onToolEnd?.(tu.id, tu.name, !result.isError, result.content.slice(0, 200), result.content);
       if (this.hooks) {
         const hr = await this.hooks.run("PostToolUse", {
           cwd: this.cwd,
@@ -541,7 +560,7 @@ Rules:
       return { type: "tool_result", tool_use_id: tu.id, content: result.content, is_error: result.isError };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      events?.onToolEnd?.(tu.id, tu.name, false, msg);
+      events?.onToolEnd?.(tu.id, tu.name, false, msg, msg);
       return { type: "tool_result", tool_use_id: tu.id, content: `Tool crashed: ${msg}`, is_error: true };
     }
   }
@@ -562,6 +581,14 @@ Rules:
   /** Roll back the most recent not-yet-undone file modification. */
   undoLastCheckpoint() {
     return this.checkpoints.undoLast();
+  }
+
+  /** Create the session file lazily, the first time this agent actually runs a turn. */
+  private async ensureSession(): Promise<void> {
+    if (this.sessionId) return;
+    const { id } = await createSession(this.cwd);
+    this.sessionId = id;
+    this.checkpoints = new CheckpointStore(id);
   }
 
   /**

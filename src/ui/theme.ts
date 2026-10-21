@@ -1,9 +1,9 @@
-import { promises as fs, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import React from "react";
 import type { Config } from "../llm.js";
 import { loadConfigLayers } from "../llm.js";
+import { mergeConfigJson, readConfigJson } from "../configFile.js";
 
 /**
  * Three themes: `dark`, `light`, and `auto` (follow the terminal background).
@@ -328,34 +328,14 @@ export async function saveTheme(
   // writing somewhere that has no effect.
   let shadowed = false;
   if (scope === "global") {
-    const projectCfg = readJsonSync(path.join(cwd, ".node-agent", "config.json"));
-    shadowed = typeof projectCfg === "object" && projectCfg !== null && Boolean(parseThemeName(projectCfg.theme));
+    const projectCfg = readConfigJson(path.join(cwd, ".node-agent", "config.json"));
+    if (typeof projectCfg === "object" && projectCfg !== null) {
+      shadowed = Boolean(parseThemeName(typeof projectCfg.theme === "string" ? projectCfg.theme : undefined));
+    }
   }
 
-  const existing = readJsonSync(file);
-  if (existing === "corrupt") {
-    throw new Error(`${file} exists but is not valid JSON — fix it before saving the theme (refused to overwrite)`);
-  }
-  const next = { ...(existing ?? {}), theme: name };
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.writeFile(file, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  await mergeConfigJson(file, { theme: name });
   return { file, shadowed };
-}
-
-/** Parsed config; `null` when the file is absent, `"corrupt"` when it exists but won't parse. */
-function readJsonSync(file: string): (Config & Record<string, unknown>) | null | "corrupt" {
-  let raw: string;
-  try {
-    raw = readFileSync(file, "utf8");
-  } catch {
-    return null; // no file yet
-  }
-  try {
-    // Strip a leading UTF-8 BOM so Windows-edited configs still parse.
-    return JSON.parse(raw.replace(/^\uFEFF/, "")) as Config & Record<string, unknown>;
-  } catch {
-    return "corrupt";
-  }
 }
 
 /* ---------------- print-mode (-p) helpers ---------------- */
