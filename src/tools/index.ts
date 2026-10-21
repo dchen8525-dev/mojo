@@ -10,6 +10,7 @@ import { getDiagnosticsTool } from "../lsp.js";
 import { gitStatusTool, gitCommitTool, gitPrTool, gitDiffTool } from "./git.js";
 import { webSearchTool, webFetchTool } from "./web.js";
 import { multiEditTool } from "./multiEdit.js";
+import { skillTool } from "./skill.js";
 
 export const tools: Tool[] = [
   readFileTool,
@@ -30,6 +31,7 @@ export const tools: Tool[] = [
   gitPrTool,
   webSearchTool,
   webFetchTool,
+  skillTool,
 ];
 
 const byName = new Map(tools.map((t) => [t.name, t]));

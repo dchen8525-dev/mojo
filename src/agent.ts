@@ -15,6 +15,7 @@ import { CheckpointStore } from "./checkpoint.js";
 import { CostTracker } from "./cost.js";
 import { logUsage } from "./usage.js";
 import { appendMemoryNote, renderMemory } from "./memory.js";
+import { listSkills, renderSkillsBlock } from "./skills.js";
 import { buildReviewPrompt, collectReview, REVIEW_SYSTEM } from "./review.js";
 import { truncate } from "./tools/utils.js";
 import { appendMessages, appendModel, createSession, forkSession, rewriteMessages, saveTodos } from "./session.js";
@@ -235,6 +236,7 @@ export class Agent {
       }
     }
     const memory = await renderMemory(this.cwd);
+    const skills = renderSkillsBlock(await listSkills(this.cwd));
     const hookContext = this.sessionStartContext
       ? `\n<hook_context event="SessionStart">\n${this.sessionStartContext}\n</hook_context>\n`
       : "";
@@ -253,7 +255,7 @@ Environment:
 - Platform: ${os.platform()} ${os.arch()}
 - Today: ${new Date().toISOString().slice(0, 10)}
 - Git status:\n${gitStatus}
-${projectInstructions}${memory}${hookContext}
+${projectInstructions}${memory}${skills}${hookContext}
 Rules:
 1. Use tools to do the work; never pretend to have run something. If a tool fails, read the error, adjust, and retry - do not give up after one failure.
 2. Before editing a file, read it. edit_file works best with EXACT text copied from read_file output (the "N\\t" prefixes are line numbers, not content); whitespace differences are tolerated as a fallback but indentation may shift, so verify with the diff it returns.

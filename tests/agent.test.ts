@@ -89,6 +89,17 @@ vi.mock("../src/usage.js", () => ({
   flushUsage: async () => {},
 }));
 
+// Deterministic skill discovery: one fake skill appears in every system prompt.
+vi.mock("../src/skills.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/skills.js")>();
+  return {
+    ...actual,
+    listSkills: async () => [
+      { name: "fake-skill", description: "does fake things", file: "x", source: "project" as const },
+    ],
+  };
+});
+
 const { Agent } = await import("../src/agent.js");
 const { registerTool, todoStore } = await import("../src/tools/index.js");
 const { HookManager } = await import("../src/hooks.js");
@@ -217,7 +228,6 @@ describe("Agent.chat token accounting", () => {
     // 1 user + 1 assistant message, fully covered by the anchor.
     expect(agent.tokenEstimate()).toBe(5200);
   });
-
   it("re-anchors after every turn", async () => {
     h.turns = [
       toolTurn([["t_parallel", { n: 1 }]], 4000, 50),
@@ -333,6 +343,16 @@ describe("Agent microcompact (prune-only pass at 0.70)", () => {
     await agent.chat("hello", undefined, { onCompacted: (b, a) => compacted.push([b, a]) });
     expect(compacted).toEqual([]);
     expect(agent.tokenEstimate()).toBeLessThan(70_000);
+  });
+});
+
+describe("Agent system prompt skills", () => {
+  it("lists available skills for progressive disclosure", async () => {
+    h.turns = [textTurn("ok")];
+    const agent = makeAgent();
+    await agent.chat("go");
+    expect(h.sentSystems[0]).toContain("<available_skills>");
+    expect(h.sentSystems[0]).toContain("- fake-skill: does fake things");
   });
 });
 
