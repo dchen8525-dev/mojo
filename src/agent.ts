@@ -22,7 +22,7 @@ import { FileStateStore } from "./fileState.js";
 import { CheckpointStore } from "./checkpoint.js";
 import { CostTracker } from "./cost.js";
 import { logUsage } from "./usage.js";
-import { appendMemoryNote, renderMemory } from "./memory.js";
+import { appendMemoryNote, recallMemory, renderMemory } from "./memory.js";
 import { listSkills, renderSkillsBlock } from "./skills.js";
 import { buildReviewPrompt, collectReview, REVIEW_SYSTEM } from "./review.js";
 import { truncate } from "./tools/utils.js";
@@ -494,6 +494,11 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
       if (hr.context) prompt += `\n\n${systemReminder(hr.context, { event: "UserPromptSubmit" })}`;
       if (hr.reason) events?.onHook?.("UserPromptSubmit", hr.reason);
     }
+    // Only entries trimmed from the stable system prompt are eligible, so the
+    // cached prefix stays identical while older but relevant facts still reach
+    // the model for this request.
+    const recalled = await recallMemory(this.cwd, userText);
+    if (recalled) prompt += `\n\n${systemReminder(recalled, { event: "RecalledMemory" })}`;
 
     const content: Array<{ type: "text"; text: string } | ImageBlockParam> = [];
     if (prompt) content.push({ type: "text", text: prompt });

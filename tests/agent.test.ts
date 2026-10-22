@@ -15,6 +15,7 @@ const h = vi.hoisted(() => ({
   sentMessages: [] as MessageParam[][],
   sentTools: [] as string[][],
   sentSystems: [] as string[],
+  recalled: "",
   savedTodos: [] as Array<{ id: string; todos: unknown }>,
   /** Test hook, invoked at the start of every fake send(). */
   onSend: null as null | (() => void),
@@ -81,6 +82,7 @@ vi.mock("../src/session.js", () => ({
 // Keep tests from reading/writing the real repo's memory.md.
 vi.mock("../src/memory.js", () => ({
   renderMemory: async () => "",
+  recallMemory: async () => h.recalled,
   appendMemoryNote: async () => null,
 }));
 
@@ -182,8 +184,21 @@ beforeEach(() => {
   h.sentMessages = [];
   h.sentTools = [];
   h.sentSystems = [];
+  h.recalled = "";
   h.onSend = null;
   toolEvents.length = 0;
+});
+
+describe("Agent.chat memory recall", () => {
+  it("appends recalled memory as a system reminder on the user message", async () => {
+    h.recalled = 'Older long-term memory entries relevant to this request:\n<memory_entry source=".node-agent/memory.md" heading="SQLite">\nWAL mode is required.\n</memory_entry>';
+    h.turns = [textTurn("ok")];
+    await makeAgent().chat("why did we choose WAL?");
+    const content = h.sentMessages[0][0].content as Array<{ type: string; text?: string }>;
+    expect(content[0].text).toContain("why did we choose WAL?");
+    expect(content[0].text).toContain('<system-reminder event="RecalledMemory">');
+    expect(content[0].text).toContain("WAL mode is required.");
+  });
 });
 
 describe("Agent.chat tool scheduling", () => {

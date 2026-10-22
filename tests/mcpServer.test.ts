@@ -53,6 +53,7 @@ vi.mock("../src/session.js", () => {
 
 vi.mock("../src/memory.js", () => ({
   renderMemory: async () => "",
+  recallMemory: async () => "",
   appendMemoryNote: async () => null,
 }));
 

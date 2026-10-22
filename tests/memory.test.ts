@@ -2,7 +2,15 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { appendMemoryNote, projectMemoryPath, renderMemory, userMemoryPath } from "../src/memory.js";
+import {
+  appendMemoryNote,
+  projectMemoryPath,
+  recallMemory,
+  renderMemory,
+  selectMemoryEntries,
+  userMemoryPath,
+  type RecallEntry,
+} from "../src/memory.js";
 
 let cwd: string;
 let home: string;
@@ -63,6 +71,115 @@ describe("renderMemory", () => {
     await fs.mkdir(path.join(cwd, ".node-agent"), { recursive: true });
     await fs.writeFile(projectMemoryPath(cwd), "   \n", "utf8");
     expect(await renderMemory(cwd, home)).toBe("");
+  });
+});
+
+async function writeBigProjectMemory(targetSection: string): Promise<void> {
+  await fs.mkdir(path.join(cwd, ".node-agent"), { recursive: true });
+  const filler = Array.from(
+    { length: 40 },
+    (_, i) =>
+      `## Session note (2026-09-${String((i % 28) + 1).padStart(2, "0")}-${i})\n` +
+      `Routine work item ${i}: ${"detail ".repeat(120)}\n`,
+  ).join("\n");
+  await fs.writeFile(projectMemoryPath(cwd), `${targetSection}\n${filler}`, "utf8");
+}
+
+describe("renderMemory budget", () => {
+  it("marks trimmed older entries only when the budget is exceeded", async () => {
+    await fs.mkdir(path.join(cwd, ".node-agent"), { recursive: true });
+    await fs.writeFile(projectMemoryPath(cwd), "small fact", "utf8");
+    const small = await renderMemory(cwd, home);
+    expect(small).not.toContain("Older entries were trimmed");
+
+    await writeBigProjectMemory("## SQLite migration\nWAL mode is required.");
+    const large = await renderMemory(cwd, home);
+    expect(large).toContain("Older entries were trimmed");
+    expect(large).toContain("…\n");
+    expect(large).not.toContain("WAL mode"); // the oldest entry was trimmed
+    expect(large).toContain("Routine work item 39");
+  });
+});
+
+describe("recallMemory", () => {
+  it("returns nothing when all memory already fits in the system prompt", async () => {
+    await fs.mkdir(path.join(cwd, ".node-agent"), { recursive: true });
+    await fs.writeFile(projectMemoryPath(cwd), "## Notes\nsqlite uses WAL", "utf8");
+    expect(await recallMemory(cwd, "sqlite WAL", home)).toBe("");
+  });
+
+  it("recalls a trimmed older entry that matches the request", async () => {
+    await writeBigProjectMemory("## SQLite migration\nWe chose WAL mode because readers must not block.");
+    const out = await recallMemory(cwd, "why does sqlite use WAL?", home);
+    expect(out).toContain('<memory_entry source=".node-agent/memory.md" heading="SQLite migration">');
+    expect(out).toContain("WAL mode");
+    expect(out).not.toContain("Routine work item");
+    expect(await recallMemory(cwd, "kubernetes ingress", home)).toBe("");
+  });
+
+  it("matches Chinese queries with bigrams", async () => {
+    await writeBigProjectMemory("## 登录超时\n登录接口在网关层的超时是 30 秒。");
+    const out = await recallMemory(cwd, "登录超时怎么处理", home);
+    expect(out).toContain("登录接口在网关层的超时是 30 秒");
+  });
+
+  it("keeps older entries recallable when the newest section alone exceeds the budget", async () => {
+    await fs.mkdir(path.join(cwd, ".node-agent"), { recursive: true });
+    await fs.writeFile(
+      projectMemoryPath(cwd),
+      `## Preferences\nAlways use pnpm.\n\n## Huge dump\n${"noise ".repeat(4000)}`,
+      "utf8",
+    );
+    const prompt = await renderMemory(cwd, home);
+    expect(prompt).toContain("noise");
+    expect(prompt).not.toContain("Always use pnpm");
+    expect(await recallMemory(cwd, "package manager pnpm?", home)).toContain("Always use pnpm.");
+  });
+
+  it("recalls from user memory as well as project memory", async () => {
+    await fs.mkdir(path.join(home, ".node-agent"), { recursive: true });
+    const filler = Array.from(
+      { length: 40 },
+      (_, i) => `## User note ${i}\nRoutine preference ${i}: ${"padding ".repeat(120)}\n`,
+    ).join("\n");
+    await fs.writeFile(userMemoryPath(home), `## Preferences\nAlways answer in Chinese.\n${filler}`, "utf8");
+    const out = await recallMemory(cwd, "what language did the user prefer? chinese", home);
+    expect(out).toContain("Always answer in Chinese");
+    expect(out).toContain('source="~/.node-agent/memory.md"');
+  });
+});
+
+describe("selectMemoryEntries", () => {
+  const entry = (heading: string, text: string, order: number): RecallEntry => ({
+    source: "project",
+    file: ".node-agent/memory.md",
+    heading,
+    text,
+    order,
+  });
+
+  it("weights heading matches above body matches", () => {
+    const picked = selectMemoryEntries(
+      [entry("Deploy notes", "fly.io", 1), entry("Other", "deploy deploy deploy", 2)],
+      "deploy",
+    );
+    expect(picked[0].heading).toBe("Deploy notes");
+  });
+
+  it("prefers newer entries when scores tie", () => {
+    const picked = selectMemoryEntries([entry("", "deploy", 1), entry("", "deploy", 2)], "deploy");
+    expect(picked.map((e) => e.order)).toEqual([2, 1]);
+  });
+
+  it("clips a single oversized entry to the character budget", () => {
+    const picked = selectMemoryEntries([entry("Big", `deploy ${"x".repeat(200)}`, 1)], "deploy", { maxChars: 40 });
+    expect(picked).toHaveLength(1);
+    expect(picked[0].text).toHaveLength(40);
+    expect(picked[0].text.endsWith("…")).toBe(true);
+  });
+
+  it("ignores queries without usable terms", () => {
+    expect(selectMemoryEntries([entry("", "anything", 1)], "a ?!")).toEqual([]);
   });
 });
 
