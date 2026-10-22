@@ -412,6 +412,60 @@ describe("runAgentCommand", () => {
     expect(forced).toBe(true);
   });
 
+  it("/rewind with no checkpoints reports emptiness", async () => {
+    const r = await runAgentCommand("/rewind", ctx());
+    expect(r.kind).toBe("ok");
+    expect(r.text).toContain("no checkpoints");
+  });
+
+  it("/rewind lists checkpoints and previews an id before applying", async () => {
+    const entry = {
+      id: 2,
+      file: "/tmp/repo/b.ts",
+      snapshot: "",
+      existed: true,
+      label: "write_file",
+      ts: "2026-10-22T01:00:00.000Z",
+      restored: false,
+    };
+    const listR = await runAgentCommand("/rewind", ctx({ agent: fakeAgent({ checkpointList: async () => [entry] as never }) }));
+    expect(listR.text).toContain("#2");
+    expect(listR.text).toContain("/rewind <id>");
+
+    const calls: Array<{ id: number; opts: unknown }> = [];
+    const rewind = async (id: number, opts: { force?: boolean; dryRun?: boolean }) => {
+      calls.push({ id, opts });
+      return { targetId: id, applied: [{ file: "/tmp/repo/b.ts", action: "restored content from before #1" }], conflicts: [], entryIds: [id], dryRun: opts.dryRun };
+    };
+    const preview = await runAgentCommand("/rewind 2", ctx({ agent: fakeAgent({ checkpointList: async () => [entry] as never, rewindToCheckpoint: rewind as never }) }));
+    expect(preview.kind).toBe("ok");
+    expect(preview.text).toContain("would roll back 1 file(s)");
+    expect(calls[0].opts).toMatchObject({ dryRun: true });
+
+    const applied = await runAgentCommand("/rewind latest -y", ctx({ agent: fakeAgent({ checkpointList: async () => [entry] as never, rewindToCheckpoint: rewind as never }) }));
+    expect(applied.text).toContain("rewound 1 file(s)");
+    expect(calls[1]).toMatchObject({ id: 2, opts: { dryRun: false } });
+  });
+
+  it("/rewind surfaces conflicts and forwards force", async () => {
+    const rewind = async (_id: number, opts: { force?: boolean }) =>
+      opts.force
+        ? { targetId: _id, applied: [{ file: "/tmp/repo/b.ts", action: "restored" }], conflicts: [], entryIds: [_id] }
+        : { targetId: _id, applied: [], conflicts: [{ file: "/tmp/repo/b.ts", reason: "modified after the agent's edit" }], entryIds: [_id] };
+    const agent = fakeAgent({
+      checkpointList: async () => [{ id: 1, file: "/tmp/repo/b.ts", ts: "2026-10-22T01:00:00.000Z", label: "edit_file", restored: false }] as never,
+      rewindToCheckpoint: rewind as never,
+    });
+    const refused = await runAgentCommand("/rewind 1 -y", ctx({ agent }));
+    expect(refused.kind).toBe("error");
+    expect(refused.text).toContain("rewind refused");
+    expect(refused.text).toContain("--force");
+
+    const forced = await runAgentCommand("/rewind 1 -y --force", ctx({ agent }));
+    expect(forced.kind).toBe("ok");
+    expect(forced.text).toContain("rewound 1 file(s)");
+  });
+
   it("/clear creates a new session", async () => {
     const agent = fakeAgent();
     const spy = vi.spyOn(agent, "resetSession");

@@ -47,3 +47,4 @@
 | [subagent-mailbox.md](subagent-mailbox.md) | 2026-10-22 | 子代理会话邮箱（send_message / message_parent 双向轮边界消息） |
 | [runtime-command-queue.md](runtime-command-queue.md) | 2026-10-22 | 统一运行时命令队列（忙碌输入排队为后续回合 + 插话开关） |
 | [media-budget.md](media-budget.md) | 2026-10-22 | 媒体预算：入站图片校验 + 驻留历史最旧优先裁剪 |
+| [workspace-rewind.md](workspace-rewind.md) | 2026-10-22 | 工作区回滚：检查点重放 + /rewind 预览/应用/强制 |

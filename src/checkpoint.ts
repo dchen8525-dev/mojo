@@ -35,6 +35,23 @@ export interface UndoResult {
   reason?: string;
 }
 
+export interface RewindFileConflict {
+  file: string;
+  reason: string;
+}
+
+export interface RewindOutcome {
+  targetId: number;
+  /** Files rolled back (or deleted) — empty when dryRun or conflicts refused. */
+  applied: Array<{ file: string; action: string }>;
+  /** Per-file reasons the rewind was refused; non-empty means nothing was applied. */
+  conflicts: RewindFileConflict[];
+  /** Checkpoint ids folded into this rewind (all active edits after the target). */
+  entryIds: number[];
+  /** True when this was a preview: nothing was applied or marked restored. */
+  dryRun?: boolean;
+}
+
 export const MAX_CHECKPOINTS = 50;
 
 export class CheckpointStore {
@@ -180,6 +197,64 @@ export class CheckpointStore {
     entry.restored = true;
     await this.save();
     return { file: entry.file, action: "deleted (file was created by the agent)" };
+  }
+
+  /**
+   * Roll the workspace back to the state just before checkpoint `targetId`:
+   * every still-active checkpoint after it is folded into one rewind, each
+   * file restored from its EARLIEST pre-image in the plan (deleting files the
+   * agent created). Conflicts are checked per file against the LATEST
+   * post-edit hash in the plan — any later user edit refuses the whole rewind
+   * unless `force`. `dryRun` reports the plan and conflicts without touching
+   * files or marking entries restored. Returns null for an unknown target id.
+   */
+  async rewindTo(targetId: number, opts: { force?: boolean; dryRun?: boolean } = {}): Promise<RewindOutcome | null> {
+    await this.load();
+    if (!this.entries.some((e) => e.id === targetId)) return null;
+    // The target entry itself is included: it holds the pre-image of the
+    // edit being reverted ("just before #N" undoes edit N and everything after).
+    const plan = this.entries.filter((e) => e.id >= targetId && !e.restored);
+    const outcome: RewindOutcome = { targetId, applied: [], conflicts: [], entryIds: plan.map((e) => e.id) };
+
+    // Conflict check: current content must match what the agent last left behind.
+    const latest = new Map<string, CheckpointEntry>();
+    for (const e of plan) if (!latest.has(e.file) || latest.get(e.file)!.id < e.id) latest.set(e.file, e);
+    if (!opts.force) {
+      for (const e of latest.values()) {
+        if (e.postHash === undefined && e.postExisted === undefined) continue; // legacy checkpoint, unverifiable
+        const current = await hashFileIfExists(e.file);
+        if (e.postExisted === false) {
+          if (current !== null) outcome.conflicts.push({ file: e.file, reason: "re-created or changed after the agent removed it" });
+        } else if (current !== e.postHash) {
+          outcome.conflicts.push({
+            file: e.file,
+            reason: current === null ? "deleted or moved after the agent's edit" : "modified after the agent's edit",
+          });
+        }
+      }
+    }
+    if (outcome.conflicts.length || opts.dryRun) {
+      if (opts.dryRun) outcome.dryRun = true;
+      return outcome;
+    }
+
+    // Restore: per file, the earliest entry's pre-image wins.
+    const earliest = new Map<string, CheckpointEntry>();
+    for (const e of plan) if (!earliest.has(e.file)) earliest.set(e.file, e);
+    for (const e of earliest.values()) {
+      if (e.existed) {
+        if (!e.snapshot) continue; // snapshot lost (pruned): nothing to restore from
+        await fs.mkdir(path.dirname(e.file), { recursive: true });
+        await fs.copyFile(e.snapshot, e.file);
+        outcome.applied.push({ file: e.file, action: `restored content from before #${e.id}` });
+      } else {
+        await fs.rm(e.file, { force: true });
+        outcome.applied.push({ file: e.file, action: `deleted (created after #${e.id})` });
+      }
+    }
+    for (const e of plan) e.restored = true;
+    await this.save();
+    return outcome;
   }
 }
 

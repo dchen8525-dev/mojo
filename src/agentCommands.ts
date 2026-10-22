@@ -553,6 +553,56 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
         return { kind: "error", text: `undo failed: ${err instanceof Error ? err.message : String(err)}` };
       }
     }
+    case "rewind": {
+      // /rewind — list checkpoints; /rewind <id|latest> [-y] [--force] — roll
+      // the workspace back to just before that checkpoint (all active edits
+      // after it are folded in; files the agent created are deleted).
+      const all = await agent.checkpointList();
+      if (!all.length) return { kind: "ok", text: "no checkpoints (the agent has not modified files in this session)" };
+      const rel = (f: string) => (path.isAbsolute(f) ? path.relative(cwd, f) || f : f);
+      const yes = rest.includes("-y") || rest.includes("--yes");
+      const force = rest.includes("--force");
+      const arg = rest.find((r) => !r.startsWith("-"));
+      if (!arg) {
+        const lines = all
+          .map((c) => `#${c.id} ${c.ts.slice(0, 19)} ${c.label} → ${rel(c.file)}${c.restored ? " (already undone)" : ""}`)
+          .join("\n");
+        return {
+          kind: "ok",
+          text: `${lines}\nrun /rewind <id> to preview rolling the workspace back to just before that point; add -y to apply (--force overrides conflicts).`,
+        };
+      }
+      const targetId = arg === "latest" ? Math.max(...all.map((c) => c.id)) : Number(arg);
+      if (!Number.isInteger(targetId) || targetId <= 0) {
+        return { kind: "error", text: "usage: /rewind [id | latest] [-y] [--force]" };
+      }
+      const out = await agent.rewindToCheckpoint(targetId, { dryRun: !yes, force });
+      if (!out) return { kind: "error", text: `no checkpoint #${targetId} in this session (run /rewind to list)` };
+      if (out.conflicts.length) {
+        return {
+          kind: "error",
+          text:
+            `rewind refused — later changes conflict:\n` +
+            out.conflicts.map((c) => `  ${rel(c.file)}: ${c.reason}`).join("\n") +
+            `\nReview the files, then run /rewind ${targetId} -y --force to discard them.`,
+        };
+      }
+      if (out.dryRun) {
+        if (!out.applied.length) return { kind: "ok", text: `nothing to rewind (the edits at or after #${targetId} are already undone)` };
+        return {
+          kind: "ok",
+          text:
+            `would roll back ${out.applied.length} file(s) to just before #${targetId}:\n` +
+            out.applied.map((a) => `  ${rel(a.file)}: ${a.action}`).join("\n") +
+            `\nrun /rewind ${targetId} -y to apply.`,
+        };
+      }
+      if (!out.applied.length) return { kind: "ok", text: `nothing to rewind (the edits at or after #${targetId} are already undone)` };
+      return {
+        kind: "ok",
+        text: `rewound ${out.applied.length} file(s) to just before #${targetId}:\n` + out.applied.map((a) => `  ${rel(a.file)}: ${a.action}`).join("\n"),
+      };
+    }
     case "fork": {
       // /fork [N] [title] — branch into a new session keeping the first N
       // messages (default: all). A leading integer is the count, the rest is an

@@ -149,3 +149,123 @@ describe("CheckpointStore", () => {
     expect(r).toBeNull();
   });
 });
+
+describe("CheckpointStore rewind", () => {
+  it("rewinds a file across several edits to the earliest pre-image", async () => {
+    const s = store();
+    const f = path.join(work, "rew1.ts");
+    await fs.writeFile(f, "v1\n", "utf8");
+    const e1 = (await s.capture(f, "edit_file"))!;
+    await fs.writeFile(f, "v2\n", "utf8");
+    await s.finalize(e1);
+    const e2 = (await s.capture(f, "edit_file"))!;
+    await fs.writeFile(f, "v3\n", "utf8");
+    await s.finalize(e2);
+
+    const out = await s.rewindTo(e1.id);
+    expect(out!.conflicts).toHaveLength(0);
+    expect(out!.applied).toHaveLength(1);
+    expect(out!.applied[0].action).toContain(`before #${e1.id}`);
+    expect(await fs.readFile(f, "utf8")).toBe("v1\n");
+    // Both folded entries are consumed; /undo has nothing left after them.
+    expect((await s.list()).every((e) => e.restored)).toBe(true);
+    expect(await s.undoLast()).toBeNull();
+  });
+
+  it("rewinds multiple files and deletes agent-created ones", async () => {
+    const s = store();
+    const a = path.join(work, "rew-a.ts");
+    const b = path.join(work, "rew-b.ts");
+    await fs.writeFile(a, "a1\n", "utf8");
+    const e1 = (await s.capture(a, "edit_file"))!;
+    await fs.writeFile(a, "a2\n", "utf8");
+    await s.capture(b, "write_file"); // b did not exist
+    await fs.writeFile(b, "b1\n", "utf8");
+
+    const out = await s.rewindTo(e1.id); // earliest checkpoint: folds both edits in
+    expect(out!.applied.map((r) => path.basename(r.file)).sort()).toEqual(["rew-a.ts", "rew-b.ts"]);
+    expect(await fs.readFile(a, "utf8")).toBe("a1\n");
+    await expect(fs.access(b)).rejects.toThrow();
+  });
+
+  it("conflicts when the user edited a file after the agent's last write", async () => {
+    const s = store();
+    const f = path.join(work, "rew-conflict.ts");
+    await fs.writeFile(f, "v1\n", "utf8");
+    const e1 = (await s.capture(f, "edit_file"))!;
+    await fs.writeFile(f, "v2\n", "utf8");
+    await s.finalize(e1);
+    await fs.writeFile(f, "user's later edit\n", "utf8");
+
+    const refused = await s.rewindTo(e1.id);
+    expect(refused!.conflicts).toHaveLength(1);
+    expect(refused!.conflicts[0].reason).toContain("modified after");
+    expect(refused!.applied).toHaveLength(0);
+    expect(await fs.readFile(f, "utf8")).toBe("user's later edit\n");
+
+    const forced = await s.rewindTo(e1.id, { force: true });
+    expect(forced!.conflicts).toHaveLength(0);
+    expect(await fs.readFile(f, "utf8")).toBe("v1\n");
+  });
+
+  it("skips entries already undone by /undo", async () => {
+    const s = store();
+    const f = path.join(work, "rew-skip.ts");
+    await fs.writeFile(f, "v1\n", "utf8");
+    const e1 = (await s.capture(f, "edit_file"))!;
+    await fs.writeFile(f, "v2\n", "utf8");
+    const e2 = (await s.capture(f, "edit_file"))!;
+    await fs.writeFile(f, "v3\n", "utf8");
+    await s.undoLast(); // restores v2, marks e2 restored
+    expect(await fs.readFile(f, "utf8")).toBe("v2\n");
+
+    const out = await s.rewindTo(e1.id);
+    expect(out!.entryIds).toEqual([e1.id]); // e2 excluded
+    expect(await fs.readFile(f, "utf8")).toBe("v1\n");
+  });
+
+  it("dryRun previews without touching files or entries", async () => {
+    const s = store();
+    const f = path.join(work, "rew-dry.ts");
+    await fs.writeFile(f, "v1\n", "utf8");
+    const e1 = (await s.capture(f, "edit_file"))!;
+    await fs.writeFile(f, "v2\n", "utf8");
+
+    const preview = await s.rewindTo(e1.id, { dryRun: true });
+    expect(preview!.dryRun).toBe(true);
+    expect(preview!.applied).toHaveLength(0);
+    expect(await fs.readFile(f, "utf8")).toBe("v2\n");
+    expect((await s.list())[0].restored).toBe(false);
+
+    const real = await s.rewindTo(e1.id);
+    expect(real!.applied).toHaveLength(1);
+    expect(await fs.readFile(f, "utf8")).toBe("v1\n");
+  });
+
+  it("returns null for an unknown id, and rewinding the newest checkpoint equals undo", async () => {
+    const s = store();
+    const f = path.join(work, "rew-null.ts");
+    await fs.writeFile(f, "v1\n", "utf8");
+    const e1 = (await s.capture(f, "edit_file"))!;
+    await fs.writeFile(f, "v2\n", "utf8");
+
+    expect(await s.rewindTo(999)).toBeNull();
+    const head = await s.rewindTo(e1.id);
+    expect(head!.applied).toHaveLength(1); // the target's own edit is reverted
+    expect(await fs.readFile(f, "utf8")).toBe("v1\n");
+    expect(await s.rewindTo(e1.id)!.then((o) => o!.applied)).toHaveLength(0); // nothing left
+  });
+
+  it("legacy entries without postHash rewind without a conflict check", async () => {
+    const s = store();
+    const f = path.join(work, "rew-legacy.ts");
+    await fs.writeFile(f, "v1\n", "utf8");
+    const e1 = (await s.capture(f, "edit_file"))!;
+    await fs.writeFile(f, "v2\n", "utf8");
+    await fs.writeFile(f, "user's edit\n", "utf8"); // never finalized
+
+    const out = await s.rewindTo(e1.id);
+    expect(out!.conflicts).toHaveLength(0);
+    expect(await fs.readFile(f, "utf8")).toBe("v1\n");
+  });
+});

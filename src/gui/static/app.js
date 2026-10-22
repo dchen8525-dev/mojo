@@ -1528,6 +1528,7 @@ const BUILTIN_CMDS = [
   ["/yolo", "切换 YOLO"],
   ["/review ", "代码审查"],
   ["/undo", "撤销文件修改"],
+  ["/rewind ", "工作区回滚到检查点 <id|latest>"],
   ["/sessions", "会话列表"],
   ["/search ", "跨会话全文检索 <词>"],
   ["/resume ", "恢复会话 <id>"],

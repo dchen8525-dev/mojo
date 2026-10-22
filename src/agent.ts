@@ -872,6 +872,10 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
   undoLastCheckpoint(force = false) {
     return this.checkpoints.undoLast({ force });
   }
+  /** Roll the whole workspace back to the state before checkpoint `id`. */
+  rewindToCheckpoint(id: number, opts: { force?: boolean; dryRun?: boolean } = {}) {
+    return this.checkpoints.rewindTo(id, opts);
+  }
 
   /** Create the session file lazily, the first time this agent actually runs a turn. */
   private async ensureSession(): Promise<void> {
