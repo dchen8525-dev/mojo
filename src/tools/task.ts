@@ -12,10 +12,88 @@ import { describeError, bool } from "./utils.js";
 import { boundedResult } from "../artifacts.js";
 import { subagentTasks } from "../taskRegistry.js";
 import { makeSaveMemoryTool, renderSubagentMemory, sanitizeSubagentName } from "../subagentMemory.js";
+import { systemReminder } from "../reminder.js";
 import { FileStateStore } from "../fileState.js";
 
 const SUB_MAX_ITERATIONS = 25;
 const MAX_LABEL_CHARS = 60;
+const MAX_MAIL_MESSAGE_CHARS = 20_000;
+
+/** Interim-message guidance appended to a detached subagent's system prompt. */
+const DETACHED_GUIDANCE =
+  "\nYou are running DETACHED from the coordinator (parent agent). Besides your final report, " +
+  "you can use message_parent to send an interim message mid-run (it arrives at the coordinator's " +
+  "next round boundary) - use it for early findings, blockers, or scope changes the coordinator " +
+  "should know about now rather than later. The coordinator may also send YOU messages via " +
+  "send_message; they appear as system-reminder notes between your rounds - address them before " +
+  "completing your task.\n";
+
+/**
+ * The coordinator→subagent message tool. Only background (detached) tasks can
+ * receive messages: a foreground subagent blocks the parent's turn, so the
+ * parent has no chance to call this until it is too late.
+ */
+export const sendMessageTool: Tool = {
+  name: "send_message",
+  description:
+    "Send a message to a RUNNING background subagent (one started with task + run_in_background). " +
+    "It is delivered at the subagent's next round boundary as a coordinator note - use it to correct " +
+    "course, add constraints, or answer questions while the subagent works. Cannot target foreground " +
+    "or already-finished tasks.",
+  isReadOnly: true,
+  parallelSafe: true,
+  inputSchema: {
+    type: "object",
+    properties: {
+      id: { type: "string", description: 'Task id from the task tool (e.g. "sub-1").' },
+      summary: { type: "string", description: "3-8 word gist shown in queues." },
+      message: { type: "string", description: "What the coordinator wants the subagent to know or change. Max 20000 chars." },
+    },
+    required: ["id", "message"],
+  },
+  async execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const id = typeof input.id === "string" ? input.id.trim() : "";
+    const message = typeof input.message === "string" ? input.message.trim().slice(0, MAX_MAIL_MESSAGE_CHARS) : "";
+    if (!message) return { content: "Error: message must not be empty", isError: true };
+    const result = subagentTasks.queueMessage(id, message, ctx.sessionId);
+    if (result === "unknown") {
+      const ids = subagentTasks.list(ctx.sessionId).map((t) => t.id).join(", ");
+      return { content: `Error: unknown task "${id}".${ids ? ` Known tasks: ${ids}.` : " No tasks have been started."}`, isError: true };
+    }
+    if (result === "finished") {
+      return { content: `Error: task ${id} already finished - spawn a new task instead.`, isError: true };
+    }
+    return { content: `Queued for ${id}; it arrives at the subagent's next round boundary.` };
+  },
+};
+
+/** The subagent→coordinator message tool, mounted only on detached runs. */
+function makeMessageParentTool(holder: { id?: string }): Tool {
+  return {
+    name: "message_parent",
+    description:
+      "Send an interim message to the coordinator (parent agent) while you run detached. It arrives " +
+      "at the coordinator's next round boundary. Use for early findings, blockers, or scope changes; " +
+      "you must still produce the final report at the end.",
+    isReadOnly: true,
+    parallelSafe: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        message: { type: "string", description: "What the coordinator should know now. Max 8000 chars." },
+      },
+      required: ["message"],
+    },
+    async execute(input: Record<string, unknown>): Promise<ToolResult> {
+      const message = typeof input.message === "string" ? input.message.trim().slice(0, 8_000) : "";
+      if (!message) return { content: "Error: message must not be empty", isError: true };
+      if (!holder.id || !subagentTasks.queueReply(holder.id, message)) {
+        return { content: "Error: no coordinator task is associated with this run.", isError: true };
+      }
+      return { content: "Sent to the coordinator; it arrives at its next round boundary." };
+    },
+  };
+}
 
 /** Labels end up in permission prompts and system-reminder bodies: one line only. */
 function cleanLabel(value: unknown): string {
@@ -189,12 +267,18 @@ export const taskTool: Tool = {
     }
 
     if (bool(input, "run_in_background")) {
-      const id = subagentTasks.start(label, kind, async () => {
+      // message_parent needs the task id, which only exists once start() has
+      // generated it; the holder is filled synchronously at the top of the
+      // run closure, before the subagent's first LLM round can complete.
+      const holder: { id?: string } = {};
+      const detachedTools = [...runTools, makeMessageParentTool(holder)];
+      const id = subagentTasks.start(label, kind, async (taskId) => {
+        holder.id = taskId;
         // Detached runs outlive the parent turn, so they do NOT inherit its
         // abort signal. Concurrency slots are still respected.
         const release = await subSlots.acquire();
         try {
-          return await runSubagent(input, ctx, label, kind, runTools, runSystem, worker, undefined);
+          return await runSubagent(input, ctx, label, kind, detachedTools, runSystem + DETACHED_GUIDANCE, worker, undefined, taskId);
         } finally {
           release();
         }
@@ -205,7 +289,8 @@ export const taskTool: Tool = {
           (memName ? ` with persistent memory as "${memName}"` : "") +
           `. It runs detached - ` +
           `continue with other work; its report is delivered automatically at the next ` +
-          `round boundary, or check on it with task_output {id: "${id}"}.`,
+          `round boundary, or check on it with task_output {id: "${id}"}. You can send it ` +
+          `messages mid-run with send_message {id: "${id}", message}.`,
       };
     }
 
@@ -235,6 +320,7 @@ async function runSubagent(
   subSystem: string,
   worker: boolean,
   signal: AbortSignal | undefined,
+  taskId?: string,
 ): Promise<string> {
   const prompt = String(input.prompt);
   const llm = new LLM({ cwd: ctx.cwd });
@@ -249,6 +335,20 @@ async function runSubagent(
   try {
     while (iterations < SUB_MAX_ITERATIONS) {
       if (signal?.aborted) throw new Error("aborted");
+      // Coordinator messages queued since the last round arrive here, before
+      // the next model call - the same round-boundary contract the parent
+      // uses for steering and background-task reports.
+      if (taskId) {
+        for (const note of subagentTasks.drainMessages(taskId)) {
+          messages.push({
+            role: "user",
+            content: systemReminder(
+              `The coordinator sent you a message while you were working. Address it before completing your task:\n\n${note}`,
+              { event: "CoordinatorMessage" },
+            ),
+          });
+        }
+      }
       iterations++;
 
       const turn = await llm.send(messages, subSystem, subTools, signal);

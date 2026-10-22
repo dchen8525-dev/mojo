@@ -330,6 +330,28 @@ describe("Agent.chat background task delivery", () => {
     const count = (s: string) => (s.match(/BackgroundTaskComplete/g) ?? []).length;
     expect(count(JSON.stringify(h.sentMessages.at(-1)))).toBe(1);
   });
+  it("delivers detached subagent replies as a SubagentMessage reminder", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    const id = subagentTasks.start("long dig", "research", async () => {
+      await gate;
+      return "done";
+    });
+    expect(subagentTasks.queueReply(id, "early finding")).toBe(true);
+    h.turns = [textTurn("a")];
+    const agent = makeAgent();
+    await agent.chat("go");
+    const first = JSON.stringify(h.sentMessages[0]);
+    expect(first).toContain("SubagentMessage");
+    expect(first).toContain("early finding");
+    // Delivered once: the follow-up turn has no duplicate.
+    h.turns.push(textTurn("b"));
+    await agent.chat("again");
+    const count = (s: string) => (s.match(/SubagentMessage/g) ?? []).length;
+    expect(count(JSON.stringify(h.sentMessages.at(-1)))).toBe(1);
+    release();
+    await subagentTasks.whenDone(id);
+  });
 });
 
 describe("Agent.chat token accounting", () => {

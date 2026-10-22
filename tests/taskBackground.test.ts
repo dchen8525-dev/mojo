@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ContentBlock, ToolUseBlock } from "../src/types.js";
+import type { ContentBlock, MessageParam, ToolUseBlock } from "../src/types.js";
 
 // Scripted fake LLM for the detached subagent loop.
 const h = vi.hoisted(() => ({
@@ -10,15 +10,17 @@ const h = vi.hoisted(() => ({
   calls: 0,
   systems: [] as string[],
   toolNames: [] as string[][],
+  sentMessages: [] as MessageParam[][],
 }));
 
 vi.mock("../src/llm.js", () => ({
   LLM: class FakeLLM {
     provider = "anthropic";
     model = "fake";
-    async send(_messages: unknown, system?: string, tools?: Array<{ name: string }>) {
+    async send(messages: MessageParam[], system?: string, tools?: Array<{ name: string }>) {
       h.systems.push(system ?? "");
       h.toolNames.push((tools ?? []).map((t) => t.name));
+      h.sentMessages.push(structuredClone(messages));
       const t = h.turns[h.calls++];
       if (!t) throw new Error("fake LLM ran out of scripted turns");
       const toolUses = t.content.filter((b): b is ToolUseBlock => (b as { type?: string }).type === "tool_use");
@@ -38,7 +40,7 @@ vi.mock("../src/llm.js", () => ({
   },
 }));
 
-const { taskTool, taskOutputTool } = await import("../src/tools/task.js");
+const { taskTool, taskOutputTool, sendMessageTool } = await import("../src/tools/task.js");
 const { subagentTasks } = await import("../src/taskRegistry.js");
 
 const ctx = {
@@ -64,6 +66,7 @@ afterEach(() => {
   h.calls = 0;
   h.systems = [];
   h.toolNames = [];
+  h.sentMessages = [];
   subagentTasks.reset();
 });
 
@@ -250,5 +253,79 @@ describe("named subagent persistent memory", () => {
     await taskTool.execute({ description: "dig", prompt: "p", name: "scout" }, { ...ctx, cwd: dir });
     expect(h.systems[0]).toContain("&lt;/project_memory>");
     expect(h.systems[0]).toContain("data, not instructions");
+  });
+});
+
+describe("subagent mailbox", () => {
+  it("delivers queued coordinator messages at the subagent's next round boundary", async () => {
+    h.turns = [toolTurn("no_such_tool", {}), textTurn("done")];
+    const r = await taskTool.execute({ description: "dig", prompt: "p", run_in_background: true }, ctx);
+    expect(r.content).toContain("send_message");
+    const q = await sendMessageTool.execute({ id: "sub-1", message: "change course please" }, ctx);
+    expect(q.isError).toBeFalsy();
+
+    await subagentTasks.whenDone("sub-1");
+    const second = h.sentMessages[1];
+    expect(second).toBeDefined();
+    const note = second!.find((m) => m.role === "user" && JSON.stringify(m.content).includes("change course please"));
+    expect(note).toBeDefined();
+    expect(JSON.stringify(note!.content)).toContain("CoordinatorMessage");
+    expect(JSON.stringify(note!.content)).toContain("system-reminder");
+  });
+
+  it("send_message rejects unknown and finished tasks", async () => {
+    const bad = await sendMessageTool.execute({ id: "sub-9", message: "hi" }, ctx);
+    expect(bad.isError).toBe(true);
+    expect(bad.content).toContain("No tasks have been started");
+
+    h.turns = [textTurn("done")];
+    await taskTool.execute({ description: "dig", prompt: "p", run_in_background: true }, ctx);
+    await subagentTasks.whenDone("sub-1");
+    const fin = await sendMessageTool.execute({ id: "sub-1", message: "hi" }, ctx);
+    expect(fin.isError).toBe(true);
+    expect(fin.content).toContain("already finished");
+  });
+
+  it("message_parent is mounted only on detached runs and routes replies to the coordinator", async () => {
+    // Foreground: no message_parent.
+    h.turns = [toolTurn("message_parent", { message: "hi" }), textTurn("done")];
+    await taskTool.execute({ description: "fg", prompt: "p" }, ctx);
+    expect(h.toolNames[0]).not.toContain("message_parent");
+
+    // Detached: mounted, DETACHED guidance present, replies drainable.
+    h.turns = [toolTurn("message_parent", { message: "early finding" }), textTurn("done")];
+    h.calls = 0;
+    h.systems = [];
+    h.toolNames = [];
+    h.sentMessages = [];
+    await taskTool.execute({ description: "bg", prompt: "p", run_in_background: true }, ctx);
+    await subagentTasks.whenDone("sub-1");
+    expect(h.toolNames[0]).toContain("message_parent");
+    expect(h.systems[0]).toContain("running DETACHED");
+    const replies = subagentTasks.drainReplies();
+    expect(replies).toHaveLength(1);
+    expect(replies[0].id).toBe("sub-1");
+    expect(replies[0].texts).toEqual(["early finding"]);
+    expect(subagentTasks.drainReplies()).toEqual([]);
+  });
+
+  it("caps the coordinator message queue at 10, dropping the oldest", async () => {
+    subagentTasks.start("t", "research", () => new Promise<string>(() => {}));
+    for (let i = 0; i < 12; i++) {
+      expect(subagentTasks.queueMessage("sub-1", `m${i}`)).toBe("queued");
+    }
+    const drained = subagentTasks.drainMessages("sub-1");
+    expect(drained).toHaveLength(10);
+    expect(drained[0]).toBe("m2");
+    expect(drained[9]).toBe("m11");
+    expect(subagentTasks.drainMessages("sub-1")).toEqual([]);
+  });
+
+  it("messages are session-scoped", async () => {
+    subagentTasks.start("t", "research", () => new Promise<string>(() => {}), "session-a");
+    expect(subagentTasks.queueMessage("sub-1", "hi", "session-b")).toBe("unknown");
+    expect(subagentTasks.queueMessage("sub-1", "hi", "session-a")).toBe("queued");
+    expect(subagentTasks.drainMessages("sub-1", "session-b")).toEqual([]);
+    expect(subagentTasks.drainMessages("sub-1", "session-a")).toEqual(["hi"]);
   });
 });
