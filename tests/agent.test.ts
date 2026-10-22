@@ -454,6 +454,69 @@ describe("Agent microcompact (prune-only pass at 0.70)", () => {
   });
 });
 
+describe("Agent auto-compact decision layer", () => {
+  it("compacts below the raw threshold when the output reserve pushes the projection over", async () => {
+    // 14 pairs ≈ 70.1k tokens: under the old 75k trigger but over
+    // 75k - 8192 (fake model's maxOutput) ≈ 66.8k, so the reserve fires it.
+    const agent = makeAgent(undefined, seedHistory(14));
+    h.turns = [textTurn("## Task\n- handoff"), textTurn("ok")];
+    await agent.chat("continue");
+    expect(String(h.sentMessages[0][0].content)).toContain("Summarize the agent transcript");
+    expect(String(agent.debugMessages()[0].content)).toContain("<context_compaction>");
+    expect(agent.tokenEstimate()).toBeLessThan(66_808);
+  });
+
+  it("does not compact while the projection stays under the reserve-adjusted budget", async () => {
+    // 13 pairs ≈ 65.1k: over nothing, under 66.8k.
+    const agent = makeAgent(undefined, seedHistory(13));
+    h.turns = [textTurn("ok")];
+    await agent.chat("hello");
+    expect(h.calls).toBe(1);
+    expect(String(agent.debugMessages()[0].content)).not.toContain("<context_compaction>");
+  });
+
+  it("suspends auto-compact after three consecutive attempts without progress", async () => {
+    // A giant single user message is one whole exchange that the truncateTo
+    // fallback can never drop (only-exchange rule) and microcompact cannot
+    // prune (it is not a tool_result), so every round's attempt leaves the
+    // projection over budget.
+    const huge = "x".repeat(320_000); // ≈ 80k tokens, window 100k
+    h.turns = [textTurn("r1"), textTurn("r2"), textTurn("r3"), textTurn("r4")];
+    const agent = makeAgent();
+    const hookEvents: Array<[string, string]> = [];
+    await agent.chat(huge, undefined, { onHook: (e, m) => hookEvents.push([e, m]) });
+    await agent.chat(huge, undefined, { onHook: (e, m) => hookEvents.push([e, m]) });
+    await agent.chat(huge, undefined, { onHook: (e, m) => hookEvents.push([e, m]) });
+    await agent.chat(huge, undefined, { onHook: (e, m) => hookEvents.push([e, m]) });
+
+    expect(h.calls).toBe(4);
+    const suspends = hookEvents.filter(([, m]) => m.includes("auto-compact suspended"));
+    expect(suspends).toHaveLength(2); // the breaker trip + the once-per-turn warning
+    expect(suspends[0][1]).toContain("3 attempts failed");
+    expect(suspends[1][1]).toContain("without progress");
+  });
+
+  it("a manual /compact resets the circuit breaker", async () => {
+    const huge = "x".repeat(320_000);
+    h.turns = [textTurn("r1"), textTurn("r2"), textTurn("r3"), textTurn("r4")];
+    const agent = makeAgent();
+    const tripEvents: Array<[string, string]> = [];
+    for (let i = 0; i < 4; i++) await agent.chat(huge, undefined, { onHook: (e, m) => tripEvents.push([e, m]) });
+    expect(tripEvents.some(([, m]) => m.includes("3 attempts failed"))).toBe(true);
+
+    // compactNow (as /compact runs) resets the breaker by design, so the next
+    // giant turn may attempt again - and only accumulates one more failure.
+    // Giant turns keep the projection over budget, so every attempt may invoke
+    // the summarizer; script generously and assert only the breaker behavior.
+    h.turns = Array.from({ length: 10 }, (_, i) => textTurn(`out ${i}`));
+    await agent.compactNow();
+    const again: Array<[string, string]> = [];
+    await agent.chat(huge, undefined, { onHook: (e, m) => again.push([e, m]) });
+    await agent.chat(huge, undefined, { onHook: (e, m) => again.push([e, m]) });
+    expect(again.every(([, m]) => !m.includes("auto-compact suspended"))).toBe(true);
+  });
+});
+
 describe("Agent system prompt assembly", () => {
   it("lists available skills for progressive disclosure", async () => {
     h.turns = [textTurn("ok")];

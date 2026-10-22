@@ -46,6 +46,15 @@ const MAX_CONTINUATIONS = 3; // auto-resume cap after output hits the token limi
 export const COMPACT_RATIO = 0.75; // compact when estimate exceeds this share of the model's window
 const COMPACT_TARGET_RATIO = 0.5; // aim to land here so we don't re-compact next turn
 /**
+ * Output reserve: auto-compact fires when footprint + this exceeds the window
+ * share, so the next response's output can never push the request over the
+ * provider's hard limit. Capped because a huge maxOutput (reasoning models)
+ * must not trigger compaction at half the window; AGENT_OUTPUT_RESERVE wins.
+ */
+const MAX_OUTPUT_RESERVE = 16_384;
+/** Stop trying to auto-compact after this many consecutive attempts without progress. */
+export const MAX_AUTOCOMPACT_FAILURES = 3;
+/**
  * Microcompact: a prune-only pass (no LLM call) that fires before the full
  * compaction threshold, collapsing old tool output with a narrower protection
  * window than compact()'s stage 1. Often this alone buys enough headroom to
@@ -97,6 +106,18 @@ export class Agent {
   get busy(): boolean {
     return this.turnRunning;
   }
+
+  /** Tokens held back for the next response's output in the auto-compact decision. */
+  private outputReserve(): number {
+    const env = Number(process.env.AGENT_OUTPUT_RESERVE);
+    if (Number.isFinite(env) && env > 0) return env;
+    return Math.min(lookupModel(this.llm.model).maxOutput, MAX_OUTPUT_RESERVE);
+  }
+
+  /** Consecutive auto-compact attempts that failed to get back under budget. */
+  private autoCompactFails = 0;
+  /** Set after MAX_AUTOCOMPACT_FAILURES; auto-compaction stops until /compact or a session switch. */
+  private autoCompactSuspended = false;
 
   /** Fired when a steering message is queued, so UIs can acknowledge it. */
   onSteerQueued?: (text: string) => void;
@@ -351,6 +372,10 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
   /** Force a compaction now (the /compact command). Returns false if history is too small. */
   async compactNow(events?: AgentEvents, signal?: AbortSignal): Promise<boolean> {
     if (this.messages.length < 6) return false;
+    // A manual compaction resets the auto-compact circuit breaker by design:
+    // the user explicitly asked to reclaim context.
+    this.autoCompactFails = 0;
+    this.autoCompactSuspended = false;
     await this.compact(events, signal, "manual");
     return true;
   }
@@ -507,6 +532,7 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
     this.messages.push({ role: "user", content });
     let iterations = 0;
     let continuations = 0;
+    let compactWarned = false;
     const segments: string[] = [];
     const repetitions = new RepetitionTracker();
 
@@ -530,7 +556,41 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
             events?.onCompacted?.(before, this.tokenEstimate());
           }
         }
-        if (this.tokenEstimate() > this.llm.contextWindow * COMPACT_RATIO) await this.compact(events, signal);
+        // Auto-compact decision: projected footprint (provider-anchored
+        // estimate plus the next response's output reserve) against the window
+        // share. A circuit breaker stops the attempt after
+        // MAX_AUTOCOMPACT_FAILURES consecutive failures so a session with a
+        // huge un-compactable tail cannot burn a summarizer call every round.
+        const overBudget = () => this.tokenEstimate() + this.outputReserve() > this.llm.contextWindow * COMPACT_RATIO;
+        if (overBudget()) {
+          if (this.autoCompactSuspended) {
+            if (!compactWarned) {
+              compactWarned = true;
+              events?.onHook?.(
+                "compact",
+                `auto-compact suspended after ${MAX_AUTOCOMPACT_FAILURES} attempts without progress; ` +
+                  "run /compact manually or start a new session",
+              );
+            }
+          } else {
+            await this.compact(events, signal);
+            if (overBudget()) {
+              this.autoCompactFails++;
+              if (this.autoCompactFails >= MAX_AUTOCOMPACT_FAILURES) {
+                this.autoCompactSuspended = true;
+                events?.onHook?.(
+                  "compact",
+                  `auto-compact suspended: ${MAX_AUTOCOMPACT_FAILURES} attempts failed to get under the ` +
+                    "context budget; run /compact manually or start a new session",
+                );
+              }
+            } else {
+              this.autoCompactFails = 0;
+            }
+          }
+        } else {
+          this.autoCompactFails = 0;
+        }
 
         const sent = this.messages.length;
         // Deferred tools (bulky MCP servers) stay out of the tool list until
@@ -788,6 +848,8 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
     this.persisted = this.messages.length;
     this.lastPersistedModel = modelSpec ?? "";
     this.tokens.invalidate();
+    this.autoCompactFails = 0;
+    this.autoCompactSuspended = false;
     await this.startSession(this.messages.length ? "resume" : "startup", undefined, todos);
   }
 

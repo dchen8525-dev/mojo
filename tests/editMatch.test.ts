@@ -40,6 +40,57 @@ describe("editMatch primitives", () => {
     expect(out).toBe("one\r\n  two fine\r\nthree\r\n");
   });
 
+  it("matches after normalizing curly quotes", () => {
+    const file = "greet(\u201Cworld\u201D);\n";
+    const { edits, note } = findFuzzyEdits(file, 'greet("world");', 'greet("hi");');
+    expect(edits).toHaveLength(1);
+    expect(note).toContain("quotes");
+    expect(applyEdits(file, edits)).toBe('greet("hi");\n');
+  });
+
+  it("matches after stripping read_file line-number prefixes", () => {
+    const file = "function f() {\n  return 1;\n}\n";
+    // Model copied the block straight out of read_file output.
+    const { edits, note } = findFuzzyEdits(file, "1\tfunction f() {\n2\t  return 1;\n3\t}", "function f() {\n  return 0;\n}");
+    expect(edits).toHaveLength(1);
+    expect(note).toContain("line-number");
+    expect(applyEdits(file, edits)).toBe("function f() {\n  return 0;\n}\n");
+  });
+
+  it("matches after unescaping literal escape sequences", () => {
+    // The file holds a real tab; the model sent a literal backslash-t.
+    const file = 'echo "tab:\there";\n';
+    const { edits, note } = findFuzzyEdits(file, String.raw`echo "tab:\there";`, String.raw`echo "tab:\tgone";`);
+    expect(edits).toHaveLength(1);
+    expect(note).toContain("escaping");
+    expect(applyEdits(file, edits)).toBe(String.raw`echo "tab:\tgone";` + "\n");
+  });
+
+  it("block-anchor similarity rescues a partially wrong block when unique", () => {
+    const file = "start\nalpha\nbeta\ngamma\ndelta\nMUTATED\nend\nother\n";
+    const old = "start\nalpha\nbeta\ngamma\ndelta\nepsilon\nend";
+    const { edits, note } = findFuzzyEdits(file, old, "start\nalpha\nbeta\ngamma\ndelta\nREPLACED\nend");
+    expect(edits).toHaveLength(1);
+    expect(note).toContain("block anchor");
+    expect(applyEdits(file, edits)).toBe("start\nalpha\nbeta\ngamma\ndelta\nREPLACED\nend\nother\n");
+  });
+
+  it("block-anchor match in several places is reported ambiguous, not applied", () => {
+    const dup =
+      "start\nalpha\nbeta\ngamma\ndelta\nWRONG_A\nend\nmid\nstart\nalpha\nbeta\ngamma\ndelta\nWRONG_B\nend\n";
+    const old = "start\nalpha\nbeta\ngamma\ndelta\nepsilon\nend";
+    const r = findFuzzyEdits(dup, old, "x");
+    expect(r.edits).toHaveLength(0);
+    expect(r.ambiguous).toBe(true);
+  });
+
+  it("anchor matcher refuses blocks with a drifting first or last line", () => {
+    const file = "start\nalpha\nbeta\nend\n";
+    const r = findFuzzyEdits(file, "STARTX\nalpha\ngamma\nENDX", "x");
+    expect(r.edits).toHaveLength(0);
+    expect(r.ambiguous).toBeUndefined();
+  });
+
   it("nearestMiss reports the best partial region", () => {
     const file = "a\nb\nc\nd\n";
     const miss = nearestMiss(file, "c\nddx");
@@ -137,6 +188,20 @@ describe("edit_file tool behaviour", () => {
     expect(r.isError).toBe(true);
     expect(r.content).toContain("matches 3 places");
     expect(r.content).toContain("lines 1, 3, 5");
+  });
+
+  it("an ambiguous similarity match fails with an explicit ambiguity hint", async () => {
+    await fs.writeFile(
+      path.join(dir, "amb.txt"),
+      "start\nalpha\nbeta\ngamma\ndelta\nWRONG_A\nend\nmid\nstart\nalpha\nbeta\ngamma\ndelta\nWRONG_B\nend\n",
+      "utf8",
+    );
+    const r = await editFileTool.execute(
+      { path: "amb.txt", old_string: "start\nalpha\nbeta\ngamma\ndelta\nepsilon\nend", new_string: "x" },
+      ctx,
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("similarity match lands in several places");
   });
 
   it("replace_all edits every occurrence", async () => {

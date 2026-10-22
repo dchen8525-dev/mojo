@@ -3,14 +3,10 @@
  *
  * The model routinely gets `old_string` slightly wrong - it copies the wrong
  * indentation, drops trailing spaces, or a line-number prefix leaks in. A hard
- * failure there wastes a whole round trip, so we escalate:
- *
- *   1. exact byte match
- *   2. line-window match ignoring leading/trailing whitespace differences
- *      (the replacement is re-indented to match the file)
- *
- * When even that fails we return the closest region we could find, so the next
- * attempt has the real text in front of it.
+ * failure there wastes a whole round trip, so we escalate through strategies
+ * of increasing forgiveness (see `findFuzzyEdits`). When even that fails we
+ * return the closest region we could find, so the next attempt has the real
+ * text in front of it.
  */
 
 export interface Edit {
@@ -26,6 +22,8 @@ export interface FuzzyResult {
   edits: Edit[];
   /** Human-readable note about how forgiving the match had to be. */
   note: string;
+  /** A similarity-based match landed in more than one place. */
+  ambiguous?: boolean;
 }
 
 const TAB_WIDTH = 4;
@@ -46,6 +44,50 @@ function indentWidth(line: string): number {
 function normalizeLine(line: string): string {
   return line.replace(/^\uFEFF/, "").replace(/\s+/g, " ").trim();
 }
+
+/* Curly quotes / NBSP that models copy out of prose or PDFs. */
+const QUOTE_MAP: Array<[RegExp, string]> = [
+  [/[\u2018\u2019\u201A\u201B\u2032\uFF07]/g, "'"],
+  [/[\u201C\u201D\u201E\u201F\u2033\uFF02]/g, '"'],
+  [/[\u00A0\u2007\u202F]/g, " "],
+];
+
+function unquote(line: string): string {
+  let out = line;
+  for (const [re, to] of QUOTE_MAP) out = out.replace(re, to);
+  return out;
+}
+
+/** "12\tfoo" / "12: foo" / "12| foo" - the model copied read_file's line numbers. */
+function stripLineNumber(line: string): string {
+  return line.replace(/^\s*\d+\s*[\t:|]\s?/, "");
+}
+
+/** Literal "\t" / "\u00e9" / "\"" sequences instead of the real characters. */
+function unescapeSeq(line: string): string {
+  return line.replace(
+    /\\(u\{[0-9a-fA-F]{1,6}\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|[tnr"'`\\])/g,
+    (m, g1: string) => {
+      if (g1[0] === "u" || g1[0] === "x") {
+        const code = parseInt(g1.replace(/^[ux]\{?|\}/g, ""), 16);
+        return Number.isFinite(code) ? String.fromCodePoint(code) : m;
+      }
+      const simple: Record<string, string> = { t: "\t", n: "\n", r: "\r", '"': '"', "'": "'", "`": "`", "\\": "\\" };
+      return simple[g1] ?? m;
+    },
+  );
+}
+
+/**
+ * Escalating per-line normalizations. Each is tried only when every earlier
+ * strategy found nothing, so the loosest transform that still matches wins.
+ */
+const MATCH_STRATEGIES: Array<{ note: string; norm: (line: string) => string }> = [
+  { note: "matched ignoring whitespace", norm: normalizeLine },
+  { note: "matched after normalizing quotes", norm: (l) => normalizeLine(unquote(l)) },
+  { note: "matched after stripping line-number prefixes", norm: (l) => normalizeLine(stripLineNumber(l)) },
+  { note: "matched after unescaping escape sequences", norm: (l) => normalizeLine(unescapeSeq(unquote(l))) },
+];
 
 /** Line starts (character offsets) for a text, index 0 = offset of first line. */
 function lineStarts(text: string): number[] {
@@ -97,55 +139,100 @@ function reindent(text: string, delta: number): string {
 }
 
 /**
- * Find whole-line windows whose whitespace-normalized content equals
- * `oldString`'s, and build edits that splice the file's real indentation back in.
+ * Find whole-line windows whose normalized content equals `oldString`'s, and
+ * build edits that splice the file's real indentation back in. Tries the
+ * escalation chain in MATCH_STRATEGIES order; the loosest transform that still
+ * matches wins.
  */
 export function findFuzzyEdits(text: string, oldString: string, newString: string): FuzzyResult {
-  const oldLines = oldString.replace(/\r\n/g, "\n").split("\n");
+  const oldRaw = oldString.replace(/\r\n/g, "\n").split("\n");
   const fileLines = text.split("\n");
   const starts = lineStarts(text);
-  const n = oldLines.length;
-  const oldNorm = oldLines.map(normalizeLine);
-  const edits: Edit[] = [];
-  let reindented = false;
+  const n = oldRaw.length;
 
-  for (let i = 0; i + n <= fileLines.length; i++) {
-    let ok = true;
-    for (let j = 0; j < n; j++) {
-      if (normalizeLine(fileLines[i + j]) !== oldNorm[j]) {
-        ok = false;
-        break;
+  for (const { note, norm } of MATCH_STRATEGIES) {
+    const oldNorm = oldRaw.map(norm);
+    const edits: Edit[] = [];
+    let reindented = false;
+
+    for (let i = 0; i + n <= fileLines.length; i++) {
+      let ok = true;
+      for (let j = 0; j < n; j++) {
+        if (norm(fileLines[i + j]) !== oldNorm[j]) {
+          ok = false;
+          break;
+        }
       }
+      if (!ok) continue;
+      const start = starts[i];
+      const lastLine = i + n - 1;
+      // Replace up to (but not including) the line terminator, so a trailing \r
+      // in CRLF files survives.
+      const nl = text.indexOf("\n", starts[lastLine]);
+      let lineEnd = nl < 0 ? text.length : nl;
+      if (text[lineEnd - 1] === "\r") lineEnd--;
+      const delta = indentWidth(fileLines[i]) - indentWidth(oldRaw[0]);
+      if (delta !== 0) reindented = true;
+      let replacement = reindent(newString.replace(/\r\n/g, "\n"), delta);
+      if (text.includes("\r\n")) replacement = replacement.replace(/\n/g, "\r\n");
+      edits.push({ start, end: lineEnd, text: replacement });
+      if (edits.length > 200) break;
     }
-    if (!ok) continue;
-    const start = starts[i];
-    const lastLine = i + n - 1;
-    // Replace up to (but not including) the line terminator, so a trailing \r
-    // in CRLF files survives.
-    const nl = text.indexOf("\n", starts[lastLine]);
-    let lineEnd = nl < 0 ? text.length : nl;
-    if (text[lineEnd - 1] === "\r") lineEnd--;
-    const delta = indentWidth(fileLines[i]) - indentWidth(oldLines[0]);
-    if (delta !== 0) reindented = true;
-    let replacement = reindent(newString.replace(/\r\n/g, "\n"), delta);
-    if (text.includes("\r\n")) replacement = replacement.replace(/\n/g, "\r\n");
-    edits.push({ start, end: lineEnd, text: replacement });
-    if (edits.length > 200) break;
+
+    if (edits.length) {
+      return { edits, note: reindented ? `${note}; replacement re-indented to the file` : note };
+    }
   }
 
-  let note = "";
-  if (edits.length) {
-    note = reindented
-      ? "matched ignoring whitespace; replacement re-indented to the file"
-      : "matched ignoring whitespace";
+  // Last resort: block-anchor similarity (>=80% of lines match, first and last
+  // must match exactly after normalization). Never re-indented guesses here:
+  // multiple candidates mean we cannot know which one the model meant.
+  const anchor = findAnchorEdits(text, oldString, newString);
+  if (anchor.edits.length === 1) return anchor;
+  if (anchor.edits.length > 1) {
+    return { edits: [], note: "", ambiguous: true };
   }
-  return { edits, note };
+  return { edits: [], note: "" };
 }
 
+/** Middle-line similarity for the anchor matcher: equality or containment. */
 function lineSimilarity(a: string, b: string): number {
   if (a === b) return 1;
   if (a && b && (a.includes(b) || b.includes(a))) return 0.8;
   return 0;
+}
+
+const ANCHOR_SIMILARITY = 0.8;
+
+function findAnchorEdits(text: string, oldString: string, newString: string): FuzzyResult {
+  const oldRaw = oldString.replace(/\r\n/g, "\n").split("\n");
+  const fileLines = text.split("\n");
+  const starts = lineStarts(text);
+  const n = oldRaw.length;
+  if (n < 3) return { edits: [], note: "" };
+  const oldNorm = oldRaw.map(normalizeLine);
+  const fileNorm = fileLines.map(normalizeLine);
+  const edits: Edit[] = [];
+
+  for (let i = 0; i + n <= fileLines.length; i++) {
+    if (fileNorm[i] !== oldNorm[0] || fileNorm[i + n - 1] !== oldNorm[n - 1]) continue;
+    let score = 0;
+    for (let j = 1; j < n - 1; j++) score += lineSimilarity(fileNorm[i + j], oldNorm[j]);
+    if (score / (n - 2) < ANCHOR_SIMILARITY) continue;
+    const start = starts[i];
+    const nl = text.indexOf("\n", starts[i + n - 1]);
+    let lineEnd = nl < 0 ? text.length : nl;
+    if (text[lineEnd - 1] === "\r") lineEnd--;
+    let replacement = reindent(newString.replace(/\r\n/g, "\n"), indentWidth(fileLines[i]) - indentWidth(oldRaw[0]));
+    if (text.includes("\r\n")) replacement = replacement.replace(/\n/g, "\r\n");
+    edits.push({ start, end: lineEnd, text: replacement });
+    if (edits.length > 1) break; // ambiguous: no point collecting more
+  }
+  if (!edits.length) return { edits: [], note: "" };
+  return {
+    edits,
+    note: `matched by block anchor (${Math.round(ANCHOR_SIMILARITY * 100)}% line similarity); check the diff carefully`,
+  };
 }
 
 /** Best partial line-window match, used to tell the model what the file really says. */

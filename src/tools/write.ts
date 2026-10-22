@@ -88,7 +88,8 @@ export const editFileTool: Tool = {
     "Replace string(s) in a file. old_string should match the file exactly - copy it from " +
     "read_file output (the \"N\\t\" prefixes are line numbers, not content). As a fallback the " +
     "match ignores per-line leading/trailing whitespace and re-indents new_string to the file, " +
-    "but do not rely on that: prefer exact text. If old_string appears more than once the call " +
+    "with looser fallbacks (quote / line-number-prefix / escape normalization, then block-anchor " +
+    "similarity), but do not rely on that: prefer exact text. If old_string appears more than once the call " +
     "fails unless replace_all is set; add surrounding context to disambiguate. The result shows " +
     "a diff of what changed plus fresh diagnostics.",
   isReadOnly: false,
@@ -122,20 +123,26 @@ export const editFileTool: Tool = {
       }));
       let note = "";
 
-      // Strategy 2: whitespace-insensitive line-window match (re-indents the
-      // replacement to the file). Only when the exact match found nothing.
+      // Strategies 2+: escalating normalizations (whitespace, quotes,
+      // line-number prefixes, escapes, block-anchor similarity). Only when the
+      // exact match found nothing.
+      let ambiguous = false;
       if (edits.length === 0) {
         const fuzzy = findFuzzyEdits(original, oldString, newString);
         edits = fuzzy.edits;
         note = fuzzy.note;
+        ambiguous = fuzzy.ambiguous === true;
       }
 
       if (edits.length === 0) {
         const near = nearestMiss(original, oldString);
+        const ambiguity = ambiguous
+          ? " A loose similarity match lands in several places, so it was not applied."
+          : "";
         const hint = near
-          ? ` The closest region starts at line ${near.line} and says:\n${near.snippet}\n` +
+          ? `${ambiguity} The closest region starts at line ${near.line} and says:\n${near.snippet}\n` +
             `Copy that text (or a wider unique range) as old_string.`
-          : " Re-read the file and copy the exact text (watch indentation and trailing spaces).";
+          : `${ambiguity} Re-read the file and copy the exact text (watch indentation and trailing spaces).`;
         return {
           content: `Error: old_string not found in ${relPath(ctx.cwd, abs)}.${hint}`,
           isError: true,
