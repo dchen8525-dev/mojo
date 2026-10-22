@@ -38,4 +38,5 @@
 | [gui-notifications-conversation-find.md](gui-notifications-conversation-find.md) | 2026-10-22 | 失焦任务通知 + Ctrl+F 会话内查找 |
 | [headless-ndjson.md](headless-ndjson.md) | 2026-10-22 | 打印模式 NDJSON 事件契约（--output-format stream-json） |
 | [journal-doctor.md](journal-doctor.md) | 2026-10-22 | 模型 I/O 日志（AGENT_JOURNAL）+ /doctor 体检 |
+| [command-center.md](command-center.md) | 2026-10-22 | GUI 命令中心（Ctrl/Cmd+P 面板） |
 | [sse-replay-fixtures.md](sse-replay-fixtures.md) | 2026-10-22 | SSE 回放夹具：事件契约漂移检测 + happy-dom 回放 |

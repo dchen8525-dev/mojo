@@ -624,4 +624,74 @@ describe("GUI interactions (happy-dom)", () => {
     const open = calls.find((c) => c.url === "/api/project")!;
     expect(JSON.parse(String(open.init?.body))).toEqual({ cwd: "D:\\proj2" });
   });
+
+  it("opens the command center with Ctrl+P and filters entries", async () => {
+    const { window } = await boot();
+    const doc = window.document;
+
+    key(window, doc, { key: "p", ctrlKey: true });
+    expect(doc.querySelector("#cmdk-modal")?.classList.contains("hidden")).toBe(false);
+    expect(doc.activeElement?.id).toBe("cmdk-input");
+    const names = [...doc.querySelectorAll("#cmdk-list .cmdk-name")].map((n) => n.textContent);
+    expect(names).toContain("/help");
+    expect(names).toContain("新建会话");
+    expect(names).toContain("快捷键");
+
+    const box = doc.querySelector("#cmdk-input") as HTMLInputElement;
+    box.value = "resume";
+    box.dispatchEvent(new window.Event("input", { bubbles: true }));
+    const filtered = [...doc.querySelectorAll("#cmdk-list .cmdk-name")].map((n) => n.textContent);
+    expect(filtered).toEqual(["/resume"]);
+
+    key(window, box, { key: "Escape" });
+    expect(doc.querySelector("#cmdk-modal")?.classList.contains("hidden")).toBe(true);
+  });
+
+  it("runs a no-arg command from the command center through the composer", async () => {
+    const { window, calls } = await boot();
+    const doc = window.document;
+
+    (doc.querySelector("#cmdk-btn") as HTMLElement).click();
+    expect(doc.querySelector("#cmdk-modal")?.classList.contains("hidden")).toBe(false);
+
+    const items = [...doc.querySelectorAll("#cmdk-list .cmdk-item")] as HTMLElement[];
+    const clear = items.find((i) => i.querySelector(".cmdk-name")?.textContent === "/clear")!;
+    clear.click();
+
+    expect(doc.querySelector("#cmdk-modal")?.classList.contains("hidden")).toBe(true);
+    await vi.waitFor(() => {
+      const chat = calls.find((c) => c.url === "/api/chat");
+      expect(chat).toBeDefined();
+      expect(JSON.parse(String(chat!.init?.body)).text).toBe("/clear");
+    });
+  });
+
+  it("prefills the composer for commands that take arguments", async () => {
+    const { window, calls } = await boot();
+    const doc = window.document;
+
+    (doc.querySelector("#cmdk-btn") as HTMLElement).click();
+    const items = [...doc.querySelectorAll("#cmdk-list .cmdk-item")] as HTMLElement[];
+    const resume = items.find((i) => i.querySelector(".cmdk-name")?.textContent === "/resume")!;
+    resume.click();
+
+    const composer = doc.querySelector("#input") as HTMLInputElement;
+    expect(composer.value).toBe("/resume ");
+    expect(doc.activeElement).toBe(composer);
+    expect(doc.querySelector("#cmdk-modal")?.classList.contains("hidden")).toBe(true);
+    expect(calls.some((c) => c.url === "/api/chat")).toBe(false);
+  });
+
+  it("runs UI actions from the command center", async () => {
+    const { window } = await boot();
+    const doc = window.document;
+
+    (doc.querySelector("#cmdk-btn") as HTMLElement).click();
+    const items = [...doc.querySelectorAll("#cmdk-list .cmdk-item")] as HTMLElement[];
+    const help = items.find((i) => i.querySelector(".cmdk-name")?.textContent === "快捷键")!;
+    help.click();
+
+    expect(doc.querySelector("#help-modal")?.classList.contains("hidden")).toBe(false);
+    expect(doc.querySelector("#cmdk-modal")?.classList.contains("hidden")).toBe(true);
+  });
 });

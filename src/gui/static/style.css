@@ -1734,6 +1734,75 @@ button {
   padding: 20px;
 }
 
+/* ---- command center (Ctrl/Cmd + P) ---- */
+
+.cmdk-card {
+  width: min(560px, 92vw);
+  padding: 14px;
+}
+
+.cmdk-card input {
+  font-size: 14px;
+}
+
+.cmdk-list {
+  max-height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cmdk-item {
+  padding: 7px 10px;
+  cursor: pointer;
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  border-radius: var(--radius);
+}
+
+.cmdk-item.active,
+.cmdk-item:hover {
+  background: var(--accent-soft);
+}
+
+.cmdk-kind {
+  font-size: 11px;
+  color: var(--dim);
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+  padding: 0 5px;
+  white-space: nowrap;
+}
+
+.cmdk-name {
+  font-family: var(--mono);
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.cmdk-desc {
+  color: var(--dim);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cmdk-empty {
+  padding: 14px 10px;
+  color: var(--dim);
+  font-size: 12px;
+  text-align: center;
+}
+
+.cmdk-hint {
+  color: var(--dim);
+  font-size: 11px;
+  text-align: center;
+}
+
 .input-title {
   font-family: var(--serif);
   font-size: 16px;

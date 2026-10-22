@@ -30,6 +30,7 @@
           </button>
         </div>
         <div class="side-foot">
+          <button id="cmdk-btn" class="quit" title="命令面板（Ctrl+P）">⌘ 命令</button>
           <button id="help-btn" class="quit" title="快捷键">⌨ 快捷键</button>
           <button id="quit" class="quit" title="退出">
             <svg class="quit-ico" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
@@ -458,6 +459,7 @@
         </div>
         <div id="help-list" class="help-body">
           <div class="help-row"><kbd>Ctrl / Cmd + K</kbd><span>搜索历史会话</span></div>
+          <div class="help-row"><kbd>Ctrl / Cmd + P</kbd><span>命令面板</span></div>
           <div class="help-row"><kbd>Ctrl / Cmd + F</kbd><span>在当前会话中查找</span></div>
           <div class="help-row"><kbd>Ctrl / Cmd + Enter</kbd><span>发送消息</span></div>
           <div class="help-row"><kbd>Enter</kbd><span>发送（输入框内）</span></div>
@@ -477,6 +479,14 @@
           <button id="input-ok" class="primary">确定</button>
           <button id="input-cancel">取消</button>
         </div>
+      </div>
+    </div>
+
+    <div id="cmdk-modal" class="modal hidden">
+      <div class="modal-card narrow cmdk-card">
+        <input id="cmdk-input" type="text" maxlength="80" placeholder="搜索命令与操作…" autocomplete="off" />
+        <div id="cmdk-list" class="cmdk-list"></div>
+        <div class="cmdk-hint">↑↓ 选择 · Enter 执行 · Esc 关闭</div>
       </div>
     </div>
 

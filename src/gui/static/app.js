@@ -1507,6 +1507,7 @@ window.addEventListener("drop", (e) => {
 /* command palette */
 const BUILTIN_CMDS = [
   ["/help", "命令列表"],
+  ["/doctor", "诊断体检"],
   ["/model", "查看/切换模型"],
   ["/compact", "压缩上下文"],
   ["/context", "上下文占用明细"],
@@ -1514,7 +1515,7 @@ const BUILTIN_CMDS = [
   ["/plan", "切换 Plan 模式"],
   ["/auto", "切换自动批准"],
   ["/yolo", "切换 YOLO"],
-  ["/review", "代码审查"],
+  ["/review ", "代码审查"],
   ["/undo", "撤销文件修改"],
   ["/sessions", "会话列表"],
   ["/search ", "跨会话全文检索 <词>"],
@@ -1577,6 +1578,124 @@ function applyPalette(cmd) {
   hidePalette();
   input.focus();
 }
+
+/* ---------------- 命令中心（Ctrl/Cmd + P） ----------------
+   与输入框里的 "/" 内联补全互补：这里是全局面板，不用先聚焦输入框。
+   无参命令直接经 composer 发送（与手输完全同一条链路）；带参命令
+   （BUILTIN_CMDS 里名字以空格结尾的约定）只预填输入框。 */
+
+const CMDK_ACTIONS = [
+  ["新建会话", "开始全新会话", "#new-session"],
+  ["会话搜索", "查找并切换历史会话", () => {
+    setSidebarOpen(true); // 宽屏下侧栏常开，此调用为 no-op
+    sessionSearch.focus();
+    sessionSearch.select();
+  }],
+  ["切换项目", "选择其它工作目录", "#open-project"],
+  ["LLM 配置", "提供商 / Key / Base URL / 模型", "#llm-config"],
+  ["权限模式", "切换批准策略", "#perm-btn"],
+  ["待办面板", "查看任务进度", "#todo-btn"],
+  ["后台任务", "仍在运行的命令", "#background-btn"],
+  ["用量仪表盘", "跨会话费用与缓存", "#usage-btn"],
+  ["MCP 与权限管理", "管理面板", "#manage-btn"],
+  ["快捷键", "打开快捷键清单", "#help-btn"],
+];
+
+let cmdkReturnFocus = null;
+let cmdkEntries = [];
+
+function cmdkOpen() {
+  return !$("#cmdk-modal").classList.contains("hidden");
+}
+
+function openCommandCenter() {
+  if (document.querySelector(".modal:not(#cmdk-modal):not(.hidden)")) return;
+  cmdkReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  hidePalette();
+  closePops();
+  $("#cmdk-modal").classList.remove("hidden");
+  $("#cmdk-input").value = "";
+  renderCmdk("");
+  $("#cmdk-input").focus();
+}
+
+function closeCommandCenter() {
+  $("#cmdk-modal").classList.add("hidden");
+  cmdkReturnFocus?.focus({ preventScroll: true });
+  cmdkReturnFocus = null;
+}
+
+function renderCmdk(q) {
+  const needle = q.trim().toLowerCase();
+  const sources = [];
+  for (const [name, desc] of BUILTIN_CMDS) {
+    sources.push({ kind: "cmd", name: name.trim(), desc, prefill: name.endsWith(" ") });
+  }
+  for (const c of customCmds) {
+    sources.push({ kind: "cmd", name: "/" + c.name, desc: c.description || "自定义命令", prefill: true });
+  }
+  for (const [name, desc, target] of CMDK_ACTIONS) sources.push({ kind: "action", name, desc, target });
+  cmdkEntries = sources.filter((s) => !needle || (s.name + " " + s.desc).toLowerCase().includes(needle));
+
+  const list = $("#cmdk-list");
+  list.replaceChildren();
+  if (!cmdkEntries.length) {
+    list.appendChild(el("div", "cmdk-empty", "无匹配项"));
+    return;
+  }
+  cmdkEntries.slice(0, 50).forEach((entry, i) => {
+    const item = el("div", "cmdk-item" + (i === 0 ? " active" : ""));
+    item.appendChild(el("span", "cmdk-kind", entry.kind === "cmd" ? "命令" : "操作"));
+    item.appendChild(el("span", "cmdk-name", entry.name));
+    item.appendChild(el("span", "cmdk-desc", entry.desc));
+    item.onclick = () => runCmdk(entry);
+    list.appendChild(item);
+  });
+}
+
+function cmdkMove(dir) {
+  const items = [...$("#cmdk-list").children];
+  if (!items.length || items[0].classList.contains("cmdk-empty")) return;
+  const idx = items.findIndex((i) => i.classList.contains("active"));
+  items[idx]?.classList.remove("active");
+  const next = items[(idx + dir + items.length) % items.length];
+  next.classList.add("active");
+  next.scrollIntoView({ block: "nearest" });
+}
+
+function cmdkActive() {
+  return cmdkEntries[([...$("#cmdk-list").children].findIndex((i) => i.classList.contains("active")))] ?? cmdkEntries[0];
+}
+
+function runCmdk(entry) {
+  if (!entry) return;
+  closeCommandCenter();
+  if (entry.kind === "action") {
+    if (typeof entry.target === "function") entry.target();
+    else document.querySelector(entry.target)?.click();
+    return;
+  }
+  if (entry.prefill) {
+    input.value = entry.name + " ";
+    input.focus();
+    input.dispatchEvent(new Event("input"));
+    return;
+  }
+  input.value = entry.name;
+  void send();
+}
+
+$("#cmdk-btn").onclick = openCommandCenter;
+$("#cmdk-input").addEventListener("input", () => renderCmdk($("#cmdk-input").value));
+$("#cmdk-input").addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown") { e.preventDefault(); cmdkMove(1); return; }
+  if (e.key === "ArrowUp") { e.preventDefault(); cmdkMove(-1); return; }
+  if (e.key === "Enter") { e.preventDefault(); runCmdk(cmdkActive()); return; }
+  if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeCommandCenter(); }
+});
+$("#cmdk-modal").addEventListener("click", (e) => {
+  if (e.target.id === "cmdk-modal") closeCommandCenter();
+});
 
 /* ---------------- 卡片下方工具行：权限模式 / 工作空间 ---------------- */
 
@@ -3041,6 +3160,12 @@ document.addEventListener("keydown", (e) => {
     setSidebarOpen(true); // no-op on wide screens where the sidebar is always visible
     sessionSearch.focus();
     sessionSearch.select();
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "p") {
+    e.preventDefault();
+    if (document.querySelector(".modal:not(.hidden)")) return;
+    openCommandCenter();
     return;
   }
   if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "f") {
