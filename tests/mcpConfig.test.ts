@@ -59,6 +59,10 @@ describe("normalizeMcpConfig", () => {
       type: "sse",
     });
     expect(normalizeMcpConfig({ url: "http://localhost:3000/mcp" })).toEqual({ url: "http://localhost:3000/mcp" });
+    expect(normalizeMcpConfig({ url: "https://a.example/mcp", oauth: true })).toEqual({
+      url: "https://a.example/mcp",
+      oauth: true,
+    });
   });
 
   it("rejects ambiguous or malformed remote configs", () => {
@@ -67,6 +71,8 @@ describe("normalizeMcpConfig", () => {
     expect(() => normalizeMcpConfig({ url: "ftp://a.example" })).toThrow(/http:\/\/ or https:\/\//);
     expect(() => normalizeMcpConfig({ url: "https://a.example", type: "websocket" })).toThrow(/type/);
     expect(() => normalizeMcpConfig({ url: "https://a.example", headers: { A: 1 } })).toThrow(/header values/);
+    expect(() => normalizeMcpConfig({ url: "https://a.example", oauth: "yes" })).toThrow(/oauth must be a boolean/);
+    expect(() => normalizeMcpConfig({ command: "x", oauth: true })).toThrow(/only valid for remote/);
   });
 });
 

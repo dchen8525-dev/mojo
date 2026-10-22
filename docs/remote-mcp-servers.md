@@ -13,6 +13,7 @@
 - `headers` 是 `KEY=VALUE` 映射，随每个远程请求发送（如 `Authorization`），与 `env` 一样以 0600
   权限写入 `~/.node-agent/mcp.json` 或 `<cwd>/.mcp.json`。
 - 项目 `.mcp.json` 的同名服务器覆盖全局；`disabled: true` 保持配置但不连接。
+- `oauth: true` 对远程服务器启用 OAuth 2.1 授权，详见 [mcp-oauth.md](mcp-oauth.md)。
 
 ## 连接与暴露
 

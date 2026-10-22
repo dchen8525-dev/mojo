@@ -361,7 +361,7 @@ const USAGE = `Usage: agent [options]
 
 async function runGui(args: ReturnType<typeof parseArgs>) {
   const { startGuiBackend } = await import("./gui/backend.js");
-  const { openBrowser } = await import("./gui/openBrowser.js");
+  const { openBrowser } = await import("./openBrowser.js");
 
   let resume = args.resume || undefined;
   if (!resume && args.cont) resume = (await listSessions())[0]?.id;

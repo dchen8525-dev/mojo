@@ -360,6 +360,7 @@ describe("GUI interactions (happy-dom)", () => {
     (doc.querySelector("#mcp-url") as HTMLInputElement).value = "https://mcp.example.com/mcp";
     (doc.querySelector("#mcp-transport") as HTMLSelectElement).value = "sse";
     (doc.querySelector("#mcp-headers") as HTMLTextAreaElement).value = "Authorization=Bearer t";
+    (doc.querySelector("#mcp-oauth") as HTMLInputElement).checked = true;
     (doc.querySelector("#mcp-save") as HTMLElement).click();
 
     await vi.waitFor(() => expect(doc.querySelectorAll("#mcp-list .profile-row")).toHaveLength(1));
@@ -367,7 +368,13 @@ describe("GUI interactions (happy-dom)", () => {
     expect(JSON.parse(String(save.init?.body))).toEqual({
       name: "remote",
       scope: "global",
-      config: { url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer t" }, type: "sse", disabled: false },
+      config: {
+        url: "https://mcp.example.com/mcp",
+        headers: { Authorization: "Bearer t" },
+        type: "sse",
+        oauth: true,
+        disabled: false,
+      },
     });
     expect(doc.querySelector("#mcp-list")?.textContent).toContain("https://mcp.example.com/mcp");
     expect(doc.querySelector("#mcp-list")?.textContent).toContain("已连接 · 3 个工具 · HTTP");

@@ -2222,6 +2222,7 @@ function renderMcp() {
     name.appendChild(document.createTextNode(server.name));
     name.appendChild(el("span", "profile-badge", server.scope === "project" ? "项目" : "全局"));
     if (server.url) name.appendChild(el("span", "profile-badge", "远程"));
+    if (server.oauth) name.appendChild(el("span", "profile-badge", "OAuth"));
     if (server.disabled) name.appendChild(el("span", "profile-badge danger", "停用"));
     if (server.shadowed) name.appendChild(el("span", "profile-badge", "被覆盖"));
     main.appendChild(name);
@@ -2261,6 +2262,7 @@ function openMcpEditor(server) {
   $("#mcp-url").value = server?.url ?? "";
   $("#mcp-transport").value = server?.type ?? "";
   $("#mcp-headers").value = Object.entries(server?.headers ?? {}).map(([k, v]) => `${k}=${v}`).join("\n");
+  $("#mcp-oauth").checked = !!server?.oauth;
   $("#mcp-args").value = (server?.args ?? []).join("\n");
   $("#mcp-env").value = Object.entries(server?.env ?? {}).map(([k, v]) => `${k}=${v}`).join("\n");
   $("#mcp-disabled").checked = !!server?.disabled;
@@ -2390,7 +2392,7 @@ $("#mcp-save").onclick = async () => {
       headers[text.slice(0, eq).trim()] = text.slice(eq + 1);
     }
     const type = $("#mcp-transport").value;
-    config = { url, headers, disabled, ...(type ? { type } : {}) };
+    config = { url, headers, disabled, oauth: $("#mcp-oauth").checked, ...(type ? { type } : {}) };
   } else {
     const command = $("#mcp-command").value.trim();
     if (!command) return toast("请填写启动命令或远程 URL", true);

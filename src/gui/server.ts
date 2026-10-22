@@ -284,6 +284,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       url: string;
       headers: Record<string, string>;
       type: "" | "http" | "sse";
+      oauth: boolean;
       enabledTools: string[];
       disabledTools: string[];
       disabled: boolean;
@@ -305,6 +306,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
           url: cfg.url ?? "",
           headers: cfg.headers ?? {},
           type: cfg.type ?? "",
+          oauth: !!cfg.oauth,
           enabledTools: cfg.enabledTools ?? [],
           disabledTools: cfg.disabledTools ?? [],
           disabled: !!cfg.disabled,

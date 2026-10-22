@@ -1,4 +1,5 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
@@ -9,6 +10,7 @@ import path from "node:path";
 import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { registerTool, unregisterToolsByPrefix } from "./tools/index.js";
 import { boundedResult } from "./artifacts.js";
+import { McpOAuthFlow } from "./mcpAuth.js";
 
 /**
  * An MCP server exposing more than this many tools has them marked deferred:
@@ -27,6 +29,8 @@ export interface McpServerConfig {
   headers?: Record<string, string>;
   /** Remote transport; unset = try streamable HTTP, then fall back to SSE. */
   type?: "http" | "sse";
+  /** Use OAuth 2.1 (authorization code + PKCE) for a remote server. */
+  oauth?: boolean;
   /** Restrict which tools are exposed: allowlist of remote tool names. */
   enabledTools?: string[];  disabledTools?: string[];
   /** Kept in the config file but not connected (GUI toggle). */
@@ -156,6 +160,11 @@ export function normalizeMcpConfig(input: unknown): McpServerConfig {
   const url = typeof input.url === "string" ? input.url.trim() : "";
   if (command && url) throw new Error("use either command (stdio) or url (remote), not both");
   if (!command && !url) throw new Error("command or url is required");
+  if (input.oauth !== undefined && input.oauth !== null && input.oauth !== false && input.oauth !== true) {
+    throw new Error("oauth must be a boolean");
+  }
+  const useOauth = input.oauth === true;
+  if (useOauth && !url) throw new Error("oauth is only valid for remote servers");
 
   let cfg: McpServerConfig;
   if (url) {
@@ -175,6 +184,7 @@ export function normalizeMcpConfig(input: unknown): McpServerConfig {
     }
     const headers = optionalHeaders(input.headers);
     if (headers) cfg.headers = headers;
+    if (useOauth) cfg.oauth = true;
   } else {
     cfg = { command };
     const args = optionalStringArray(input.args, "args");
@@ -315,36 +325,107 @@ async function connectStdio(cfg: McpServerConfig): Promise<ConnectResult> {
  * Remote endpoints: try the streamable HTTP transport first and fall back to
  * the legacy SSE transport, mirroring the MCP spec's migration guidance. An
  * explicit `type` skips the fallback so a misconfiguration fails fast.
+ *
+ * With `oauth: true` the SDK drives discovery/registration/PKCE through the
+ * flow's provider; a 401 opens the authorization URL, and once the loopback
+ * callback delivers a code the same transport kind is retried with the
+ * stored tokens. Later connections reuse the saved tokens (and refresh them).
  */
-async function connectRemote(cfg: McpServerConfig): Promise<ConnectResult> {
+async function connectRemote(cfg: McpServerConfig, name: string, opts: McpManagerOptions): Promise<ConnectResult> {
   const url = new URL(cfg.url!);
-  const options = cfg.headers ? { requestInit: { headers: cfg.headers } } : {};
-  const attempts: Array<{ kind: "http" | "sse"; make: () => Transport }> = [];
-  if (cfg.type === "http") attempts.push({ kind: "http", make: () => new StreamableHTTPClientTransport(url, options) });
-  else if (cfg.type === "sse") attempts.push({ kind: "sse", make: () => new SSEClientTransport(url, options) });
-  else {
-    attempts.push({ kind: "http", make: () => new StreamableHTTPClientTransport(url, options) });
-    attempts.push({ kind: "sse", make: () => new SSEClientTransport(url, options) });
-  }
-
-  const failures: string[] = [];
-  for (const attempt of attempts) {
-    const transport = attempt.make();
-    const client = new Client({ name: "node-agent", version: "0.1.0" });
-    try {
-      await client.connect(transport, { timeout: REMOTE_CONNECT_TIMEOUT_MS });
-      return { client, transport, kind: attempt.kind };
-    } catch (err) {
-      failures.push(`${attempt.kind}: ${err instanceof Error ? err.message : String(err)}`);
-      await transport.close().catch(() => {});
+  let flow: McpOAuthFlow | null = null;
+  try {
+    if (cfg.oauth) {
+      const envTimeout = Number(process.env.AGENT_MCP_OAUTH_TIMEOUT_MS);
+      flow = await McpOAuthFlow.start({
+        serverName: name,
+        serverUrl: cfg.url!,
+        authDir: opts.authDir,
+        timeoutMs: opts.oauthTimeoutMs ?? (Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : undefined),
+        openUrl: opts.openUrl,
+        log: opts.log,
+      });
     }
+    const kinds: Array<"http" | "sse"> =
+      cfg.type === "http" ? ["http"] : cfg.type === "sse" ? ["sse"] : ["http", "sse"];
+    const transportOptions = {
+      ...(cfg.headers ? { requestInit: { headers: cfg.headers } } : {}),
+      ...(flow ? { authProvider: flow.provider } : {}),
+    };
+    const make = (kind: "http" | "sse") =>
+      kind === "http"
+        ? new StreamableHTTPClientTransport(url, transportOptions)
+        : new SSEClientTransport(url, transportOptions);
+
+    const failures: string[] = [];
+    let authorized = false;
+    for (const kind of kinds) {
+      const first = await attemptConnect(make(kind));
+      if (first.ok) return { client: first.client, transport: first.transport, kind };
+      if (flow && !authorized && first.error instanceof UnauthorizedError) {
+        authorized = true;
+        try {
+          const code = await flow.waitForCode();
+          await first.transport.finishAuth(code);
+        } catch (err) {
+          await closeAttempt(first);
+          failures.push(`${kind}: ${describeError(err)}`);
+          break; // another transport cannot succeed before the user authorizes
+        }
+        await closeAttempt(first);
+        const retry = await attemptConnect(make(kind));
+        if (retry.ok) return { client: retry.client, transport: retry.transport, kind };
+        failures.push(`${kind}: ${describeError(retry.error)}`);
+        await closeAttempt(retry);
+        continue;
+      }
+      failures.push(`${kind}: ${describeError(first.error)}`);
+      await closeAttempt(first);
+    }
+    throw new Error(`remote MCP connection failed (${failures.join("; ")})`);
+  } finally {
+    await flow?.close();
   }
-  throw new Error(`remote MCP connection failed (${failures.join("; ")})`);
+}
+
+function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+type AttemptResult =
+  | { ok: true; client: Client; transport: StreamableHTTPClientTransport | SSEClientTransport }
+  | { ok: false; error: unknown; client: Client; transport: StreamableHTTPClientTransport | SSEClientTransport };
+
+async function attemptConnect(transport: StreamableHTTPClientTransport | SSEClientTransport): Promise<AttemptResult> {
+  const client = new Client({ name: "node-agent", version: "0.1.0" });
+  try {
+    await client.connect(transport, { timeout: REMOTE_CONNECT_TIMEOUT_MS });
+    return { ok: true, client, transport };
+  } catch (error) {
+    return { ok: false, error, client, transport };
+  }
+}
+
+async function closeAttempt(attempt: AttemptResult): Promise<void> {
+  await attempt.client.close().catch(() => {});
+  await attempt.transport.close().catch(() => {});
+}
+
+export interface McpManagerOptions {
+  /** Browser launcher for OAuth redirects (tests inject their own). */
+  openUrl?: (url: string) => void;
+  /** How long to wait for the OAuth callback. */
+  oauthTimeoutMs?: number;
+  /** Token store directory (defaults to ~/.node-agent/mcp-auth). */
+  authDir?: string;
+  log?: (message: string) => void;
 }
 
 export class McpManager {
   private servers = new Map<string, ConnectedServer>();
   statuses: McpServerStatus[] = [];
+
+  constructor(private readonly opts: McpManagerOptions = {}) {}
 
   async connectAll(configs: Record<string, McpServerConfig>): Promise<McpServerStatus[]> {
     this.statuses = [];
@@ -360,7 +441,7 @@ export class McpManager {
     let transport: Transport | null = null;
     try {
       if (cfg.url && cfg.command) throw new Error("config has both command and url — keep only one");
-      const conn = cfg.url ? await connectRemote(cfg) : await connectStdio(cfg);
+      const conn = cfg.url ? await connectRemote(cfg, name, this.opts) : await connectStdio(cfg);
       client = conn.client;
       transport = conn.transport;
 

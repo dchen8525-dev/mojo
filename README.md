@@ -73,7 +73,8 @@ Ink 的交互式 UI。
 - **钩子（Hooks）**：在 `SessionStart` / `UserPromptSubmit` / `PreToolUse` /
   `PostToolUse` / `PreCompact` / `Stop` 时机执行 shell 命令，支持 `async` 旁路钩子
 - **MCP 客户端**：从 `~/.node-agent/mcp.json` 或 `.mcp.json` 连接本地 stdio 服务器，或远程
-  Streamable HTTP / SSE 服务器（`url` + 可选 `headers`，HTTP 失败自动回退 SSE）
+  Streamable HTTP / SSE 服务器（`url` + 可选 `headers`，HTTP 失败自动回退 SSE；`oauth: true`
+  走浏览器 OAuth 2.1 授权，令牌存于 `~/.node-agent/mcp-auth`）
 - **MCP 服务器模式**：`agent --mcp-server` 把 mojo 自身暴露为 MCP server（只读工具 +
   `agent_chat` + 项目资源），供其他代理编排调用
 - **项目指令**：`AGENTS.md` / `CLAUDE.md` 会被注入系统提示词
@@ -665,7 +666,23 @@ Review @$1 for correctness issues. Focus on edge cases.
 }
 ```
 
-远端工具以 `mcp__<server>__<tool>` 命名空间注册；用 `/mcp` 查看状态。
+远程服务器把 `command` 换成 `url`，可加 `headers`、`type`（`http` / `sse`）或 OAuth：
+
+```json
+{
+  "mcpServers": {
+    "remote": {
+      "url": "https://mcp.example.com/mcp",
+      "type": "http",
+      "oauth": true
+    }
+  }
+}
+```
+
+首次连接会打开浏览器完成 OAuth 授权（动态注册 + PKCE），回调走本机回环地址；令牌保存在
+`~/.node-agent/mcp-auth/<server>.json`（0600），之后自动复用与刷新。远端工具以
+`mcp__<server>__<tool>` 命名空间注册；用 `/mcp` 查看状态。
 
 ### mojo 作为 MCP 服务器（`--mcp-server`）
 
