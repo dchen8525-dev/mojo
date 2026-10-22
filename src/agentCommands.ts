@@ -5,7 +5,8 @@ import type { HookManager } from "./hooks.js";
 import type { McpManager } from "./mcp.js";
 import { loadMcpConfig, mcpConfigPath, revokeProjectMcpTrust, trustProjectMcp, untrustedProjectMcp } from "./mcp.js";
 import type { SlashCommand } from "./commands.js";
-import { knownModelNames } from "./llm.js";
+import { knownModelNames, resolveSettings, loadConfigLayers } from "./llm.js";
+import { journalEnabled, journalDir, journalStats } from "./journal.js";
 import { createSession, listSessions, loadSession, renderSessionMarkdown, renameSession, searchSessions, tagSession } from "./session.js";
 import { getLspManager } from "./lsp.js";
 import { createCronTask, deleteCronTask, formatCronTask, loadCronTasks, validateCron, updateCronTask } from "./cron.js";
@@ -52,7 +53,7 @@ export interface CommandContext {
 /** Names of the built-in commands (for /help listings and the GUI palette). */
 export const BUILTIN_COMMANDS = [
   "help", "model", "auto", "yolo", "plan", "mcp", "lsp", "compact", "context", "review",
-  "permissions", "hooks", "sessions", "search", "resume", "fork", "rename", "tag", "export", "todos", "undo", "cost", "cron", "clear", "quit",
+  "permissions", "hooks", "sessions", "search", "resume", "fork", "rename", "tag", "export", "todos", "undo", "cost", "cron", "doctor", "clear", "quit",
 ] as const;
 
 /**
@@ -73,13 +74,85 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       return {
         kind: "ok",
         text: [
-          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp [trust|revoke] · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks [trust|revoke] · /sessions [--cwd <dir>] [--title <词>] [--tag <tag>] [N] · /search [-r] <term> · /resume <id> · /fork [N] [名称] · /rename <名称> · /tag [+<tag> | -<tag> | clear] · /export [md|json] [路径] · /todos · /cron [add <分> <时> <日> <月> <周> <提示词> | on|off|run|rm <id>] · /undo [-y] [--force] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
+          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp [trust|revoke] · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks [trust|revoke] · /sessions [--cwd <dir>] [--title <词>] [--tag <tag>] [N] · /search [-r] <term> · /resume <id> · /fork [N] [名称] · /rename <名称> · /tag [+<tag> | -<tag> | clear] · /export [md|json] [路径] · /todos · /cron [add <分> <时> <日> <月> <周> <提示词> | on|off|run|rm <id>] · /doctor · /undo [-y] [--force] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
           "file refs: @path/to/file inlines the file; Ctrl+V pastes a clipboard image",
           custom ? `custom commands: ${custom}` : "",
         ]
           .filter(Boolean)
           .join("\n"),
       };
+    }
+    case "doctor": {
+      const lines: string[] = [];
+      const settings = resolveSettings({ cwd });
+      const layers = loadConfigLayers(cwd);
+      const key = settings.apiKey;
+      lines.push(
+        key
+          ? `✓ api key: set (${key.slice(0, 3)}…${key.slice(-4)}, never displayed; source: ${
+              layers.project.apiKey ? "project config" : layers.global.apiKey ? "global config" : "environment"
+            })`
+          : "✗ api key: MISSING — set ANTHROPIC_API_KEY / OPENAI_API_KEY or add it to config.json",
+      );
+      lines.push(`✓ model: ${agent.provider}:${agent.model} (context ${agent.contextWindow.toLocaleString()} tokens)${settings.baseURL ? ` · endpoint ${settings.baseURL}` : ""}`);
+      const used = agent.tokenEstimate();
+      const pct = ((used / agent.contextWindow) * 100).toFixed(1);
+      lines.push(`${used > agent.contextWindow * COMPACT_RATIO ? "⚠" : "✓"} context: ${used.toLocaleString()} / ${agent.contextWindow.toLocaleString()} tokens (${pct}%; compact at ${(COMPACT_RATIO * 100).toFixed(0)}%)`);
+      const sessionMsgs = agent.debugMessages().length;
+      lines.push(`✓ session: ${agent.sessionId} · ${sessionMsgs} message(s)`);
+
+      const rules = permissions.getRules().length;
+      const projectRules = permissions.getProjectRules().length;
+      const sessionRules = permissions.getSessionRules().length;
+      lines.push(`✓ permissions: mode ${permissions.mode} · ${rules} global / ${projectRules} project / ${sessionRules} session rule(s)`);
+
+      if (!mcp) {
+        lines.push("⚠ mcp: disabled for this run (--no-mcp)");
+      } else if (!mcp.statuses.length) {
+        lines.push("✓ mcp: no servers configured");
+      } else {
+        const ok = mcp.statuses.filter((s) => s.connected);
+        const tools = mcp.statuses.reduce((sum, s) => sum + (s.connected ? s.toolCount : 0), 0);
+        lines.push(`${ok.length === mcp.statuses.length ? "✓" : "⚠"} mcp: ${ok.length}/${mcp.statuses.length} connected · ${tools} tool(s)`);
+        for (const s of mcp.statuses) if (!s.connected) lines.push(`  ✗ ${s.name}: ${s.error ?? "connection failed"}`);
+      }
+
+      const hookCount = hooks.list().length;
+      const untrusted = hooks.untrustedProjectHooks();
+      lines.push(
+        untrusted
+          ? `⚠ hooks: ${hookCount} loaded · project hooks NOT loaded (untrusted): ${untrusted.file} — /hooks trust to approve`
+          : `✓ hooks: ${hookCount} loaded`,
+      );
+
+      const cron = ctx.cronScheduler;
+      lines.push(
+        !cron
+          ? "⚠ cron: scheduler not running in this host"
+          : cron.isOwner
+            ? "✓ cron: scheduler active (owner)"
+            : cron.isStarted
+              ? "✓ cron: scheduler standby (another process owns the lease)"
+              : "⚠ cron: scheduler created but not started",
+      );
+
+      const lspMgr = getLspManager();
+      if (!lspMgr) {
+        lines.push("⚠ lsp: not started (--no-lsp or not configured)");
+      } else {
+        const st = lspMgr.status();
+        const bad = st.filter((s) => s.error);
+        lines.push(`${bad.length ? "⚠" : "✓"} lsp: ${st.length} server(s) · ${st.reduce((sum, s) => sum + s.documents, 0)} document(s)`);
+        for (const s of bad) lines.push(`  ✗ ${s.ext}: ${s.error}`);
+      }
+
+      if (journalEnabled()) {
+        const stats = await journalStats(journalDir());
+        lines.push(`✓ journal: on (AGENT_JOURNAL) · ${stats.files} file(s), ${(stats.bytes / 1024 / 1024).toFixed(1)} MB in ${journalDir()}`);
+      } else {
+        lines.push("⚠ journal: off — set AGENT_JOURNAL=1 to record model I/O to ~/.node-agent/journal");
+      }
+      return { kind: "ok", text: lines.join("\n") };
     }
     case "hooks": {
       if (rest[0] === "trust") {

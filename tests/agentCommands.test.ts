@@ -89,6 +89,7 @@ function fakeAgent(overrides: Partial<Agent> = {}): Agent {
     undoLastCheckpoint: async () => null,
     resetSession: () => {},
     getMessages: () => [],
+    debugMessages: () => [],
     fork: async () => null,
     ...overrides,
   } as unknown as Agent;
@@ -99,6 +100,8 @@ function fakePermissions(): PermissionManager {
     mode: "default",
     load: async () => {},
     getRules: () => [],
+    getProjectRules: () => [],
+    getSessionRules: () => [],
     clearRules: async () => ({ global: 0, project: 0 }),
     check: async () => true,
   } as unknown as PermissionManager;
@@ -109,7 +112,7 @@ function ctx(overrides: Partial<CommandContext> = {}): CommandContext {
     agent: fakeAgent(),
     permissions: fakePermissions(),
     mcp: null,
-    hooks: { list: () => [] } as never,
+    hooks: { list: () => [], untrustedProjectHooks: () => null } as never,
     customCommands: new Map(),
     cwd: "/tmp/repo",
     ...overrides,
@@ -577,5 +580,47 @@ describe("runAgentCommand", () => {
     const absent = await runAgentCommand("/cron run cr_aaa00001", ctx());
     expect(absent.kind).toBe("error");
     expect(absent.text).toContain("scheduler");
+  });
+});
+
+describe("/doctor", () => {
+  it("reports every subsystem without leaking the api key", async () => {
+    const r = await runAgentCommand("/doctor", ctx());
+    expect(r.kind).toBe("ok");
+    for (const marker of ["api key", "model:", "context:", "session:", "permissions:", "mcp:", "hooks:", "cron:", "lsp:", "journal:"]) {
+      expect(r.text).toContain(marker);
+    }
+    // The key is masked at best, never shown whole.
+    expect(r.text).not.toMatch(/sk-[A-Za-z0-9]{8}/);
+    expect(r.text).not.toMatch(/\x1b\[/);
+  });
+
+  it("surfaces degraded subsystems with warnings", async () => {
+    const r = await runAgentCommand(
+      "/doctor",
+      ctx({
+        mcp: {
+          statuses: [
+            { name: "good", connected: true, toolCount: 3, kind: "stdio" },
+            { name: "bad", connected: false, error: "boom", toolCount: 0 },
+          ],
+        } as never,
+        hooks: {
+          list: () => [{ event: "PostToolUse", matcher: "*", command: "x" }],
+          untrustedProjectHooks: () => ({ file: ".node-agent/hooks.json" }),
+        } as never,
+        cronScheduler: { isOwner: false, isStarted: true } as never,
+      }),
+    );
+    expect(r.kind).toBe("ok");
+    expect(r.text).toContain("1/2 connected");
+    expect(r.text).toContain("bad: boom");
+    expect(r.text).toContain("NOT loaded (untrusted)");
+    expect(r.text).toContain("standby");
+  });
+
+  it("flags a model override on the doctor model line", async () => {
+    const r = await runAgentCommand("/doctor", ctx({ agent: fakeAgent({ provider: "openai", model: "gpt-4o" } as never) }));
+    expect(r.text).toContain("openai:gpt-4o");
   });
 });

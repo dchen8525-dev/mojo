@@ -195,6 +195,7 @@ export class Agent {
   ) {
     this.cwd = cwd;
     this.llm = new LLM({ cwd });
+    this.llm.journalSession = sessionId;
     this.sessionId = sessionId;
     this.checkpoints = new CheckpointStore(sessionId);
     const budget = Number(process.env.AGENT_BUDGET_USD);

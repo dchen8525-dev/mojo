@@ -8,6 +8,7 @@ import { AnthropicBackend } from "./llm/anthropic.js";
 import { OpenAiBackend } from "./llm/openai.js";
 import { lookupModel } from "./llm/models.js";
 import { fetchModelMeta, getModelMeta, setModelMeta, type ModelMeta } from "./modelMeta.js";
+import { recordJournalTurn } from "./journal.js";
 
 export type { AssistantTurn, StreamEvents, Provider } from "./llm/types.js";
 export { knownModelNames, lookupModel } from "./llm/models.js";
@@ -134,6 +135,8 @@ export class LLM {
   private ctxWindow?: number;
   provider!: Provider;
   model!: string;
+  /** Set by the owning Agent so journal entries attribute to a session. */
+  journalSession = "";
 
   constructor(opts: LLMOptions = {}) {
     this.cwd = opts.cwd ?? process.cwd();
@@ -355,7 +358,57 @@ export class LLM {
    * no prefill, so we ask it to continue from the exact cut-off point.
    * Overlapping text between partial and continuation is deduplicated.
    */
+  /**
+   * Journaling wrapper around the resume loop: one entry per logical request,
+   * success or failure, only when AGENT_JOURNAL is on.
+   */
   async send(
+    messages: MessageParam[],
+    system: string | SystemPrompt,
+    tools: Tool[],
+    signal?: AbortSignal,
+    events?: StreamEvents,
+  ): Promise<AssistantTurn> {
+    const start = Date.now();
+    const base = {
+      ts: new Date().toISOString(),
+      sessionId: this.journalSession,
+      provider: this.provider,
+      model: this.model,
+      request: {
+        messageCount: messages.length,
+        systemChars: typeof system === "string" ? system.length : system.stable.length + (system.volatile?.length ?? 0),
+        toolNames: tools.map((t) => t.name),
+        messages,
+      },
+    };
+    try {
+      const turn = await this.sendResumable(messages, system, tools, signal, events);
+      void recordJournalTurn({
+        ...base,
+        durationMs: Date.now() - start,
+        response: {
+          text: turn.text,
+          toolUses: turn.toolUses.map((t) => ({ name: t.name, input: t.input })),
+          stopReason: turn.stopReason,
+          inputTokens: turn.inputTokens,
+          outputTokens: turn.outputTokens,
+          cacheReadTokens: turn.cacheReadTokens,
+          cacheWriteTokens: turn.cacheWriteTokens,
+        },
+      });
+      return turn;
+    } catch (err) {
+      void recordJournalTurn({
+        ...base,
+        durationMs: Date.now() - start,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
+  }
+
+  private async sendResumable(
     messages: MessageParam[],
     system: string | SystemPrompt,
     tools: Tool[],

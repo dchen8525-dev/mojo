@@ -256,6 +256,11 @@ export class CronScheduler {
     return this.owner;
   }
 
+  /** Whether start() has run in this process (owner or standby). */
+  get isStarted(): boolean {
+    return this.started;
+  }
+
   isRunning(id: string): boolean {
     return this.running.has(id);
   }
