@@ -18,6 +18,7 @@ import { loadSlashCommands, renderCommand, expandFileReferences } from "./comman
 import { configureLsp, disposeLsp, loadLspConfig } from "./lsp.js";
 import { renderSessionMarkdown, createSession, loadSession, listSessions } from "./session.js";
 import { runAgentCommand, type CommandContext } from "./agentCommands.js";
+import { createNdjsonEvents } from "./headless.js";
 import { CronScheduler } from "./cronScheduler.js";
 import {
   ansiEmphasize,
@@ -136,6 +137,9 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
   await setupLsp(args, session.cwd);
   // Headless runs (scheduled tasks, pipes) cannot answer permission prompts;
   // deny instead of blocking forever on stdin.
+  const ndjson = args.outputFormat === "stream-json"
+    ? createNdjsonEvents({ sessionId: session.id, cwd: session.cwd, permissionMode: args.yolo ? "yolo" : args.auto ? "auto" : "default", planMode: args.plan })
+    : null;
   const interactive = !!process.stdin.isTTY && !!process.stdout.isTTY;
   let rl: readline.Interface | null = null;
   const ask = (q: string) =>
@@ -144,18 +148,19 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
       rl.question(q, res);
     });
   if (interactive) rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-  const permissions = new PermissionManager(async (desc: string, risk: Risk, preview?: string) => {
-    if (!interactive) return "no";
+  const askPermission = async (desc: string, risk: Risk, preview?: string) => {
+    if (!interactive) return "no" as const;
     const tag = risk === "high" ? ANSI.error("[high]") : ANSI.warn("[write]");
     if (preview) console.log(ANSI.dim(preview.split("\n").map((l) => `  ${l}`).join("\n")));
     const answer = (await ask(`${tag} ${ANSI.bold(desc)}\n  allow? [y]es / [n]o / [a]lways / [d]eny-always > `))
       .trim()
       .toLowerCase();
-    if (answer === "a" || answer === "always") return "always";
-    if (answer === "d") return "always_deny";
-    if (answer === "y" || answer === "yes" || answer === "") return "yes";
-    return "no";
-  });
+    if (answer === "a" || answer === "always") return "always" as const;
+    if (answer === "d") return "always_deny" as const;
+    if (answer === "y" || answer === "yes" || answer === "") return "yes" as const;
+    return "no" as const;
+  };
+  const permissions = new PermissionManager(ndjson ? ndjson.wrapPermission(askPermission) : askPermission);
   await permissions.load();
   await permissions.loadProject(session.cwd);
   if (args.yolo) permissions.mode = "yolo";
@@ -169,7 +174,10 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
   restoreSessionModel(agent, session.model, args);
   if (args.plan) agent.planMode = true;
   await agent.startSession(session.messages?.length ? "resume" : "startup", undefined, session.todos);
-  const events: AgentEvents = {
+  ndjson?.init(`${agent.provider}:${agent.model}`);
+  const events: AgentEvents = ndjson
+    ? ndjson.events
+    : {
     onTextDelta: (d) => process.stdout.write(d),
     onToolStart: (_id, name, preview) => {
       process.stdout.write("\n");
@@ -192,6 +200,8 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
   const controller = new AbortController();
   process.on("SIGINT", () => controller.abort());
   const started = Date.now();
+  let outcome: "success" | "error" | "aborted" = "success";
+  let finalText = "";
   try {
     let prompt = args.print;
     const cm = /^\/([\w:-]+)\s*([\s\S]*)$/.exec(prompt.trim());
@@ -200,13 +210,25 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
       if (custom) prompt = renderCommand(custom.template, cm[2] ? cm[2].trim().split(/\s+/) : []);
     }
     const expanded = await expandFileReferences(prompt, session.cwd);
-    await agent.chat(expanded.text, controller.signal, events);
-    console.log();
+    finalText = await agent.chat(expanded.text, controller.signal, events);
+    if (!ndjson) console.log();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (msg !== "aborted") console.error(ANSI.error(`Error: ${msg}`));
-    else console.log(ANSI.warn("\n(interrupted)"));
+    if (msg === "aborted") {
+      outcome = "aborted";
+      if (!ndjson) console.log(ANSI.warn("\n(interrupted)"));
+    } else {
+      outcome = "error";
+      console.error(ANSI.error(`Error: ${msg}`));
+    }
   } finally {
+    ndjson?.result(outcome, finalText, {
+      durationMs: Date.now() - started,
+      tokens: agent.tokenEstimate(),
+      costUsd: agent.costs.totalUsd(),
+      provider: agent.provider,
+      model: agent.model,
+    });
     const secs = ((Date.now() - started) / 1000).toFixed(1);
     const used = agent.tokenEstimate();
     const cost = agent.costs.totalUsd();
@@ -356,7 +378,7 @@ const USAGE = `Usage: agent [options]
     agent [--resume <id> | --continue] [--model <spec>] [--provider <name>] [--theme <name>] [--auto | --yolo]
 
   Single-shot print mode:
-    agent -p "prompt" [--model <spec>] [--theme <name>]
+    agent -p "prompt" [--model <spec>] [--theme <name>] [--output-format text|stream-json]
 
   Export a saved session (to .md/.json):
     agent --export <session-id> [--format md|json]
@@ -367,6 +389,7 @@ const USAGE = `Usage: agent [options]
     -p <prompt>        Single-shot print mode
     --export <id>      Export a saved session to Markdown/JSON in the working directory
     --format md|json   Output format (default md)
+    --output-format <f> Print-mode stdout format: text (default) | stream-json (NDJSON event contract)
     --model <spec>     Override model (e.g. anthropic:claude-sonnet-4-5 or just sonnet)
     --provider <name>  Override provider (anthropic|openai)
     --theme <name>     UI theme: dark | light | auto (follow the terminal)
@@ -434,6 +457,10 @@ async function main() {
   if (args.version) {
     console.log(VERSION);
     process.exit(0);
+  }
+  if (args.outputFormat && args.outputFormat !== "text" && args.outputFormat !== "stream-json") {
+    console.error(ANSI.error(`Unknown --output-format "${args.outputFormat}" — try text or stream-json.`));
+    process.exit(1);
   }
   if (args.exportId) {
     await runExport(args);

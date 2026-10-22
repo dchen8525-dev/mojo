@@ -36,3 +36,4 @@
 | [adversarial-analysis-2026-10-22.md](adversarial-analysis-2026-10-22.md) | 7ff28f1 | 十轮对抗性审计报告（cron → OAuth） |
 | [scroll-ownership-approval-diff.md](scroll-ownership-approval-diff.md) | 857575a | GUI 流式滚动所有权 + 审批弹窗结构化 diff |
 | [gui-notifications-conversation-find.md](gui-notifications-conversation-find.md) | 2026-10-22 | 失焦任务通知 + Ctrl+F 会话内查找 |
+| [headless-ndjson.md](headless-ndjson.md) | 2026-10-22 | 打印模式 NDJSON 事件契约（--output-format stream-json） |

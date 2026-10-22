@@ -1,11 +1,12 @@
 export function parseArgs(argv: string[]) {
-  const args = { resume: "", cont: false, print: "", model: "", provider: "", theme: "", auto: false, yolo: false, plan: false, mcpServer: false, noMcp: false, noLsp: false, noCron: false, help: false, version: false, exportId: "", exportFormat: "md" as "md" | "json", gui: false, port: 0 };
+  const args = { resume: "", cont: false, print: "", model: "", provider: "", theme: "", auto: false, yolo: false, plan: false, mcpServer: false, noMcp: false, noLsp: false, noCron: false, help: false, version: false, exportId: "", exportFormat: "md" as "md" | "json", gui: false, port: 0, outputFormat: "text" as "text" | "stream-json" | "" };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--resume" && argv[i + 1]) args.resume = argv[++i];
     else if (argv[i] === "--continue") args.cont = true;
     else if (argv[i] === "-p" && argv[i + 1]) args.print = argv[++i];
     else if (argv[i] === "--export" && argv[i + 1]) args.exportId = argv[++i];
     else if (argv[i] === "--format" && (argv[i + 1] === "md" || argv[i + 1] === "json")) args.exportFormat = argv[++i] as "md" | "json";
+    else if (argv[i] === "--output-format" && argv[i + 1]) args.outputFormat = argv[++i] as "text" | "stream-json";
     else if (argv[i] === "--model" && argv[i + 1]) args.model = argv[++i];
     else if (argv[i] === "--provider" && argv[i + 1]) args.provider = argv[++i];
     else if (argv[i] === "--theme" && argv[i + 1]) args.theme = argv[++i];
