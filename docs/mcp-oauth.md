@@ -44,6 +44,14 @@
 - 打开浏览器失败（如无头 Linux 缺少 `xdg-open`）只记录“请手动打开”的日志并继续等待回调，
   授权 URL 同时保留在日志与超时错误中。
 - 回调 `state` 不匹配返回 400 且不结束等待；`error=...` 回调转为连接错误。
+- 回调只接受 Host 与 `127.0.0.1:<端口>` 完全一致的请求：DNS rebinding 页面即使解析到回环
+  地址，Host 仍是对外域名，会被 400 拒绝；被拒绝的请求不消耗 state。
+- `state` 只能成功使用一次：授权码或错误送达后，重复回调返回 400 `authorization already completed`，
+  防止被捕获的回调重放给后续流程注入授权码。
+- 授权 URL 只允许 `http(s)`：发现文档里若给出 `file:` / `javascript:` 等端点，直接报
+  `refusing non-http(s) authorization URL`，不会交给系统浏览器打开。
+- 回调页面与 API 一样带 `cache-control: no-store`、`referrer-policy: no-referrer` 和
+  `default-src 'none'` 的 CSP。
 - 回调可能早于等待方到达（浏览器跳转很快），授权码/错误会被缓存，不会丢失。
 - 连接结束时回环服务器必然关闭；授权失败不重试其他传输（未授权前没有意义）。
 - 目前只支持动态注册的服务器；预注册 client 不在范围内。

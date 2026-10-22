@@ -3,6 +3,7 @@ import { COMPACT_RATIO, type Agent } from "./agent.js";
 import type { PermissionManager } from "./permissions.js";
 import type { HookManager } from "./hooks.js";
 import type { McpManager } from "./mcp.js";
+import { loadMcpConfig, mcpConfigPath, revokeProjectMcpTrust, trustProjectMcp, untrustedProjectMcp } from "./mcp.js";
 import type { SlashCommand } from "./commands.js";
 import { knownModelNames } from "./llm.js";
 import { createSession, listSessions, loadSession, renderSessionMarkdown, renameSession, searchSessions, tagSession } from "./session.js";
@@ -72,7 +73,7 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       return {
         kind: "ok",
         text: [
-          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks [trust|revoke] · /sessions [--cwd <dir>] [--title <词>] [--tag <tag>] [N] · /search [-r] <term> · /resume <id> · /fork [N] [名称] · /rename <名称> · /tag [+<tag> | -<tag> | clear] · /export [md|json] [路径] · /todos · /cron [add <分> <时> <日> <月> <周> <提示词> | on|off|run|rm <id>] · /undo [-y] [--force] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
+          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp [trust|revoke] · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks [trust|revoke] · /sessions [--cwd <dir>] [--title <词>] [--tag <tag>] [N] · /search [-r] <term> · /resume <id> · /fork [N] [名称] · /rename <名称> · /tag [+<tag> | -<tag> | clear] · /export [md|json] [路径] · /todos · /cron [add <分> <时> <日> <月> <周> <提示词> | on|off|run|rm <id>] · /undo [-y] [--force] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
           "file refs: @path/to/file inlines the file; Ctrl+V pastes a clipboard image",
           custom ? `custom commands: ${custom}` : "",
         ]
@@ -135,14 +136,38 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       }
     }
     case "mcp": {
-      if (!mcp) return { kind: "ok", text: "MCP is disabled or no servers configured (~/.node-agent/mcp.json, .mcp.json)" };
-      if (!mcp.statuses.length) return { kind: "ok", text: "no MCP servers configured" };
-      return {
-        kind: "ok",
-        text: mcp.statuses
-          .map((s) => `${s.connected ? "✓" : "✗"} ${s.name}: ${s.connected ? `${s.toolCount} tools${s.kind ? ` (${s.kind})` : ""}` : s.error}`)
-          .join("\n"),
-      };
+      if (rest[0] === "trust") {
+        const trusted = await trustProjectMcp(cwd);
+        if (!trusted) return { kind: "error", text: `no project MCP config at ${mcpConfigPath("project", cwd)}` };
+        if (!mcp) return { kind: "ok", text: `trusted ${trusted.file} — MCP is disabled for this run (--no-mcp)` };
+        await mcp.reload(await loadMcpConfig(cwd));
+        const connected = mcp.statuses.filter((s) => s.connected).length;
+        return {
+          kind: "ok",
+          text: `trusted project MCP config for this workspace — ${connected}/${mcp.statuses.length} server(s) connected (re-approval is required after the file changes)`,
+        };
+      }
+      if (rest[0] === "revoke") {
+        const removed = await revokeProjectMcpTrust(cwd);
+        if (!removed) return { kind: "ok", text: "this workspace has no MCP trust to revoke" };
+        await mcp?.reload(await loadMcpConfig(cwd));
+        return { kind: "ok", text: "revoked project MCP trust; project servers will not connect" };
+      }
+      const untrusted = await untrustedProjectMcp(cwd);
+      const warning = untrusted
+        ? `⚠ project MCP servers not connected (untrusted): ${untrusted.file} — run /mcp trust to approve`
+        : "";
+      if (!mcp) {
+        return {
+          kind: "ok",
+          text: warning || "MCP is disabled or no servers configured (~/.node-agent/mcp.json, .mcp.json)",
+        };
+      }
+      const lines = mcp.statuses.map(
+        (s) => `${s.connected ? "✓" : "✗"} ${s.name}: ${s.connected ? `${s.toolCount} tools${s.kind ? ` (${s.kind})` : ""}` : s.error}`,
+      );
+      if (!lines.length && !warning) return { kind: "ok", text: "no MCP servers configured" };
+      return { kind: "ok", text: [warning, ...lines].filter(Boolean).join("\n") };
     }
     case "lsp": {
       const mgr = getLspManager();

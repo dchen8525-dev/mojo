@@ -202,10 +202,21 @@ describe("SSRF guard", () => {
       "::ffff:127.0.0.1",
       "::ffff:7f00:1",
       "2001:db8::1",
+      // Deprecated forms that still decode to loopback on some stacks.
+      "::7f00:1",
+      "::ffff:0:7f00:1",
+      "0:0:0:0:0:0:7f00:1",
     ]) {
       expect(isBlockedAddress(ip), ip).toBe(true);
     }
-    for (const ip of ["8.8.8.8", "1.1.1.1", "93.184.216.34", "172.32.0.1", "2606:4700:4700::1111"]) {
+    for (const ip of [
+      "8.8.8.8",
+      "1.1.1.1",
+      "93.184.216.34",
+      "172.32.0.1",
+      "2606:4700:4700::1111",
+      "::ffff:808:808",
+    ]) {
       expect(isBlockedAddress(ip), ip).toBe(false);
     }
   });
@@ -221,8 +232,30 @@ describe("SSRF guard", () => {
       "http://metadata.google.internal/",
       "http://127.0.0.1/",
       "http://[::1]/",
+      // Numeric and compressed IPv4 spellings the URL parser normalizes.
+      "http://2130706433/",
+      "http://0x7f.1/",
+      "http://0177.0.0.1/",
+      "http://127.1/",
+      // IPv4-compatible / translated IPv6 forms must not slip past the guard.
+      "http://[::7f00:1]/",
+      "http://[::ffff:0:7f00:1]/",
     ]) {
       await expect(assertPublicUrl(url), url).rejects.toThrow();
+    }
+  });
+
+  it("honours an already-aborted turn without opening a request", async () => {
+    const spy = vi.fn();
+    const orig = globalThis.fetch;
+    globalThis.fetch = spy as never;
+    try {
+      const r = await webFetchTool.execute({ url: "https://example.com/" }, { ...ctx, signal: AbortSignal.abort() });
+      expect(r.isError).toBe(true);
+      expect(r.content).toMatch(/aborted/);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = orig;
     }
   });
 

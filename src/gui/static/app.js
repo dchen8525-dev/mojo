@@ -2225,11 +2225,16 @@ function renderMcp() {
   const list = $("#mcp-list");
   list.replaceChildren();
   const off = !!mcpData.disabled;
+  const untrusted = mcpData.untrustedProject;
   $("#mcp-note").textContent = off
     ? "本次以 --no-mcp 启动：服务器不会连接，也无法在这里保存或重连。"
-    : "项目 .mcp.json 中的同名服务器会覆盖全局配置。保存后会自动重连。";
+    : untrusted
+      ? `项目 MCP 配置尚未信任，其中的服务器不会连接：${untrusted.file}。确认来源可信后点击“信任项目配置”。`
+      : "项目 .mcp.json 中的同名服务器会覆盖全局配置。保存后会自动重连。";
   $("#mcp-add").disabled = off;
   $("#mcp-reload").disabled = off;
+  $("#mcp-trust").classList.toggle("hidden", !untrusted || off);
+  $("#mcp-trust").disabled = off;
 
   const servers = Array.isArray(mcpData.servers) ? mcpData.servers : [];
   if (!servers.length) {
@@ -2246,6 +2251,7 @@ function renderMcp() {
     if (server.url) name.appendChild(el("span", "profile-badge", "远程"));
     if (server.oauth) name.appendChild(el("span", "profile-badge", "OAuth"));
     if (server.disabled) name.appendChild(el("span", "profile-badge danger", "停用"));
+    if (server.untrusted) name.appendChild(el("span", "profile-badge danger", "未信任"));
     if (server.shadowed) name.appendChild(el("span", "profile-badge", "被覆盖"));
     main.appendChild(name);
     main.appendChild(el("div", "profile-meta", server.url || [server.command, ...(server.args ?? [])].join(" ")));
@@ -2306,6 +2312,22 @@ async function deleteMcpServer(server) {
     toast(r.reloadError ? `已删除；重连失败: ${r.reloadError}` : `已删除 ${server.name}`, !!r.reloadError);
   } catch (err) {
     toast("删除失败: " + (err instanceof Error ? err.message : String(err)), true);
+  }
+}
+
+async function trustMcpProject() {
+  const btn = $("#mcp-trust");
+  btn.disabled = true;
+  try {
+    const r = await api("/api/mcp/trust", {});
+    if (r.error) return toast("信任失败: " + manageError(r.error), true);
+    mcpData = r;
+    renderMcp();
+    toast(r.reloadError ? `已信任；重连失败: ${r.reloadError}` : "已信任项目 MCP 配置并重连", !!r.reloadError);
+  } catch (err) {
+    toast("信任失败: " + (err instanceof Error ? err.message : String(err)), true);
+  } finally {
+    btn.disabled = !!mcpData.disabled;
   }
 }
 
@@ -2496,6 +2518,7 @@ $("#mcp-cancel").onclick = () => {
   mcpEditing = null;
 };
 $("#mcp-reload").onclick = () => void reloadMcpServers();
+$("#mcp-trust").onclick = () => void trustMcpProject();
 
 $("#mcp-save").onclick = async () => {
   if (mcpData.disabled) return toast("本次以 --no-mcp 启动，无法保存", true);

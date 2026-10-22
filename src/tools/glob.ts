@@ -2,7 +2,7 @@ import { glob } from "glob";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { Tool, ToolContext, ToolResult } from "../types.js";
-import { relPath, str, num, truncate, describeError } from "./utils.js";
+import { relPath, resolvePath, str, num, truncate, describeError, isSensitivePath } from "./utils.js";
 
 const IGNORED_DIRS = ["node_modules", ".git", "dist", "build", "out", ".next", "target", "__pycache__", ".venv", "vendor"];
 
@@ -26,9 +26,19 @@ export const globTool: Tool = {
   },
   async execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     try {
-      const searchDir = input.path ? path.resolve(ctx.cwd, String(input.path)) : ctx.cwd;
+      const pattern = str(input, "pattern");
+      if (path.isAbsolute(pattern) || /(^|[\\/])\.\.([\\/]|$)/.test(pattern) || pattern.startsWith("~")) {
+        return { content: `Error: pattern "${pattern}" must be relative to the search directory.`, isError: true };
+      }
+      const searchDir = input.path ? resolvePath(ctx.cwd, String(input.path)) : ctx.cwd;
+      if (isSensitivePath(searchDir)) {
+        return { content: `Error: refusing to scan "${searchDir}" because it is inside a credential store.`, isError: true };
+      }
+      if (isSensitivePath(await fs.realpath(searchDir))) {
+        return { content: `Error: refusing to scan "${searchDir}" (resolves into a credential store).`, isError: true };
+      }
       const limit = Math.min(1000, Math.max(1, num(input, "limit") ?? 200));
-      const matches = await glob(str(input, "pattern"), {
+      const matches = await glob(pattern, {
         cwd: searchDir,
         ignore: IGNORED_DIRS.map((d) => `${d}/**`),
         dot: false,

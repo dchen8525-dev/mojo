@@ -1,9 +1,11 @@
 import { promises as fs } from "node:fs";
 import type { Tool, ToolContext, ToolResult } from "../types.js";
-import { relPath, resolvePath, str, num, describeError } from "./utils.js";
+import { relPath, resolvePath, str, num, describeError, isSensitivePath } from "./utils.js";
 import { boundedResult } from "../artifacts.js";
 
 const MAX_LINES = 2000;
+/** A read larger than this is a mistake or an exfiltration attempt: page it. */
+const MAX_READ_BYTES = 16 * 1024 * 1024;
 
 /**
  * Best-effort binary detection for read_file. A NUL byte is a strong signal,
@@ -42,9 +44,32 @@ export const readFileTool: Tool = {
   async execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     try {
       const abs = resolvePath(ctx.cwd, str(input, "path"));
+      if (isSensitivePath(abs)) {
+        return {
+          content: `Error: refusing to read "${abs}" because it is inside a credential store. Ask the user for the specific value instead.`,
+          isError: true,
+        };
+      }
       const stat = await fs.stat(abs);
       if (stat.isDirectory()) {
         return { content: `Error: "${abs}" is a directory. Use glob_files instead.`, isError: true };
+      }
+      if (!stat.isFile()) {
+        return { content: `Error: "${abs}" is not a regular file.`, isError: true };
+      }
+      if (stat.size > MAX_READ_BYTES) {
+        return {
+          content:
+            `Error: "${abs}" is ${(stat.size / 1024 / 1024).toFixed(1)} MB, above the ` +
+            `${MAX_READ_BYTES / 1024 / 1024} MB read cap. Use grep to locate the relevant lines, or read with offset/limit.`,
+          isError: true,
+        };
+      }
+      // A symlink inside the workspace can point into ~/.ssh; the lexical
+      // check above cannot see that, so re-check the resolved target.
+      const real = await fs.realpath(abs);
+      if (isSensitivePath(real)) {
+        return { content: `Error: refusing to read "${abs}" (resolves into a credential store).`, isError: true };
       }
       const buf = await fs.readFile(abs);
       if (looksBinary(buf)) {

@@ -8,5 +8,8 @@ export function systemReminder(body: string, attrs: Record<string, string> = {})
   const open = Object.entries(attrs)
     .map(([k, v]) => ` ${k}="${v.replace(/"/g, "&quot;")}"`)
     .join("");
-  return `<system-reminder${open}>\n${body}\n</system-reminder>`;
+  // Bodies can embed tool output / subagent reports; a literal closing tag
+  // would end the reminder early and let the rest read as user content.
+  const safe = body.replace(/<\/system-reminder\s*>/gi, "&lt;/system-reminder>");
+  return `<system-reminder${open}>\n${safe}\n</system-reminder>`;
 }

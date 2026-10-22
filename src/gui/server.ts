@@ -28,6 +28,8 @@ import {
   deleteMcpServer,
   loadMcpConfigScoped,
   saveMcpServer,
+  trustProjectMcp,
+  untrustedProjectMcp,
   type McpScope,
   type McpServerConfig,
   type McpServerStatus,
@@ -140,10 +142,16 @@ const SECURITY_HEADERS: Record<string, string> = {
   "content-security-policy":
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
   "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
   "referrer-policy": "no-referrer",
+  // Revalidate on every load: version upgrades must not leave a stale app.js
+  // cached against a newer backend.
+  "cache-control": "no-cache",
 };
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+
+const PERMISSION_DECISIONS = new Set<PermissionDecision>(["yes", "no", "session", "project", "always", "always_deny"]);
 
 async function readStatic(name: string): Promise<Buffer> {
   // dist/gui/static after a build, src/gui/static under tsx, plus a fallback
@@ -177,7 +185,13 @@ function purifyPath(): string {
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
   const data = JSON.stringify(body);
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(data) });
+  res.writeHead(status, {
+    "content-type": "application/json; charset=utf-8",
+    "content-length": Buffer.byteLength(data),
+    // Transcripts and configs are per-user state; never leave them in a
+    // browser or intermediary cache.
+    "cache-control": "no-store",
+  });
   res.end(data);
 }
 
@@ -305,6 +319,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
 
   async function mcpSnapshot() {
     const scoped = await loadMcpConfigScoped(project.cwd, home);
+    const untrusted = await untrustedProjectMcp(project.cwd, home);
     const statusByName = new Map((project.mcp?.statuses ?? []).map((s) => [s.name, s]));
     const projectNames = new Set(Object.keys(scoped.project));
     const servers: Array<{
@@ -321,6 +336,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       disabledTools: string[];
       disabled: boolean;
       shadowed: boolean;
+      untrusted: boolean;
       status: "connected" | "failed" | "stopped" | "disabled";
       toolCount: number;
       kind: string;
@@ -343,6 +359,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
           disabledTools: cfg.disabledTools ?? [],
           disabled: !!cfg.disabled,
           shadowed: scope === "global" && projectNames.has(name),
+          untrusted: scope === "project" && !!untrusted,
           status: cfg.disabled || opts.mcpDisabled ? "disabled" : status ? (status.connected ? "connected" : "failed") : "stopped",
           toolCount: status?.toolCount ?? 0,
           kind: status?.kind ?? (cfg.url ? (cfg.type ?? "http") : "stdio"),
@@ -353,7 +370,11 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
     add("project", scoped.project);
     add("global", scoped.global);
     servers.sort((a, b) => a.name.localeCompare(b.name) || (a.scope === "project" ? -1 : 1));
-    return { servers, disabled: !!opts.mcpDisabled };
+    return {
+      servers,
+      disabled: !!opts.mcpDisabled,
+      untrustedProject: untrusted ? { file: untrusted.file } : null,
+    };
   }
 
   function permissionSnapshot() {
@@ -525,41 +546,58 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
 
   /** Mirror of the Ink onSubmit dispatch: custom command / slash command / prompt. */
   async function handleChat(text: string, images?: import("../types.js").ImageBlockParam[]): Promise<void> {
-    const trimmed = text.trim();
-    let promptText = trimmed;
-    let display = trimmed;
-
-    if (trimmed.startsWith("/")) {
-      const [cmd] = trimmed.slice(1).split(/\s+/);
-      const custom = project.customCommands.get(cmd);
-      if (custom) {
-        const rest = trimmed.slice(1).split(/\s+/).slice(1);
-        promptText = renderCommand(custom.template, rest);
-        display = `${trimmed}  (/${cmd})`;
-      } else {
-        // A built-in slash command sent to the chat box: run it as a command.
-        const r = await runCommand(trimmed);
-        if (r.quit) opts.onQuit();
-        return;
-      }
-    }
-
-    const expanded = await expandFileReferences(promptText, project.agent.cwd);
-    if (expanded.files.length) hub.broadcast("system", { text: `@ referenced: ${expanded.files.join(", ")}` });
-
-    const turnId = ++runtime.turnId;
-    const turn: UiTurn = { turnId, text: "", thinking: "", tools: [] };
+    // Claim the single-turn slot before the first await. The route checks
+    // `busy` and then fires this function without awaiting it, so a second
+    // rapid POST would otherwise slip through while file references expand
+    // and start a concurrent turn on the same agent.
     runtime.busy = true;
-    runtime.liveTurn = turn;
-    runtime.controller = new AbortController();
-    hub.broadcast("turn_start", { turnId, user: display, images: images?.length ?? 0 });
-
+    runtime.liveTurn = null;
+    const controller = new AbortController();
+    runtime.controller = controller;
+    let turnId = 0;
     try {
-      const finalText = await project.agent.chat(expanded.text, runtime.controller.signal, buildEvents(turn), images);
-      hub.broadcast("turn_end", { turnId, text: finalText });
+      const trimmed = text.trim();
+      let promptText = trimmed;
+      let display = trimmed;
+
+      if (trimmed.startsWith("/")) {
+        const [cmd] = trimmed.slice(1).split(/\s+/);
+        const custom = project.customCommands.get(cmd);
+        if (custom) {
+          const rest = trimmed.slice(1).split(/\s+/).slice(1);
+          promptText = renderCommand(custom.template, rest);
+          display = `${trimmed}  (/${cmd})`;
+        } else {
+          // A built-in slash command sent to the chat box: run it as a command.
+          const r = await runCommand(trimmed);
+          if (r.quit) opts.onQuit();
+          return;
+        }
+      }
+
+      const expanded = await expandFileReferences(promptText, project.agent.cwd);
+      if (expanded.files.length) hub.broadcast("system", { text: `@ referenced: ${expanded.files.join(", ")}` });
+
+      turnId = ++runtime.turnId;
+      const turn: UiTurn = { turnId, text: "", thinking: "", tools: [] };
+      runtime.liveTurn = turn;
+      hub.broadcast("turn_start", { turnId, user: display, images: images?.length ?? 0 });
+
+      try {
+        const finalText = await project.agent.chat(expanded.text, controller.signal, buildEvents(turn), images);
+        hub.broadcast("turn_end", { turnId, text: finalText });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        hub.broadcast("turn_error", { turnId, message: msg === "aborted" ? "" : msg, aborted: msg === "aborted" });
+      }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      hub.broadcast("turn_error", { turnId, message: msg === "aborted" ? "" : msg, aborted: msg === "aborted" });
+      // Failures before turn_start (e.g. unreadable @ references) would
+      // otherwise vanish into an unhandled rejection with the UI waiting.
+      hub.broadcast("turn_error", {
+        turnId,
+        message: err instanceof Error ? err.message : String(err),
+        aborted: false,
+      });
     } finally {
       runtime.busy = false;
       runtime.liveTurn = null;
@@ -604,19 +642,31 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       }
       if (method === "GET" && (p === "/icon.png" || p === "/favicon.ico")) {
         const name = p === "/favicon.ico" ? "icon.ico" : "icon.png";
-        res.writeHead(200, { "content-type": MIME[path.extname(name)], "x-content-type-options": "nosniff" });
+        res.writeHead(200, {
+          "content-type": MIME[path.extname(name)],
+          "x-content-type-options": "nosniff",
+          "cache-control": "no-cache",
+        });
         res.end(await cachedStatic(name));
         return;
       }
       if (method === "GET" && (p === "/app.js" || p === "/style.css")) {
         const name = p.slice(1);
-        res.writeHead(200, { "content-type": MIME[path.extname(name)] ?? "text/plain", "x-content-type-options": "nosniff" });
+        res.writeHead(200, {
+          "content-type": MIME[path.extname(name)] ?? "text/plain",
+          "x-content-type-options": "nosniff",
+          "cache-control": "no-cache",
+        });
         res.end(await cachedStatic(name));
         return;
       }
       if (method === "GET" && (p === "/vendor/marked.min.js" || p === "/vendor/purify.min.js")) {
         const file = p.endsWith("purify.min.js") ? purifyPath() : markedPath();
-        res.writeHead(200, { "content-type": MIME[".js"], "x-content-type-options": "nosniff" });
+        res.writeHead(200, {
+          "content-type": MIME[".js"],
+          "x-content-type-options": "nosniff",
+          "cache-control": "no-cache",
+        });
         res.end(await fs.readFile(file));
         return;
       }
@@ -780,8 +830,13 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
 
       if (p === "/api/permission") {
         const id = typeof body.id === "string" ? body.id : "";
-        const decision = body.decision as PermissionDecision;
-        const ok = runtime.respond(id, decision);
+        const decision = body.decision;
+        // PermissionsManager persists anything that is neither yes/no as an
+        // "always allow" rule, so an unknown wire value must never reach it.
+        if (typeof decision !== "string" || !PERMISSION_DECISIONS.has(decision as PermissionDecision)) {
+          return sendJson(res, 400, { error: "invalid decision" });
+        }
+        const ok = runtime.respond(id, decision as PermissionDecision);
         return sendJson(res, ok ? 200 : 404, { ok });
       }
 
@@ -869,7 +924,12 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
         if (!name) return sendJson(res, 400, { error: "missing name" });
         if (!scope) return sendJson(res, 400, { error: "scope must be global or project" });
         try {
+          // Only extend trust when the file was already trusted (or absent):
+          // adding one server must not bless other entries a repository
+          // planted in an untrusted .mcp.json.
+          const wasTrusted = scope !== "project" || (await untrustedProjectMcp(project.cwd, home)) === null;
           await saveMcpServer(project.cwd, scope, name, body.config, home);
+          if (scope === "project" && wasTrusted) await trustProjectMcp(project.cwd, home);
         } catch (err) {
           return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
         }
@@ -890,12 +950,31 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
         if (!name) return sendJson(res, 400, { error: "missing name" });
         if (!scope) return sendJson(res, 400, { error: "scope must be global or project" });
         let deleted: boolean;
+        let wasTrusted = false;
         try {
+          if (scope === "project") wasTrusted = (await untrustedProjectMcp(project.cwd, home)) === null;
           deleted = await deleteMcpServer(project.cwd, scope, name, home);
+          // Deleting an entry from a trusted file should not revoke trust for
+          // the servers that remain.
+          if (deleted && scope === "project" && wasTrusted) await trustProjectMcp(project.cwd, home);
         } catch (err) {
           return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
         }
         if (!deleted) return sendJson(res, 404, { error: "server not found in that scope" });
+        let reloadError: string | null = null;
+        try {
+          await opts.reloadMcp?.();
+        } catch (err) {
+          reloadError = err instanceof Error ? err.message : String(err);
+        }
+        return sendJson(res, 200, { ok: true, reloadError, ...(await mcpSnapshot()) });
+      }
+
+      if (p === "/api/mcp/trust") {
+        if (runtime.busy || runtime.commandBusy || runtime.switching) return sendJson(res, 409, { error: "busy" });
+        if (opts.mcpDisabled) return sendJson(res, 400, { error: "MCP is disabled for this run (--no-mcp)" });
+        const trusted = await trustProjectMcp(project.cwd, home);
+        if (!trusted) return sendJson(res, 404, { error: "no project MCP config at .mcp.json" });
         let reloadError: string | null = null;
         try {
           await opts.reloadMcp?.();

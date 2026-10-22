@@ -1,3 +1,6 @@
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ContentBlock, ToolUseBlock } from "../src/types.js";
 
@@ -110,5 +113,51 @@ describe("task_output", () => {
     const first = subagentTasks.drainCompleted();
     expect(first.map((t) => t.id)).toEqual([id]);
     expect(subagentTasks.drainCompleted()).toEqual([]);
+  });
+});
+
+describe("subagent hardening", () => {
+  it("keeps descriptions single-line and bounded", async () => {
+    h.turns = [textTurn("report")];
+    await taskTool.execute({ description: "line one\nline two ".repeat(20), prompt: "p", run_in_background: true }, ctx);
+    await subagentTasks.whenDone("sub-1");
+    const t = subagentTasks.get("sub-1")!;
+    expect(t.description).not.toContain("\n");
+    expect(t.description.length).toBeLessThanOrEqual(60);
+  });
+
+  it("scopes tasks and reports to the session that spawned them", async () => {
+    const id = subagentTasks.start("t", "research", async () => "secret-report", "session-a");
+    await subagentTasks.whenDone(id);
+    expect(subagentTasks.list("session-b")).toEqual([]);
+    expect(subagentTasks.get(id, "session-b")).toBeUndefined();
+    expect(subagentTasks.drainCompleted("session-b")).toEqual([]);
+    expect(subagentTasks.drainCompleted("session-a").map((t) => t.id)).toEqual([id]);
+
+    const leaked = await taskOutputTool.execute({ id }, { sessionId: "session-b" } as never);
+    expect(leaked.isError).toBe(true);
+  });
+
+  it("enforces read-before-edit inside a worker subagent", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-sub-worker-"));
+    try {
+      await fs.writeFile(path.join(dir, "a.txt"), "precious", "utf8");
+      h.turns = [
+        {
+          content: [{ type: "tool_use", id: "w1", name: "write_file", input: { path: "a.txt", content: "clobbered" } } as ContentBlock],
+          inputTokens: 10,
+          outputTokens: 5,
+        },
+        textTurn("done"),
+      ];
+      const r = await taskTool.execute({ description: "impl", prompt: "p", mode: "worker" }, {
+        ...ctx,
+        cwd: dir,
+      } as never);
+      expect(r.isError).toBeFalsy();
+      expect(await fs.readFile(path.join(dir, "a.txt"), "utf8")).toBe("precious");
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 });

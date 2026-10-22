@@ -65,6 +65,7 @@ export class SseHub {
 
   closeAll(): void {
     if (this.heartbeat) clearInterval(this.heartbeat);
+    this.heartbeat = undefined;
     for (const res of this.clients) res.end();
     this.clients.clear();
   }

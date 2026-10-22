@@ -1,17 +1,41 @@
 import { promises as fs } from "node:fs";
+import { request as httpRequest } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { McpOAuthFlow, mcpAuthDir, mcpAuthFilePath } from "../src/mcpAuth.js";
 
+/** GET with a caller-chosen Host header (fetch forbids overriding it). */
+function rawGet(url: string, host: string): Promise<{ status: number; body: string }> {
+  const target = new URL(url);
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      {
+        hostname: target.hostname,
+        port: target.port,
+        path: `${target.pathname}${target.search}`,
+        headers: { host },
+      },
+      (res) => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => (body += chunk));
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
+      },
+    );
+    req.on("error", reject);
+    req.end();
+  });
+}
+
 async function tempDir(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "mojo-mcp-auth-"));
 }
 
-function startFlow(dir: string, extra: { timeoutMs?: number } = {}): Promise<McpOAuthFlow> {
+function startFlow(dir: string, extra: { timeoutMs?: number; serverUrl?: string } = {}): Promise<McpOAuthFlow> {
   return McpOAuthFlow.start({
     serverName: "demo",
-    serverUrl: "https://mcp.example/mcp",
+    serverUrl: extra.serverUrl ?? "https://mcp.example/mcp",
     authDir: dir,
     openUrl: () => {},
     log: () => {},
@@ -54,6 +78,34 @@ describe("MCP OAuth credential store", () => {
       await fs.rm(dir, { recursive: true, force: true });
     }
   });
+
+  it("drops credentials when the server URL changes", async () => {
+    const dir = await tempDir();
+    try {
+      const first = await startFlow(dir);
+      await first.provider.saveTokens({ access_token: "token-1", token_type: "Bearer" });
+      await first.provider.saveClientInformation!({ client_id: "client-1", redirect_uris: [first.redirectUrl] });
+      await first.close();
+
+      // Reusing a bearer token (or registration) minted for another endpoint
+      // would leak it to whatever host now sits at this server's name.
+      const moved = await startFlow(dir, { serverUrl: "https://other.example/mcp" });
+      expect(await moved.provider.tokens()).toBeUndefined();
+      expect(await moved.provider.clientInformation()).toBeUndefined();
+      await moved.close();
+
+      const back = await startFlow(dir);
+      expect(await back.provider.tokens()).toBeUndefined();
+      await back.provider.saveTokens({ access_token: "token-2", token_type: "Bearer" });
+      await back.close();
+
+      const same = await startFlow(dir);
+      expect(await same.provider.tokens()).toMatchObject({ access_token: "token-2" });
+      await same.close();
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("MCP OAuth loopback callback", () => {
@@ -71,8 +123,69 @@ describe("MCP OAuth loopback callback", () => {
       const pending = flow.waitForCode();
       const ok = await fetch(`${flow.redirectUrl}?state=${encodeURIComponent(state)}&code=code-1`);
       expect(ok.status).toBe(200);
+      expect(ok.headers.get("cache-control")).toBe("no-store");
       expect(await ok.text()).toContain("授权完成");
       await expect(pending).resolves.toBe("code-1");
+    } finally {
+      await flow.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a callback sent under a foreign Host header (DNS rebinding)", async () => {
+    const dir = await tempDir();
+    const flow = await startFlow(dir);
+    try {
+      const state = String(await flow.provider.state!());
+      const evil = await rawGet(`${flow.redirectUrl}?state=${encodeURIComponent(state)}&code=evil`, "attacker.example");
+      expect(evil.status).toBe(400);
+      expect(evil.body).toContain("invalid host");
+      // The rejected attempt must not consume the state of the real flow.
+      const genuine = await rawGet(
+        `${flow.redirectUrl}?state=${encodeURIComponent(state)}&code=code-1`,
+        new URL(flow.redirectUrl).host,
+      );
+      expect(genuine.status).toBe(200);
+      await expect(flow.waitForCode()).resolves.toBe("code-1");
+    } finally {
+      await flow.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not accept a replayed callback after the code was delivered", async () => {
+    const dir = await tempDir();
+    const flow = await startFlow(dir);
+    try {
+      const state = String(await flow.provider.state!());
+      const first = await fetch(`${flow.redirectUrl}?state=${encodeURIComponent(state)}&code=code-1`);
+      expect(first.status).toBe(200);
+      const replay = await fetch(`${flow.redirectUrl}?state=${encodeURIComponent(state)}&code=attacker`);
+      expect(replay.status).toBe(400);
+      expect(await replay.text()).toContain("already completed");
+      await expect(flow.waitForCode()).resolves.toBe("code-1");
+    } finally {
+      await flow.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to open a non-http(s) authorization URL", async () => {
+    const dir = await tempDir();
+    const opened: string[] = [];
+    const flow = await McpOAuthFlow.start({
+      serverName: "demo",
+      serverUrl: "https://mcp.example/mcp",
+      authDir: dir,
+      openUrl: (url) => opened.push(url),
+      log: () => {},
+      timeoutMs: 2_000,
+    });
+    try {
+      expect(() =>
+        flow.provider.redirectToAuthorization!(new URL("file:///C:/Windows/System32/calc.exe")),
+      ).toThrow(/non-http\(s\)/);
+      expect(opened).toEqual([]);
     } finally {
       await flow.close();
       await fs.rm(dir, { recursive: true, force: true });

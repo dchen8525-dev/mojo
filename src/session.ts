@@ -44,6 +44,28 @@ function fileFor(id: string) {
 /** Session ids are hex; public entry points reject anything path-like. */
 const ID_RE = /^[0-9a-f]{4,64}$/;
 
+/** Longest user-supplied regex we compile; keeps backtracking blowups bounded. */
+const MAX_SEARCH_REGEX = 200;
+
+function isMessageRecord(value: unknown): value is MessageParam {
+  if (!value || typeof value !== "object") return false;
+  const m = value as { role?: unknown; content?: unknown };
+  return typeof m.role === "string" && (typeof m.content === "string" || Array.isArray(m.content));
+}
+
+/** Trim, dedupe and cap meta tags read from disk (the file may be hand-edited). */
+function parseTags(values: unknown[]): string[] {
+  const out: string[] = [];
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const tag = value.trim().slice(0, 24);
+    if (!tag || out.includes(tag)) continue;
+    out.push(tag);
+    if (out.length >= 8) break;
+  }
+  return out;
+}
+
 /**
  * Serialize writers per session file. Meta updates are read-modify-write:
  * without this, a concurrent append landing between the read and the rewrite
@@ -106,6 +128,7 @@ export async function createSession(cwd: string): Promise<{ id: string; meta: Se
 }
 
 export async function appendMessages(id: string, messages: MessageParam[]) {
+  if (!ID_RE.test(id)) return;
   const lines = messages.map((m) => JSON.stringify({ type: "message", message: m })).join("\n");
   if (!lines) return;
   await withFileLock(fileFor(id), async () => {
@@ -120,6 +143,7 @@ export async function appendMessages(id: string, messages: MessageParam[]) {
  * markers are dropped, so callers should re-append the current model.
  */
 export async function rewriteMessages(id: string, messages: MessageParam[]) {
+  if (!ID_RE.test(id)) return;
   const file = fileFor(id);
   await withFileLock(file, async () => {
     let metaLine = "";
@@ -145,6 +169,7 @@ export async function rewriteMessages(id: string, messages: MessageParam[]) {
 
 /** Append a model marker; the last one in the file is the session's model. */
 export async function appendModel(id: string, model: string) {
+  if (!ID_RE.test(id)) return;
   await withFileLock(fileFor(id), async () => {
     await fs.appendFile(fileFor(id), JSON.stringify({ type: "model", model }) + "\n");
     invalidateSession(id);
@@ -156,6 +181,7 @@ export async function appendModel(id: string, model: string) {
  * out of `messages`, so the model never sees them.
  */
 export async function appendSubCall(id: string, call: SessionSubCall) {
+  if (!ID_RE.test(id)) return;
   await withFileLock(fileFor(id), async () => {
     await fs.appendFile(fileFor(id), JSON.stringify({ type: "subcall", ...call }) + "\n", "utf8");
     invalidateSession(id);
@@ -286,13 +312,20 @@ interface ParsedSession {
 
 /** Single-pass parse of a session file; updatedAt comes from the file mtime. */
 async function parseSessionFile(full: string): Promise<ParsedSession | null> {
+  // The filename is the id every public API uses; a meta line claiming another
+  // id must not make the sidebar rename or delete someone else's file.
+  const fileId = path.basename(full, ".jsonl");
+  if (!ID_RE.test(fileId)) return null;
   let stat;
   try {
-    stat = await fs.stat(full);
+    stat = await fs.lstat(full);
   } catch {
     parseCache.delete(full);
     return null;
   }
+  // Sessions are regular files. Following a symlink (to /dev/zero or a huge
+  // log elsewhere) must not turn a sidebar refresh into an unbounded read.
+  if (!stat.isFile()) return null;
   const cached = parseCache.get(full);
   if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
     parseCache.delete(full); // LRU touch
@@ -315,20 +348,25 @@ async function parseSessionFile(full: string): Promise<ParsedSession | null> {
     try {
       const obj = JSON.parse(line);
       if (obj.type === "meta") {
+        if (typeof obj.cwd !== "string" || typeof obj.startedAt !== "string") continue;
         const todos = sanitizeTodos(obj.todos);
         meta = {
-          id: obj.id,
+          id: fileId,
           cwd: obj.cwd,
           startedAt: obj.startedAt,
           updatedAt: new Date(mtimeMs).toISOString(),
-          ...(typeof obj.title === "string" && obj.title ? { title: obj.title } : {}),
-          ...(Array.isArray(obj.tags) ? { tags: obj.tags.filter((t: unknown) => typeof t === "string" && t.trim()).slice(0, 8) } : {}),
+          ...(typeof obj.title === "string" && obj.title.trim()
+            ? { title: obj.title.trim().slice(0, 80) }
+            : {}),
+          ...(Array.isArray(obj.tags) ? { tags: parseTags(obj.tags) } : {}),
           ...(typeof obj.forkedFrom === "string" && obj.forkedFrom ? { forkedFrom: obj.forkedFrom } : {}),
           ...(todos?.length ? { todos } : {}),
         };
-      } else if (obj.type === "model" && meta) meta.model = obj.model; // last marker wins
-      else if (obj.type === "message" && meta) messages.push(obj.message);
-      else if (obj.type === "subcall" && typeof obj.toolUseId === "string") {
+      } else if (obj.type === "model" && meta && typeof obj.model === "string") {
+        meta.model = obj.model; // last marker wins
+      } else if (obj.type === "message" && meta && isMessageRecord(obj.message)) {
+        messages.push(obj.message);
+      } else if (obj.type === "subcall" && typeof obj.toolUseId === "string") {
         subCalls.push({
           toolUseId: obj.toolUseId,
           name: typeof obj.name === "string" ? obj.name : "",
@@ -397,6 +435,7 @@ export async function searchSessions(
 ): Promise<SessionHit[]> {
   const q = query.trim();
   if (!q) return [];
+  if (opts.regex && q.length > MAX_SEARCH_REGEX) return []; // no useful pattern is this long
   const limit = opts.limit ?? 15;
   let re: RegExp;
   try {
@@ -435,8 +474,10 @@ export async function searchSessions(
 /** Flatten a message's content blocks into searchable plain text. */
 function messageToPlainText(content: MessageParam["content"]): string {
   if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
   const parts: string[] = [];
   for (const b of content as Array<{ type: string; text?: string; name?: string; input?: unknown; content?: unknown }>) {
+    if (!b || typeof b !== "object") continue;
     if (b.type === "text" && b.text) parts.push(b.text);
     else if (b.type === "tool_use") parts.push(`${b.name ?? ""} ${safeJson(b.input)}`);
     else if (b.type === "tool_result") {

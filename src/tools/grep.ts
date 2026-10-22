@@ -3,12 +3,13 @@ import { glob } from "glob";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { Tool, ToolContext, ToolResult } from "../types.js";
-import { relPath, resolvePath, str, num, describeError } from "./utils.js";
+import { relPath, resolvePath, str, num, describeError, isSensitivePath } from "./utils.js";
 import { boundedResult } from "../artifacts.js";
 
 const IGNORED_DIRS = ["node_modules", ".git", "dist", "build", "out", ".next", "target", "__pycache__", ".venv", "vendor"];
 const MAX_FILES_SCANNED = 2000;
 const MAX_LINE_CHARS = 300;
+const MAX_PATTERN_CHARS = 500;
 
 /** null = not probed yet; true/false once `rg --version` has answered. */
 let rgAvailable: boolean | null = null;
@@ -127,12 +128,27 @@ export const grepTool: Tool = {
   async execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     try {
       const pattern = str(input, "pattern");
+      if (pattern.length > MAX_PATTERN_CHARS) {
+        return { content: `Error: pattern is longer than ${MAX_PATTERN_CHARS} characters.`, isError: true };
+      }
       const re = new RegExp(pattern, input.ignore_case === true ? "i" : "");
       const limit = Math.min(500, Math.max(1, num(input, "limit") ?? 100));
       const target = input.path ? resolvePath(ctx.cwd, String(input.path)) : ctx.cwd;
+      if (isSensitivePath(target)) {
+        return { content: `Error: refusing to search "${target}" because it is inside a credential store.`, isError: true };
+      }
       const globPattern = typeof input.glob === "string" && input.glob ? input.glob : undefined;
+      if (globPattern && (path.isAbsolute(globPattern) || /(^|[\\/])\.\.([\\/]|$)/.test(globPattern))) {
+        return { content: `Error: glob "${globPattern}" must stay inside the searched directory.`, isError: true };
+      }
 
       const stat = await fs.stat(target);
+      if (!stat.isFile() && !stat.isDirectory()) {
+        return { content: `Error: "${target}" is not a regular file or directory.`, isError: true };
+      }
+      if (isSensitivePath(await fs.realpath(target))) {
+        return { content: `Error: refusing to search "${target}" (resolves into a credential store).`, isError: true };
+      }
 
       if (await probeRipgrep()) {
         const r = await rgSearch(pattern, target, {
@@ -167,6 +183,12 @@ export const grepTool: Tool = {
         if (ctx.signal?.aborted) return { content: "Search aborted.", isError: true };
         let text: string;
         try {
+          // fs.readFile follows symlinks; a repo symlink pointing at ~/.ssh
+          // would otherwise leak credentials into the hits.
+          if (isSensitivePath(await fs.realpath(file))) {
+            skipped++;
+            continue;
+          }
           const buf = await fs.readFile(file);
           if (buf.includes(0) || buf.length > 1_500_000) {
             skipped++;

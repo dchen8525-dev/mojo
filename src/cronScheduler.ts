@@ -154,7 +154,10 @@ export function createProcessRunner(opts: { home?: string; timeoutMs?: number } 
     const runsDir = cronRunsDir(home);
     await fs.mkdir(runsDir, { recursive: true, mode: 0o700 });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const logFile = path.join(runsDir, `${task.id}-${stamp}.log`);
+    // Ids come from the ledger, which users can hand-edit; never let one
+    // escape cron-runs through path separators.
+    const safeId = task.id.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 80) || "task";
+    const logFile = path.join(runsDir, `${safeId}-${stamp}.log`);
     const out = createWriteStream(logFile, { flags: "a", mode: 0o600 });
     // An unwritable log must not crash the scheduler or abort the run.
     out.on("error", () => {});

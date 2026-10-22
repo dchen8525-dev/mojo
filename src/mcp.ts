@@ -4,6 +4,7 @@ import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotoc
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -80,8 +81,14 @@ function safe(s: string): string {
 export async function loadMcpConfig(cwd: string, home: string = os.homedir()): Promise<Record<string, McpServerConfig>> {
   const scoped = await loadMcpConfigScoped(cwd, home);
   const out: Record<string, McpServerConfig> = {};
-  for (const configs of [scoped.global, scoped.project]) {
-    for (const [name, cfg] of Object.entries(configs)) {
+  for (const [name, cfg] of Object.entries(scoped.global)) {
+    if (!cfg.disabled) out[name] = cfg;
+  }
+  // A project config is repo-controlled and may spawn arbitrary commands just
+  // by opening the workspace, so it only applies after `/mcp trust` approved
+  // this exact version of the file.
+  if (!(await untrustedProjectMcp(cwd, home))) {
+    for (const [name, cfg] of Object.entries(scoped.project)) {
       if (!cfg.disabled) out[name] = cfg;
     }
   }
@@ -105,6 +112,84 @@ export async function loadMcpConfigScoped(cwd: string, home: string = os.homedir
     global: await readMcpFile(mcpConfigPath("global", cwd, home)),
     project: await readMcpFile(mcpConfigPath("project", cwd, home)),
   };
+}
+
+/* ---------------- project MCP trust ---------------- */
+
+interface McpTrustEntry {
+  digest: string;
+  approvedAt: string;
+}
+
+function mcpTrustFile(home = os.homedir()): string {
+  return path.join(home, ".node-agent", "mcp-trust.json");
+}
+
+function workspaceKey(cwd: string): string {
+  const resolved = path.resolve(cwd);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+async function readMcpTrustStore(home?: string): Promise<Record<string, McpTrustEntry>> {
+  try {
+    const raw = (await fs.readFile(mcpTrustFile(home), "utf8")).replace(/^\uFEFF/, "");
+    const parsed = JSON.parse(raw) as { workspaces?: unknown };
+    if (isRecord(parsed) && isRecord(parsed.workspaces)) {
+      return parsed.workspaces as Record<string, McpTrustEntry>;
+    }
+  } catch {
+    /* missing or corrupt: fail closed (nothing trusted) */
+  }
+  return {};
+}
+
+async function writeMcpTrustStore(store: Record<string, McpTrustEntry>, home?: string): Promise<void> {
+  const file = mcpTrustFile(home);
+  await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  await atomicWriteFile(file, `${JSON.stringify({ workspaces: store }, null, 2)}\n`, 0o600);
+}
+
+async function fileDigest(file: string): Promise<string | null> {
+  try {
+    return createHash("sha256").update(await fs.readFile(file)).digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+/** The project config exists but its current content has not been approved. */
+export async function untrustedProjectMcp(
+  cwd: string,
+  home: string = os.homedir(),
+): Promise<{ file: string; digest: string } | null> {
+  const file = mcpConfigPath("project", cwd, home);
+  const digest = await fileDigest(file);
+  if (!digest) return null;
+  const store = await readMcpTrustStore(home);
+  return store[workspaceKey(cwd)]?.digest === digest ? null : { file, digest };
+}
+
+/** Approve the exact bytes currently in the project config. */
+export async function trustProjectMcp(
+  cwd: string,
+  home: string = os.homedir(),
+): Promise<{ file: string; digest: string } | null> {
+  const file = mcpConfigPath("project", cwd, home);
+  const digest = await fileDigest(file);
+  if (!digest) return null;
+  const store = await readMcpTrustStore(home);
+  store[workspaceKey(cwd)] = { digest, approvedAt: new Date().toISOString() };
+  await writeMcpTrustStore(store, home);
+  return { file, digest };
+}
+
+export async function revokeProjectMcpTrust(cwd: string, home: string = os.homedir()): Promise<boolean> {
+  const store = await readMcpTrustStore(home);
+  const key = workspaceKey(cwd);
+  if (!(key in store)) return false;
+  delete store[key];
+  await writeMcpTrustStore(store, home);
+  return true;
 }
 
 /** Tolerant read used for connecting; corrupt files are treated as empty. */
@@ -488,11 +573,22 @@ export class McpManager {
     return this.statuses;
   }
 
+  /** Drop every connection and connect again from a fresh config snapshot. */
+  async reload(configs: Record<string, McpServerConfig>): Promise<McpServerStatus[]> {
+    await this.shutdown();
+    return this.connectAll(configs);
+  }
+
   async connect(name: string, cfg: McpServerConfig): Promise<McpServerStatus> {
     const prefix = `${NAMESPACE}${safe(name)}__`;
     let client: Client | null = null;
     let transport: Transport | null = null;
     try {
+      // Sanitization can collapse distinct server names onto one prefix.
+      // Registering both would leave tools registered under a shared prefix,
+      // and disconnecting either server would unregister the other's tools.
+      const collision = [...this.servers.values()].find((s) => s.prefix === prefix);
+      if (collision) throw new Error(`server name collides with "${collision.name}" after tool-name sanitization`);
       if (cfg.url && cfg.command) throw new Error("config has both command and url — keep only one");
       const conn = cfg.url ? await connectRemote(cfg, name, this.opts) : await connectStdio(cfg, name);
       client = conn.client;

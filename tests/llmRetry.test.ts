@@ -311,6 +311,22 @@ describe("LLM retry and stream resume", () => {
     expect(h.calls).toHaveLength(1);
   });
 
+  it("rewrites duplicate tool ids returned by a gateway", async () => {
+    setScript(() => ({
+      ...turn(""),
+      toolUses: [
+        { type: "tool_use", id: "dup", name: "read_file", input: { path: "a" } },
+        { type: "tool_use", id: "dup", name: "read_file", input: { path: "b" } },
+        { type: "tool_use", id: "", name: "glob_files", input: { pattern: "*" } },
+      ],
+      content: [],
+    }));
+    const result = await makeLLM("openai").send(messages, "S", []);
+    const ids = result.toolUses.map((t) => t.id);
+    expect(new Set(ids).size).toBe(3);
+    expect(ids[1]).toBe("dup_2");
+  });
+
   it("wakes up immediately when aborted during backoff and reports an abort", async () => {
     setScript(
       () => { throw httpError(500); },

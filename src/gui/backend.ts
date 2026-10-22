@@ -16,7 +16,7 @@ import {
 } from "../llmProfiles.js";
 import { PermissionManager, type Mode } from "../permissions.js";
 import { HookManager } from "../hooks.js";
-import { McpManager, loadMcpConfig, type McpServerStatus } from "../mcp.js";
+import { McpManager, loadMcpConfig, untrustedProjectMcp, type McpServerStatus } from "../mcp.js";
 import { loadSlashCommands, type SlashCommand } from "../commands.js";
 import { configureLsp, disposeLsp, loadLspConfig } from "../lsp.js";
 import { backgroundManager } from "../tools/background.js";
@@ -144,6 +144,8 @@ async function buildProject(cwd: string, opts: BuildOptions): Promise<ProjectCon
   let mcp: McpManager | null = null;
   if (!opts.noMcp) {
     const configs = await loadMcpConfig(cwd);
+    const untrustedMcp = await untrustedProjectMcp(cwd);
+    if (untrustedMcp) console.error(`mcp: project config not loaded (untrusted): ${untrustedMcp.file} — approve it in Manage → MCP`);
     if (Object.keys(configs).length) {
       mcp = new McpManager();
       const statuses = await mcp.connectAll(configs);

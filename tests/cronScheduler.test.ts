@@ -301,6 +301,33 @@ describe("createProcessRunner", () => {
     }
   });
 
+  it("keeps hand-edited task ids inside the runs directory", async () => {
+    const script = path.join(project, "fake-cli.mjs");
+    await fs.writeFile(script, "process.exit(0);\n", "utf8");
+    const previous = process.env.AGENT_CLI_ENTRY;
+    process.env.AGENT_CLI_ENTRY = script;
+    const rogue: CronTask = {
+      id: "../../escape",
+      name: "rogue",
+      cron: "* * * * *",
+      prompt: "x",
+      cwd: project,
+      enabled: true,
+      createdAt: new Date(0).toISOString(),
+      nextRunAt: new Date().toISOString(),
+      runCount: 0,
+    };
+    try {
+      const r = await createProcessRunner({ home, timeoutMs: 20_000 })(rogue);
+      expect(r.ok).toBe(true);
+      expect(path.dirname(r.log!)).toBe(cronRunsDir(home));
+      expect(path.basename(r.log!)).toMatch(/^_+escape-\d{4}-/);
+    } finally {
+      if (previous === undefined) delete process.env.AGENT_CLI_ENTRY;
+      else process.env.AGENT_CLI_ENTRY = previous;
+    }
+  });
+
   it("kills a run that exceeds the timeout", async () => {
     const script = path.join(project, "slow-cli.mjs");
     await fs.writeFile(script, "setTimeout(() => {}, 60_000);\n", "utf8");

@@ -17,6 +17,31 @@ const MAX_REDIRECTS = 5;
 const MAX_BODY_BYTES = 1_000_000;
 const UA = "Mozilla/5.0 (compatible; node-agent/0.1; +https://example.invalid)";
 
+/** Expand an IPv6 literal into eight 16-bit hextets; null when it is malformed. */
+function ipv6Hextets(addr: string): number[] | null {
+  const s = addr.toLowerCase().split("%")[0];
+  const halves = s.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const valid = (groups: string[]) => groups.every((g) => /^[0-9a-f]{1,4}$/.test(g));
+  if (!valid(head) || !valid(tail)) return null;
+  let groups: string[];
+  if (halves.length === 1) {
+    if (head.length !== 8) return null;
+    groups = head;
+  } else {
+    const fill = 8 - head.length - tail.length;
+    if (fill < 1) return null;
+    groups = [...head, ...Array<string>(fill).fill("0"), ...tail];
+  }
+  return groups.map((g) => parseInt(g, 16));
+}
+
+function hexesToIpv4(hi: number, lo: number): string {
+  return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+}
+
 /** True for addresses that must never be fetched: loopback, private, metadata, ... */
 export function isBlockedAddress(ip: string): boolean {
   const addr = ip.replace(/^\[|\]$/g, "").split("%")[0];
@@ -40,13 +65,16 @@ export function isBlockedAddress(ip: string): boolean {
   if (!net.isIPv6(addr)) return true;
   const s = addr.toLowerCase();
   if (s === "::" || s === "::1") return true;
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(s);
-  if (mapped) return isBlockedAddress(mapped[1]);
-  const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(s);
-  if (mappedHex) {
-    const hi = parseInt(mappedHex[1], 16);
-    const lo = parseInt(mappedHex[2], 16);
-    return isBlockedAddress(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
+  const groups = ipv6Hextets(s);
+  if (!groups) return true; // non-canonical IPv6: refuse rather than guess
+  const zeroUntil = (n: number) => groups.slice(0, n).every((g) => g === 0);
+  // IPv4-mapped (::ffff:a.b.c.d) reaches the embedded IPv4 through the socket.
+  if (zeroUntil(5) && groups[5] === 0xffff) return isBlockedAddress(hexesToIpv4(groups[6], groups[7]));
+  // Deprecated IPv4-compatible (::a.b.c.d) and IPv4-translated
+  // (::ffff:0:a.b.c.d) forms also land on the embedded IPv4 on some stacks.
+  if (zeroUntil(6)) return isBlockedAddress(hexesToIpv4(groups[6], groups[7]));
+  if (zeroUntil(4) && groups[4] === 0xffff && groups[5] === 0) {
+    return isBlockedAddress(hexesToIpv4(groups[6], groups[7]));
   }
   return (
     /^f[cd]/.test(s) || // unique local fc00::/7
@@ -147,6 +175,9 @@ async function httpGet(
   const onAbort = () => ctrl.abort();
   signal?.addEventListener("abort", onAbort);
   try {
+    // AbortSignal listeners do not fire for an abort that already happened,
+    // so honour a pre-aborted turn before opening a socket.
+    if (signal?.aborted) throw new Error("aborted");
     let current = await assertPublicUrl(url);
     for (let hop = 0; ; hop++) {
       const res = await fetch(current.toString(), {

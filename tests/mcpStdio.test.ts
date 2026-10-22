@@ -54,6 +54,7 @@ beforeEach(async () => {
 afterEach(async () => {
   unregisterToolsByPrefix("mcp__paged__");
   unregisterToolsByPrefix("mcp__noisy__");
+  unregisterToolsByPrefix("mcp__a_b__");
   await fs.rm(dir, { recursive: true, force: true });
 });
 
@@ -83,6 +84,25 @@ describe("stdio MCP connections", () => {
       expect(status).toMatchObject({ name: "paged", connected: true, toolCount: 15, kind: "stdio" });
       expect(getTool("mcp__paged__tool14")).toBeTruthy();
       expect(getTool("mcp__paged__tool0")?.deferred).toBe(true);
+    } finally {
+      await manager.shutdown();
+    }
+  });
+
+  it("rejects two servers whose names sanitize to the same tool prefix", async () => {
+    const script = await writeServer("collide", serverScript(ONE_TOOL));
+    const manager = new McpManager();
+    try {
+      expect(await manager.connect("a.b", { command: process.execPath, args: [script] })).toMatchObject({
+        connected: true,
+        toolCount: 1,
+      });
+      // "a b" is not writable through saveMcpServer, but a hand-edited
+      // .mcp.json can contain it and would share the mcp__a_b__ prefix.
+      const second = await manager.connect("a b", { command: process.execPath, args: [script] });
+      expect(second.connected).toBe(false);
+      expect(second.error).toMatch(/collides/);
+      expect(getTool("mcp__a_b__echo")).toBeTruthy();
     } finally {
       await manager.shutdown();
     }

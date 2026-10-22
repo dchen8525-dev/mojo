@@ -27,6 +27,8 @@ export function mcpAuthFilePath(serverName: string, dir: string = mcpAuthDir()):
 }
 
 interface AuthRecord {
+  /** Endpoint these credentials were issued for; a changed URL invalidates them. */
+  serverUrl?: string;
   tokens?: OAuthTokens;
   clientInformation?: OAuthClientInformationMixed;
   codeVerifier?: string;
@@ -53,6 +55,12 @@ class OAuthStore {
   async update(patch: Partial<AuthRecord>): Promise<void> {
     const record = await this.load();
     Object.assign(record, patch);
+    await this.save();
+  }
+
+  /** Drop everything and start from a clean record (used when the endpoint changes). */
+  async replace(record: AuthRecord): Promise<void> {
+    this.cache = record;
     await this.save();
   }
 
@@ -94,6 +102,9 @@ export class McpOAuthFlow {
   private readonly log: (message: string) => void;
   private readonly openUrl: (url: string) => void;
   private readonly store: OAuthStore;
+  /** Exact Host header the loopback receiver answers to (DNS-rebinding guard). */
+  private readonly callbackHost: string;
+  private callbackConsumed = false;
   private server: Server | null = null;
   private pending: { resolve: (code: string) => void; reject: (err: Error) => void; timer: NodeJS.Timeout } | null = null;
   private settled: { code: string } | { error: Error } | null = null;
@@ -103,6 +114,7 @@ export class McpOAuthFlow {
   private constructor(opts: McpOAuthFlowOptions, server: Server, redirectUrl: string) {
     this.server = server;
     this.redirectUrl = redirectUrl;
+    this.callbackHost = new URL(redirectUrl).host;
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.log = opts.log ?? ((message) => process.stderr.write(`${message}\n`));
     this.openUrl = opts.openUrl ?? openBrowser;
@@ -147,6 +159,12 @@ export class McpOAuthFlow {
         await flow.store.invalidate(scope);
       },
       redirectToAuthorization: (authorizationUrl) => {
+        // The endpoint comes from the server's discovery document, not from
+        // the user. Handing file:/javascript: to the OS opener would let a
+        // malicious server launch a local handler; only web URLs are valid.
+        if (authorizationUrl.protocol !== "https:" && authorizationUrl.protocol !== "http:") {
+          throw new Error(`refusing non-http(s) authorization URL: ${authorizationUrl.protocol}//`);
+        }
         flow.lastAuthUrl = authorizationUrl.href;
         flow.log(`mcp: ${opts.serverName} (${opts.serverUrl}) needs OAuth authorization — opening ${authorizationUrl.href}`);
         try {
@@ -168,7 +186,20 @@ export class McpOAuthFlow {
       server.listen(0, "127.0.0.1", () => resolve());
     });
     const addr = server.address() as AddressInfo;
-    return new McpOAuthFlow(opts, server, `http://127.0.0.1:${addr.port}/callback`);
+    const flow = new McpOAuthFlow(opts, server, `http://127.0.0.1:${addr.port}/callback`);
+    await flow.bindEndpoint(opts.serverUrl);
+    return flow;
+  }
+
+  /**
+   * Credentials are keyed by server *name* on disk. If that name is repointed
+   * at another endpoint (e.g. a project config shadowing a global server), the
+   * stored bearer token and client registration must not be offered to it.
+   */
+  private async bindEndpoint(serverUrl: string): Promise<void> {
+    const record = await this.store.load();
+    if (record.serverUrl === serverUrl) return;
+    await this.store.replace({ serverUrl });
   }
 
   /**
@@ -230,9 +261,21 @@ export class McpOAuthFlow {
 
   private handle(req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse): void {
     const page = (body: string) => {
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "referrer-policy": "no-referrer",
+        "content-security-policy": "default-src 'none'",
+      });
       res.end(`<!doctype html><meta charset="utf-8"><title>mojo</title><p>${body}</p>`);
     };
+    // A DNS-rebinding page can reach the loopback socket under its own name;
+    // requiring the exact loopback Host keeps the callback bound to 127.0.0.1.
+    if ((req.headers.host ?? "").toLowerCase() !== this.callbackHost) {
+      res.writeHead(400, { "content-type": "text/plain" });
+      res.end("invalid host");
+      return;
+    }
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     if (req.method !== "GET" || url.pathname !== "/callback") {
       res.writeHead(404, { "content-type": "text/plain" });
@@ -244,8 +287,16 @@ export class McpOAuthFlow {
       res.end("invalid state");
       return;
     }
+    // The state is single-use: a captured/replayed callback must not resolve
+    // a later flow with an attacker-chosen code.
+    if (this.callbackConsumed) {
+      res.writeHead(400, { "content-type": "text/plain" });
+      res.end("authorization already completed");
+      return;
+    }
     const error = url.searchParams.get("error");
     if (error) {
+      this.callbackConsumed = true;
       page("授权失败，请回到 mojo 查看错误。");
       const description = url.searchParams.get("error_description");
       this.settle("reject", new Error(`OAuth authorization failed: ${error}${description ? ` (${description.slice(0, 200)})` : ""}`));
@@ -257,6 +308,7 @@ export class McpOAuthFlow {
       res.end("missing authorization code");
       return;
     }
+    this.callbackConsumed = true;
     page("授权完成，可以关闭此页面。");
     this.settle("resolve", code);
   }

@@ -57,6 +57,7 @@ export const MAX_CRON_TASKS = 50;
 const NAME_MAX = 60;
 const PROMPT_MAX = 8000;
 const STALE_RUN_MS = 2 * 60 * 60 * 1000;
+const INTERRUPTED_ERROR = "run interrupted (the scheduler process exited or was killed)";
 
 export function cronDir(home = os.homedir()): string {
   return path.join(home, ".node-agent");
@@ -173,9 +174,10 @@ function dayMatches(spec: CronSpec, date: Date): boolean {
  */
 export function nextCronTime(expr: string, from: Date = new Date()): Date {
   const spec = parseCron(expr);
-  const start = new Date(from.getTime());
-  start.setSeconds(0, 0);
-  start.setMinutes(start.getMinutes() + 1);
+  // Truncate and advance by absolute time. Wall-clock arithmetic (setSeconds
+  // / setMinutes) re-resolves an ambiguous time to the earlier DST offset,
+  // which can move the scan start one hour backwards during a fall-back.
+  const start = new Date(Math.floor(from.getTime() / 60_000) * 60_000 + 60_000);
 
   // 12 years covers Feb 29 in the worst case (a leap year skipped by century rules).
   const maxDays = 366 * 12;
@@ -193,6 +195,18 @@ export function nextCronTime(expr: string, from: Date = new Date()): Date {
         if (!spec.minutes.has(m)) continue;
         const result = new Date(day);
         result.setHours(h, m, 0, 0);
+        if (result.getTime() < start.getTime()) {
+          // DST fall-back: an ambiguous wall clock resolves to the earlier
+          // offset, which can precede the scan start when `from` is in the
+          // repeated hour. Retry at the later offset (usually +1h, sometimes
+          // +30min) instead of returning a time in the past.
+          const delta = (start.getTimezoneOffset() - result.getTimezoneOffset()) * 60_000;
+          if (delta > 0) {
+            const later = new Date(result.getTime() + delta);
+            if (later.getHours() === h && later.getMinutes() === m && later.getTime() >= start.getTime()) return later;
+          }
+          continue;
+        }
         return result;
       }
     }
@@ -368,7 +382,18 @@ export async function claimDueTasks(now = new Date(), home = os.homedir()): Prom
     const claimed: CronTask[] = [];
     let changed = false;
     for (const task of tasks) {
-      if (!task.enabled || task.lastStatus === "running") continue;
+      if (!task.enabled) continue;
+      if (task.lastStatus === "running") {
+        const started = task.runStartedAt ? new Date(task.runStartedAt).getTime() : Number.NaN;
+        // A manual run started by a process that was then killed would
+        // otherwise keep this task skipped forever: only a restart used to
+        // reap interrupted runs. Apply the same stale threshold here.
+        if (Number.isFinite(started) && now.getTime() - started < STALE_RUN_MS) continue;
+        task.lastStatus = "error";
+        task.lastError = INTERRUPTED_ERROR;
+        task.runStartedAt = undefined;
+        changed = true;
+      }
       const due = new Date(task.nextRunAt).getTime();
       if (!Number.isFinite(due)) {
         // A corrupt timestamp would otherwise leave the task silently stuck.
@@ -456,7 +481,7 @@ export async function recoverStaleRuns(home = os.homedir(), now = Date.now()): P
       const started = task.runStartedAt ? new Date(task.runStartedAt).getTime() : 0;
       if (Number.isFinite(started) && now - started < STALE_RUN_MS) continue;
       task.lastStatus = "error";
-      task.lastError = "run interrupted (the scheduler process exited or was killed)";
+      task.lastError = INTERRUPTED_ERROR;
       task.runStartedAt = undefined;
       recovered++;
     }

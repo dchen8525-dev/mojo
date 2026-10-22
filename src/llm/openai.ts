@@ -5,9 +5,13 @@ import { StreamInterrupted, normalizeSystem } from "./types.js";
 import { lookupModel } from "./models.js";
 import { withIdleTimeout } from "./idle.js";
 
+type ChatContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
 type ChatMsg =
   | { role: "system"; content: string }
-  | { role: "user"; content: string }
+  | { role: "user"; content: string | ChatContentPart[] }
   | { role: "assistant"; content: string | null; tool_calls?: OpenAI.Chat.Completions.ChatCompletionMessageToolCall[] }
   | { role: "tool"; tool_call_id: string; content: string };
 
@@ -19,7 +23,17 @@ export function toOpenAiMessages(messages: MessageParam[]): ChatMsg[] {
       out.push({ role: msg.role === "assistant" ? "assistant" : "user", content: msg.content });
       continue;
     }
-    const blocks = msg.content as Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; content?: unknown; is_error?: boolean }>;
+    const blocks = msg.content as Array<{
+      type: string;
+      text?: string;
+      id?: string;
+      name?: string;
+      input?: unknown;
+      tool_use_id?: string;
+      content?: unknown;
+      is_error?: boolean;
+      source?: { type?: string; media_type?: string; data?: string; url?: string };
+    }>;
     if (msg.role === "assistant") {
       let text = "";
       const toolCalls: OpenAI.Chat.Completions.ChatCompletionMessageToolCall[] = [];
@@ -35,8 +49,10 @@ export function toOpenAiMessages(messages: MessageParam[]): ChatMsg[] {
       }
       out.push({ role: "assistant", content: text || null, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) });
     } else {
-      // user message: tool_result blocks become role:"tool" messages, text stays user
-      let userText = "";
+      // user message: tool_result blocks become role:"tool" messages, while
+      // text and images stay user content (images must survive a provider
+      // switch, or the model silently answers about a picture it never saw).
+      const parts: ChatContentPart[] = [];
       for (const b of blocks) {
         if (b.type === "tool_result") {
           const content =
@@ -50,9 +66,22 @@ export function toOpenAiMessages(messages: MessageParam[]): ChatMsg[] {
             tool_call_id: b.tool_use_id ?? "",
             content: b.is_error ? `Error: ${content}` : content,
           });
-        } else if (b.type === "text") userText += b.text ?? "";
+        } else if (b.type === "text" && b.text) {
+          parts.push({ type: "text", text: b.text });
+        } else if (b.type === "image") {
+          const src = b.source;
+          if (src?.type === "base64" && src.data) {
+            parts.push({
+              type: "image_url",
+              image_url: { url: `data:${src.media_type ?? "image/png"};base64,${src.data}` },
+            });
+          } else if (src?.type === "url" && src.url) {
+            parts.push({ type: "image_url", image_url: { url: src.url } });
+          }
+        }
       }
-      if (userText) out.push({ role: "user", content: userText });
+      if (parts.length === 1 && parts[0].type === "text") out.push({ role: "user", content: parts[0].text });
+      else if (parts.length) out.push({ role: "user", content: parts });
     }
   }
   return out;
@@ -69,9 +98,72 @@ function toOpenAiTools(tools: Tool[]): OpenAI.Chat.Completions.ChatCompletionToo
 }
 
 interface PartialToolCall {
+  index: number;
   id: string;
   name: string;
   args: string;
+}
+
+export interface ToolCallDelta {
+  index?: number;
+  id?: string;
+  function?: { name?: string; arguments?: string };
+}
+
+/**
+ * Fold one streamed tool-call delta into the accumulator. Gateways differ:
+ * some send no index, some resend the full function name in every chunk, and
+ * some omit the id after the first chunk. Matching by index (then id, then
+ * "continuation of the last call") keeps all three shapes working.
+ */
+export function mergeToolCallDelta(calls: PartialToolCall[], tc: ToolCallDelta): void {
+  let cur: PartialToolCall | undefined;
+  if (typeof tc.index === "number") cur = calls.find((c) => c.index === tc.index);
+  else if (tc.id) cur = calls.find((c) => c.id === tc.id);
+  else cur = calls[calls.length - 1];
+  if (!cur) {
+    cur = { index: typeof tc.index === "number" ? tc.index : calls.length, id: "", name: "", args: "" };
+    calls.push(cur);
+  }
+  if (tc.id && !cur.id) cur.id = tc.id;
+  const piece = tc.function?.name;
+  // A repeated full name is a resend, not a longer name.
+  if (piece && piece !== cur.name) cur.name += piece;
+  if (tc.function?.arguments) cur.args += tc.function.arguments;
+}
+
+/**
+ * Turn accumulated deltas into tool_use blocks. A response cut off by the
+ * token limit can end mid-arguments; executing such a call would run a
+ * half-written command, so the whole batch is dropped and the agent asks the
+ * model to continue (clean history, no stray calls).
+ */
+export function finalizeToolCalls(
+  calls: PartialToolCall[],
+  finishReason: string | null,
+  events?: StreamEvents,
+): { toolUses: ToolUseBlock[]; blocks: ContentBlock[] } {
+  if (finishReason === "length") return { toolUses: [], blocks: [] };
+  const toolUses: ToolUseBlock[] = [];
+  const blocks: ContentBlock[] = [];
+  for (const [i, tc] of [...calls].sort((a, b) => a.index - b.index).entries()) {
+    if (!tc.name) continue;
+    let input: Record<string, unknown> = {};
+    try {
+      const parsed = tc.args ? JSON.parse(tc.args) : {};
+      // null / arrays / scalars cannot be tool input; keep {} so the tool
+      // reports a missing-parameter validation error back to the model.
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) input = parsed as Record<string, unknown>;
+    } catch {
+      /* malformed args: keep {} so the model gets a validation error back */
+    }
+    const id = tc.id || `tc_${Date.now()}_${i}`;
+    events?.onToolUseStart?.(tc.name, id);
+    const block: ToolUseBlock = { type: "tool_use", id, name: tc.name, input, caller: { type: "direct" } };
+    toolUses.push(block);
+    blocks.push(block);
+  }
+  return { toolUses, blocks };
 }
 
 export class OpenAiBackend implements LLMBackend {
@@ -131,7 +223,7 @@ export class OpenAiBackend implements LLMBackend {
     let outputTokens = 0;
     let cacheReadTokens = 0;
     let finishReason: string | null = null;
-    const toolCalls = new Map<number, PartialToolCall>();
+    const toolCalls: PartialToolCall[] = [];
 
     try {
       for await (const chunk of withIdleTimeout(stream, idleMs, () => ac.abort())) {
@@ -144,14 +236,7 @@ export class OpenAiBackend implements LLMBackend {
         // chain of thought on a separate field; forward it so the UI can show it.
         const reasoning = (delta as { reasoning_content?: string } | undefined)?.reasoning_content;
         if (reasoning) events?.onThinkingDelta?.(reasoning);
-        for (const tc of delta?.tool_calls ?? []) {
-          const idx = tc.index;
-          const cur = toolCalls.get(idx) ?? { id: "", name: "", args: "" };
-          if (tc.id) cur.id = tc.id;
-          if (tc.function?.name) cur.name += tc.function.name;
-          if (tc.function?.arguments) cur.args += tc.function.arguments;
-          toolCalls.set(idx, cur);
-        }
+        for (const tc of delta?.tool_calls ?? []) mergeToolCallDelta(toolCalls, tc);
         if (chunk.choices[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
         if (chunk.usage) {
           inputTokens = chunk.usage.prompt_tokens ?? inputTokens;
@@ -170,7 +255,7 @@ export class OpenAiBackend implements LLMBackend {
       // Same resumability rule as the Anthropic backend: only a mid-text
       // break (no tool-call streaming started) can be picked up from the
       // partial output; aborts are the user's intent and propagate as-is.
-      if (text && !toolCalls.size && !signal?.aborted && !(err instanceof Error && err.name === "APIUserAbortError")) {
+      if (text && !toolCalls.length && !signal?.aborted && !(err instanceof Error && err.name === "APIUserAbortError")) {
         throw new StreamInterrupted(text, err);
       }
       throw err;
@@ -178,24 +263,10 @@ export class OpenAiBackend implements LLMBackend {
       signal?.removeEventListener("abort", onOuterAbort);
     }
 
-    // Synthesize ids for providers that omit them in deltas.
     const content: ContentBlock[] = [];
     if (text) content.push({ type: "text", text } as ContentBlock);
-    const toolUses: ToolUseBlock[] = [];
-    for (const [, tc] of [...toolCalls.entries()].sort((a, b) => a[0] - b[0])) {
-      if (!tc.name) continue;
-      let input: Record<string, unknown> = {};
-      try {
-        input = tc.args ? JSON.parse(tc.args) : {};
-      } catch {
-        /* malformed args: keep {} so the model gets a validation error back */
-      }
-      const id = tc.id || `tc_${Date.now()}_${toolUses.length}`;
-      events?.onToolUseStart?.(tc.name, id);
-      const block: ToolUseBlock = { type: "tool_use", id, name: tc.name, input, caller: { type: "direct" } };
-      toolUses.push(block);
-      content.push(block);
-    }
+    const { toolUses, blocks } = finalizeToolCalls(toolCalls, finishReason, events);
+    content.push(...blocks);
 
     return {
       text,

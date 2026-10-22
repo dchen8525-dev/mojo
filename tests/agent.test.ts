@@ -810,3 +810,24 @@ describe("Agent mid-turn steering", () => {
     expect(makeAgent().steer("hi")).toBe(false);
   });
 });
+
+describe("subagent permission wiring", () => {
+  it("asks the real permission layer for worker subagents (no read-only shortcut)", async () => {
+    const calls: Array<{ desc: string; readOnly: boolean }> = [];
+    const perms = {
+      check: async (desc: string, _risk: string, readOnly: boolean) => {
+        calls.push({ desc, readOnly });
+        return false;
+      },
+    } as never;
+    const agent = new Agent(process.cwd(), "test-session", perms, undefined, undefined);
+    h.turns = [
+      toolTurn([["task", { description: "impl", prompt: "edit x", mode: "worker" }]]),
+      textTurn("declined"),
+    ];
+    await agent.chat("go");
+    const spawn = calls.find((c) => c.desc.includes("WRITING subagent"));
+    expect(spawn).toBeTruthy();
+    expect(spawn!.readOnly).toBe(false);
+  });
+});

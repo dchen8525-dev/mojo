@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { Tool, ToolContext, ToolResult } from "../types.js";
-import { str, num, bool, truncate, describeError } from "./utils.js";
+import { str, num, bool, truncate, describeError, hasOutsidePathArg } from "./utils.js";
 import { backgroundManager } from "./background.js";
 import { isFormatterCommand, syncBashFileState } from "./bashFileState.js";
 
@@ -66,6 +66,9 @@ export function isReadOnlyCommand(cmd: string): boolean {
   const command = cmd.trim();
   if (!command || isDangerousCommand(command)) return false;
   if (/[|;&<>`\n]|\$\(/.test(command)) return false;
+  // `cat ~/.ssh/id_rsa` is syntactically harmless but reads a credential
+  // store; handing it a free pass would let injected content exfiltrate keys.
+  if (hasOutsidePathArg(command)) return false;
   const tokens = command.split(/\s+/);
   if (tokens[0] === "git") {
     let i = 1;

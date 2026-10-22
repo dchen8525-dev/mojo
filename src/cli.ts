@@ -12,7 +12,7 @@ import { PermissionManager } from "./permissions.js";
 import type { MessageParam, Risk } from "./types.js";
 import { AgentApp } from "./ui/app.js";
 import { bridge } from "./ui/bridge.js";
-import { McpManager, loadMcpConfig } from "./mcp.js";
+import { McpManager, loadMcpConfig, untrustedProjectMcp } from "./mcp.js";
 import { HookManager } from "./hooks.js";
 import { loadSlashCommands, renderCommand, expandFileReferences } from "./commands.js";
 import { configureLsp, disposeLsp, loadLspConfig } from "./lsp.js";
@@ -94,13 +94,20 @@ function restoreSessionModel(agent: Agent, sessionModel: string | undefined, arg
 
 async function setupMcp(args: { noMcp: boolean }): Promise<McpManager | null> {
   if (args.noMcp) return null;
-  const configs = await loadMcpConfig(process.cwd());
-  if (!Object.keys(configs).length) return null;
+  const cwd = process.cwd();
+  const configs = await loadMcpConfig(cwd);
+  const untrusted = await untrustedProjectMcp(cwd);
+  if (!Object.keys(configs).length && !untrusted) return null;
   const manager = new McpManager();
   const statuses = await manager.connectAll(configs);
   for (const s of statuses) {
     if (s.connected) console.error(ANSI.dim(`mcp: ${s.name} connected (${s.toolCount} tools)`));
     else console.error(ANSI.warn(`mcp: ${s.name} failed: ${s.error}`));
+  }
+  if (untrusted) {
+    console.error(
+      ANSI.warn(`⚠ project MCP servers not connected (untrusted): ${untrusted.file} — run /mcp trust to approve`),
+    );
   }
   return manager;
 }

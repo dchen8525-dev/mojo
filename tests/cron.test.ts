@@ -128,6 +128,22 @@ describe("nextCronTime", () => {
     expect(nextCronTime("*/15 * * * *", exact)).toEqual(new Date(2026, 9, 22, 10, 30, 0, 0));
   });
 
+  it("never returns a time in the past during a DST fall-back", () => {
+    const previous = process.env.TZ;
+    process.env.TZ = "EST5EDT";
+    try {
+      // 01:31 EST is the second pass of the repeated hour in the US.
+      const from = new Date("2026-11-01T06:31:00Z");
+      expect(from.getHours()).toBe(1);
+      const next = nextCronTime("45 1 * * *", from);
+      expect(next.getTime()).toBeGreaterThan(from.getTime());
+      expect(next.toISOString()).toBe("2026-11-01T06:45:00.000Z");
+    } finally {
+      if (previous === undefined) delete process.env.TZ;
+      else process.env.TZ = previous;
+    }
+  });
+
   it("parses step lists and ranges", () => {
     const spec = parseCron("5/20 8-10 * * *");
     expect([...spec.minutes]).toEqual([5, 25, 45]);
@@ -262,6 +278,40 @@ describe("cron task store", () => {
     await startCronRun(created.id, new Date(Date.now() - 3 * 3600_000), home);
     await expect(startCronRun(created.id, new Date(), home)).resolves.toMatchObject({ lastStatus: "running" });
     await finishCronRun(created.id, { ok: true }, home);
+  });
+
+  it("reclaims a task after an interrupted run in another process goes stale", async () => {
+    const stale = task({
+      lastStatus: "running",
+      runStartedAt: new Date(Date.now() - 3 * 3600_000).toISOString(),
+      nextRunAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    await writeTasks([stale]);
+    const claimed = await claimDueTasks(new Date(), home);
+    expect(claimed).toHaveLength(1);
+    expect(claimed[0].lastStatus).toBe("running");
+    expect(claimed[0].runStartedAt).toBeTruthy();
+    expect(claimed[0].runCount).toBe(1);
+
+    // Not due yet: the stale run is marked failed but the schedule resumes.
+    const fresh = task({ id: "cr_fresh001", lastStatus: "ok", nextRunAt: new Date(Date.now() + 3600_000).toISOString() });
+    const interrupted = task({
+      id: "cr_stale002",
+      lastStatus: "running",
+      runStartedAt: new Date(Date.now() - 3 * 3600_000).toISOString(),
+      nextRunAt: new Date(Date.now() + 3600_000).toISOString(),
+    });
+    await writeTasks([fresh, interrupted]);
+    expect(await claimDueTasks(new Date(), home)).toHaveLength(0);
+    const seen = new Map((await loadCronTasks(home)).map((t) => [t.id, t]));
+    expect(seen.get("cr_stale002")?.lastStatus).toBe("error");
+    expect(seen.get("cr_stale002")?.lastError).toMatch(/interrupted/);
+  });
+
+  it("keeps a fresh running task claimed by another process", async () => {
+    await writeTasks([task({ lastStatus: "running", runStartedAt: new Date().toISOString() })]);
+    expect(await claimDueTasks(new Date(), home)).toHaveLength(0);
+    expect((await loadCronTasks(home))[0].lastStatus).toBe("running");
   });
 
   it("reaps runs left running by a dead scheduler", async () => {

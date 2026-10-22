@@ -264,6 +264,67 @@ describe("gui server", () => {
     });
   });
 
+  it("claims the turn before file references resolve so parallel posts cannot both start", async () => {
+    let starts = 0;
+    let release!: () => void;
+    let chatStarted!: () => void;
+    const started = new Promise<void>((resolve) => (chatStarted = resolve));
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    await withServer(
+      async (gui) => {
+        const [a, b] = await Promise.all([
+          req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "one" } }),
+          req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "two" } }),
+        ]);
+        expect([a.status, b.status].sort()).toEqual([202, 409]);
+        await started;
+        expect(starts).toBe(1);
+        release();
+      },
+      {
+        chat: async () => {
+          starts++;
+          chatStarted();
+          await gate;
+          return "done";
+        },
+      },
+    );
+    expect(starts).toBe(1);
+  });
+
+  it("rejects unknown permission decisions instead of persisting them as allow rules", async () => {
+    await withServer(async (gui, runtime) => {
+      const pending = runtime.askPermission("run rm -rf build", "high");
+      const id = runtime.pendingPermissions()[0].id;
+      const bad = await req(gui.port, "/api/permission", {
+        method: "POST",
+        token: TOKEN,
+        body: { id, decision: "maybe" },
+      });
+      expect(bad.status).toBe(400);
+      expect(runtime.pendingCount).toBe(1);
+      const good = await req(gui.port, "/api/permission", {
+        method: "POST",
+        token: TOKEN,
+        body: { id, decision: "no" },
+      });
+      expect(good.status).toBe(200);
+      await expect(pending).resolves.toBe("no");
+    });
+  });
+
+  it("marks API responses and static assets as non-cacheable", async () => {
+    await withServer(async (gui) => {
+      const state = await req(gui.port, "/api/state", { token: TOKEN });
+      expect(state.headers["cache-control"]).toBe("no-store");
+      const page = await req(gui.port, "/");
+      expect(page.headers["cache-control"]).toBe("no-cache");
+      const script = await req(gui.port, "/app.js");
+      expect(script.headers["cache-control"]).toBe("no-cache");
+    });
+  });
+
   it("queues mid-turn chat input as steering", async () => {
     await withServer(async (gui, runtime, agent) => {
       runtime.busy = true;
@@ -717,7 +778,7 @@ describe("gui server", () => {
         async (gui) => {
           const empty = await req(gui.port, "/api/mcp", { token: TOKEN });
           expect(empty.status).toBe(200);
-          expect(empty.json).toEqual({ servers: [], disabled: false });
+          expect(empty.json).toEqual({ servers: [], disabled: false, untrustedProject: null });
 
           const save = await req(gui.port, "/api/mcp/save", {
             token: TOKEN,
@@ -795,6 +856,32 @@ describe("gui server", () => {
           expect(delRemote.status).toBe(200);
           expect(delRemote.json.servers).toEqual([]);
           expect(reloads).toBe(5);
+
+          // A repo-planted config is listed but inert until explicitly trusted.
+          await fs.writeFile(projectFile, JSON.stringify({ mcpServers: { planted: { command: "evil" } } }), "utf8");
+          const snapshot = await req(gui.port, "/api/mcp", { token: TOKEN });
+          expect(snapshot.json.untrustedProject).toEqual({ file: projectFile });
+          expect(snapshot.json.servers).toEqual([
+            expect.objectContaining({ name: "planted", scope: "project", untrusted: true }),
+          ]);
+
+          const trusted = await req(gui.port, "/api/mcp/trust", { token: TOKEN, method: "POST", body: {} });
+          expect(trusted.status).toBe(200);
+          expect(trusted.json.untrustedProject).toBeNull();
+          expect(trusted.json.servers).toEqual([expect.objectContaining({ name: "planted", untrusted: false })]);
+          expect(reloads).toBe(6);
+
+          // Adding an unrelated server must not bless other entries in a file
+          // that the repository changed without approval.
+          await fs.writeFile(projectFile, JSON.stringify({ mcpServers: { planted: { command: "evil2" } } }), "utf8");
+          const sneaky = await req(gui.port, "/api/mcp/save", {
+            token: TOKEN,
+            method: "POST",
+            body: { name: "extra", scope: "project", config: { command: "x" } },
+          });
+          expect(sneaky.status).toBe(200);
+          expect(sneaky.json.untrustedProject).not.toBeNull();
+          expect(reloads).toBe(7);
 
           const missing = await req(gui.port, "/api/mcp/delete", {
             token: TOKEN,

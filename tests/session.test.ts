@@ -389,6 +389,82 @@ describe("searchSessions", () => {
   });
 });
 
+describe("session file hardening", () => {
+  const dir = path.join(fakeHome, ".node-agent", "sessions");
+
+  it("ignores path-like ids on every write path", async () => {
+    const escape = path.join(fakeHome, ".node-agent", "escape.jsonl");
+    await session.appendMessages("../../escape", [{ role: "user", content: "x" }]);
+    await session.appendModel("../../escape", "anthropic:x");
+    await session.appendSubCall("../../escape", { toolUseId: "t", name: "n", inputPreview: "" });
+    await session.rewriteMessages("../../escape", [{ role: "user", content: "x" }]);
+    await expect(fs.access(escape)).rejects.toThrow();
+  });
+
+  it("takes the id from the filename and caps metadata read from disk", async () => {
+    const id = "abcd0001";
+    const file = path.join(dir, `${id}.jsonl`);
+    await fs.writeFile(
+      file,
+      JSON.stringify({
+        type: "meta",
+        id: "ffffffff",
+        cwd: "c",
+        startedAt: "2026-01-01T00:00:00.000Z",
+        title: "t".repeat(200),
+        tags: [" " + "u".repeat(50), "ok", "ok"],
+      }) + "\n",
+    );
+    const loaded = await session.loadSession(id);
+    // The filename is what rename/delete use, so a meta line must not redirect them.
+    expect(loaded?.meta.id).toBe(id);
+    expect(loaded?.meta.title).toHaveLength(80);
+    expect(loaded?.meta.tags).toEqual(["u".repeat(24), "ok"]);
+  });
+
+  it("skips malformed messages instead of exposing them to search or resume", async () => {
+    const id = "abcd0002";
+    await fs.writeFile(
+      path.join(dir, `${id}.jsonl`),
+      [
+        JSON.stringify({ type: "meta", cwd: "c", startedAt: "2026-01-01T00:00:00.000Z" }),
+        JSON.stringify({ type: "message", message: null }),
+        JSON.stringify({ type: "message", message: { role: "user" } }),
+        JSON.stringify({
+          type: "message",
+          message: { role: "user", content: [null, 42, { type: "text", text: "good zqx6" }] },
+        }),
+        JSON.stringify({ type: "model", model: { evil: true } }),
+        "",
+      ].join("\n"),
+    );
+    const loaded = await session.loadSession(id);
+    expect(loaded?.messages).toHaveLength(1);
+    expect(loaded?.meta.model).toBeUndefined();
+    const hits = await session.searchSessions("zqx6");
+    expect(hits.some((h) => h.meta.id === id)).toBe(true);
+  });
+
+  it("ignores non-session files and symlinks in the sessions directory", async () => {
+    await fs.writeFile(path.join(dir, "notes.jsonl"), JSON.stringify({ type: "meta", cwd: "c", startedAt: "x" }) + "\n");
+    const { id } = await session.createSession("x");
+    expect((await session.listSessions()).some((m) => m.id === id)).toBe(true);
+    expect((await session.listSessions()).some((m) => m.id === "notes")).toBe(false);
+
+    if (process.platform !== "win32") {
+      await fs.writeFile(path.join(fakeHome, "outside.jsonl"), JSON.stringify({ type: "meta", cwd: "c", startedAt: "x" }) + "\n");
+      await fs.symlink(path.join(fakeHome, "outside.jsonl"), path.join(dir, "abcd0003.jsonl"));
+      expect(await session.loadSession("abcd0003")).toBeNull();
+    }
+  });
+
+  it("refuses absurdly long regex queries", async () => {
+    const { id } = await session.createSession("x");
+    await session.appendMessages(id, [{ role: "user", content: "abcdef" }]);
+    expect(await session.searchSessions("a".repeat(201), { regex: true })).toEqual([]);
+  });
+});
+
 describe("renderSessionMarkdown", () => {
   const meta = { id: "abc123", cwd: "D:\\proj", startedAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:01:00.000Z", model: "anthropic:claude-sonnet-4-5" };
 

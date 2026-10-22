@@ -1,6 +1,52 @@
+import os from "node:os";
 import path from "node:path";
 
 export const MAX_TOOL_OUTPUT = 30_000; // characters
+
+/**
+ * Credential stores that a prompt-injected model must not be able to read
+ * without an explicit user action. Read-only tools never prompt, so a lexical
+ * deny here is the only thing standing between a poisoned web page and
+ * ~/.ssh/id_rsa.
+ */
+const SENSITIVE_DIRS = [
+  ".ssh",
+  ".gnupg",
+  ".aws",
+  ".azure",
+  ".kube",
+  ".password-store",
+  ".node-agent",
+  path.join(".config", "gcloud"),
+  path.join(".config", "gh"),
+  path.join(".docker", "config.json"),
+].map((p) => path.join(os.homedir(), p));
+
+const SENSITIVE_FILES = new Set([
+  "id_rsa",
+  "id_dsa",
+  "id_ecdsa",
+  "id_ed25519",
+  ".git-credentials",
+  ".netrc",
+  "_netrc",
+  ".pypirc",
+]);
+
+function comparable(p: string): string {
+  const resolved = path.resolve(p);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+/** True for paths inside well-known credential stores (checked lexically). */
+export function isSensitivePath(p: string): boolean {
+  const abs = comparable(p);
+  for (const dir of SENSITIVE_DIRS) {
+    const d = comparable(dir);
+    if (abs === d || abs.startsWith(d + path.sep)) return true;
+  }
+  return SENSITIVE_FILES.has(path.basename(abs));
+}
 
 /** Truncate long output so a single tool call cannot blow up the context.
  * Keeps BOTH ends: the head shows how the work started, the tail usually
@@ -45,9 +91,10 @@ export function bool(input: Record<string, unknown>, key: string, fallback = fal
 }
 
 /**
- * Resolve a model-provided path and keep it inside the working directory.
- * The model is not trusted with paths outside cwd unless it explicitly asks
- * with an absolute path that passes the allowlist below.
+ * Resolve a model-provided path. Relative paths must stay inside the working
+ * directory; absolute paths are allowed because the user may explicitly ask
+ * the agent to work elsewhere (writes still prompt; reads are governed by
+ * `isSensitivePath`).
  */
 export function resolvePath(cwd: string, p: string): string {
   const abs = path.isAbsolute(p) ? path.normalize(p) : path.resolve(cwd, p);
@@ -62,6 +109,25 @@ export function resolvePath(cwd: string, p: string): string {
 export function relPath(cwd: string, abs: string): string {
   const r = path.relative(cwd, abs);
   return r === "" ? "." : r;
+}
+
+/**
+ * Heuristic: does the command mention a path that may leave the working
+ * directory (absolute, home-relative, env-expanded or parent-relative)?
+ * Read-only bash skips the permission prompt, so `cat ~/.ssh/id_rsa` must not
+ * be classified as harmless just because `cat` is an allowlisted program.
+ */
+export function hasOutsidePathArg(command: string): boolean {
+  for (const raw of command.split(/\s+/)) {
+    const token = raw.replace(/^["']|["']$/g, "");
+    if (!token || token.startsWith("-")) continue;
+    // Windows cmd switches such as `DIR /b` are not paths.
+    if (/^\/[A-Za-z]$/.test(token)) continue;
+    if (/(^|[\\/])\.\.([\\/]|$)/.test(token)) return true;
+    if (token.startsWith("~") || token.startsWith("$env:") || /%[^%\s]+%/.test(token)) return true;
+    if (/^[A-Za-z]:[\\/]/.test(token) || token.startsWith("/") || token.startsWith("\\\\")) return true;
+  }
+  return false;
 }
 
 export function describeError(err: unknown): string {

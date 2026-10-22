@@ -1,7 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import { readFileSync } from "node:fs";
-import type { MessageParam, Tool, ContentBlock } from "./types.js";
+import type { MessageParam, Tool, ContentBlock, ToolUseBlock } from "./types.js";
 import type { AssistantTurn, LLMBackend, Provider, RetryReason, StreamEvents, SystemPrompt } from "./llm/types.js";
 import { StreamInterrupted } from "./llm/types.js";
 import { AnthropicBackend } from "./llm/anthropic.js";
@@ -404,9 +404,9 @@ export class LLM {
           signal,
           events,
         );
+        LLM.ensureUniqueToolIds(turn);
         if (!partial) return turn;
-        const text = LLM.mergeText(partial, turn.text);
-        const suffix = text.slice(partial.length);
+        const text = LLM.mergeText(partial, turn.text);        const suffix = text.slice(partial.length);
         if (suffix) events?.onTextDelta?.(suffix);
         return {
           ...turn,
@@ -441,5 +441,22 @@ export class LLM {
       if (partial.endsWith(rest.slice(0, n))) return partial + rest.slice(n);
     }
     return partial + rest;
+  }
+
+  /**
+   * Tool results are matched to calls by id. Some OpenAI-compatible gateways
+   * reuse one id for several calls (or omit it); duplicate ids would make the
+   * next request ambiguous, so rewrite them in place.
+   */
+  private static ensureUniqueToolIds(turn: { toolUses: ToolUseBlock[] }): void {
+    const seen = new Set<string>();
+    for (let i = 0; i < turn.toolUses.length; i++) {
+      const tu = turn.toolUses[i];
+      const base = tu.id || `tool_${Date.now().toString(36)}_${i}`;
+      let id = base;
+      for (let n = 2; seen.has(id); n++) id = `${base}_${n}`;
+      tu.id = id;
+      seen.add(id);
+    }
   }
 }

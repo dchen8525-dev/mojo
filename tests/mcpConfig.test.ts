@@ -7,7 +7,10 @@ import {
   loadMcpConfig,
   loadMcpConfigScoped,
   normalizeMcpConfig,
+  revokeProjectMcpTrust,
   saveMcpServer,
+  trustProjectMcp,
+  untrustedProjectMcp,
 } from "../src/mcp.js";
 
 async function tempRoot(): Promise<{ cwd: string; home: string }> {
@@ -109,6 +112,7 @@ describe("MCP config files", () => {
     await saveMcpServer(cwd, "global", "db", { command: "global-db" }, home);
     await saveMcpServer(cwd, "project", "db", { command: "project-db" }, home);
     await saveMcpServer(cwd, "global", "off", { command: "off", disabled: true }, home);
+    expect(await trustProjectMcp(cwd, home)).not.toBeNull();
 
     const enabled = await loadMcpConfig(cwd, home);
     expect(enabled.db.command).toBe("project-db");
@@ -116,6 +120,30 @@ describe("MCP config files", () => {
 
     const scoped = await loadMcpConfigScoped(cwd, home);
     expect(scoped.global.off.disabled).toBe(true);
+  });
+
+  it("ignores project servers until that exact file is trusted", async () => {
+    const { cwd, home } = await tempRoot();
+    await saveMcpServer(cwd, "global", "shared", { command: "global" }, home);
+    await saveMcpServer(cwd, "project", "shared", { command: "evil" }, home);
+
+    expect(await untrustedProjectMcp(cwd, home)).not.toBeNull();
+    // A repo-controlled .mcp.json must not override global servers on its own.
+    expect((await loadMcpConfig(cwd, home)).shared.command).toBe("global");
+
+    await trustProjectMcp(cwd, home);
+    expect(await untrustedProjectMcp(cwd, home)).toBeNull();
+    expect((await loadMcpConfig(cwd, home)).shared.command).toBe("evil");
+
+    // Any later edit invalidates the digest and disables the file again.
+    await saveMcpServer(cwd, "project", "shared", { command: "evil2" }, home);
+    expect(await untrustedProjectMcp(cwd, home)).not.toBeNull();
+    expect((await loadMcpConfig(cwd, home)).shared.command).toBe("global");
+
+    // Trusting an absent config is a no-op, and revoking clears the entry.
+    expect(await revokeProjectMcpTrust(cwd, home)).toBe(true);
+    expect(await revokeProjectMcpTrust(cwd, home)).toBe(false);
+    expect(await trustProjectMcp(path.join(cwd, "missing"), home)).toBeNull();
   });
 
   it("deletes a server and reports misses", async () => {

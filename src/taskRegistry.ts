@@ -12,6 +12,8 @@ export interface AgentTask {
   status: "running" | "done" | "failed";
   report: string;
   delivered: boolean;
+  /** Session that spawned it; reports must not leak into another project's chat. */
+  sessionId?: string;
 }
 
 class SubagentTaskRegistry {
@@ -20,9 +22,18 @@ class SubagentTaskRegistry {
   private next = 1;
 
   /** Spawn `run` detached; returns the task id immediately. */
-  start(description: string, kind: AgentTask["kind"], run: () => Promise<string>): string {
+  start(description: string, kind: AgentTask["kind"], run: () => Promise<string>, sessionId?: string): string {
     const id = `sub-${this.next++}`;
-    const task: AgentTask = { id, description, kind, startedAt: Date.now(), status: "running", report: "", delivered: false };
+    const task: AgentTask = {
+      id,
+      description,
+      kind,
+      startedAt: Date.now(),
+      status: "running",
+      report: "",
+      delivered: false,
+      sessionId,
+    };
     this.tasks.set(id, task);
     void run().then(
       (report) => {
@@ -39,17 +50,23 @@ class SubagentTaskRegistry {
     return id;
   }
 
-  get(id: string): AgentTask | undefined {
-    return this.tasks.get(id);
+  /** A task is visible to a session when it is unscoped (tests/CLI) or owns it. */
+  private visible(task: AgentTask, sessionId?: string): boolean {
+    return !sessionId || task.sessionId === undefined || task.sessionId === sessionId;
   }
 
-  list(): AgentTask[] {
-    return [...this.tasks.values()];
+  get(id: string, sessionId?: string): AgentTask | undefined {
+    const task = this.tasks.get(id);
+    return task && this.visible(task, sessionId) ? task : undefined;
+  }
+
+  list(sessionId?: string): AgentTask[] {
+    return [...this.tasks.values()].filter((t) => this.visible(t, sessionId));
   }
 
   /** Finished-but-undelivered tasks (oldest first); marks them delivered. */
-  drainCompleted(): AgentTask[] {
-    const out = this.list().filter((t) => t.status !== "running" && !t.delivered);
+  drainCompleted(sessionId?: string): AgentTask[] {
+    const out = this.list(sessionId).filter((t) => t.status !== "running" && !t.delivered);
     for (const t of out) t.delivered = true;
     return out;
   }
