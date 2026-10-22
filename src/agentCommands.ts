@@ -136,7 +136,7 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       return {
         kind: "ok",
         text: mcp.statuses
-          .map((s) => `${s.connected ? "✓" : "✗"} ${s.name}: ${s.connected ? `${s.toolCount} tools` : s.error}`)
+          .map((s) => `${s.connected ? "✓" : "✗"} ${s.name}: ${s.connected ? `${s.toolCount} tools${s.kind ? ` (${s.kind})` : ""}` : s.error}`)
           .join("\n"),
       };
     }

@@ -708,13 +708,43 @@ describe("gui server", () => {
           expect(reload.status).toBe(200);
           expect(reloads).toBe(2);
 
+          const remote = await req(gui.port, "/api/mcp/save", {
+            token: TOKEN,
+            method: "POST",
+            body: {
+              name: "remote",
+              scope: "project",
+              config: { url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer t" }, type: "sse" },
+            },
+          });
+          expect(remote.status).toBe(200);
+          expect(reloads).toBe(3);
+          expect(remote.json.servers).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                name: "remote",
+                scope: "project",
+                command: "",
+                url: "https://mcp.example.com/mcp",
+                headers: { Authorization: "Bearer t" },
+                type: "sse",
+                kind: "sse",
+                status: "stopped",
+              }),
+            ]),
+          );
+          const projectFile = path.join(cwd, ".mcp.json");
+          expect(JSON.parse(await fs.readFile(projectFile, "utf8")).mcpServers.remote.url).toBe(
+            "https://mcp.example.com/mcp",
+          );
+
           const bad = await req(gui.port, "/api/mcp/save", {
             token: TOKEN,
             method: "POST",
             body: { name: "bad name", scope: "global", config: { command: "x" } },
           });
           expect(bad.status).toBe(400);
-          expect(reloads).toBe(2);
+          expect(reloads).toBe(3);
 
           const del = await req(gui.port, "/api/mcp/delete", {
             token: TOKEN,
@@ -722,8 +752,17 @@ describe("gui server", () => {
             body: { name: "fs", scope: "global" },
           });
           expect(del.status).toBe(200);
-          expect(del.json.servers).toEqual([]);
-          expect(reloads).toBe(3);
+          expect(del.json.servers.map((s: { name: string }) => s.name)).toEqual(["remote"]);
+          expect(reloads).toBe(4);
+
+          const delRemote = await req(gui.port, "/api/mcp/delete", {
+            token: TOKEN,
+            method: "POST",
+            body: { name: "remote", scope: "project" },
+          });
+          expect(delRemote.status).toBe(200);
+          expect(delRemote.json.servers).toEqual([]);
+          expect(reloads).toBe(5);
 
           const missing = await req(gui.port, "/api/mcp/delete", {
             token: TOKEN,

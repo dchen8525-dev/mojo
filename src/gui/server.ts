@@ -281,12 +281,16 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       command: string;
       args: string[];
       env: Record<string, string>;
+      url: string;
+      headers: Record<string, string>;
+      type: "" | "http" | "sse";
       enabledTools: string[];
       disabledTools: string[];
       disabled: boolean;
       shadowed: boolean;
       status: "connected" | "failed" | "stopped" | "disabled";
       toolCount: number;
+      kind: string;
       error: string | null;
     }> = [];
     const add = (scope: McpScope, configs: Record<string, McpServerConfig>) => {
@@ -295,15 +299,19 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
         servers.push({
           name,
           scope,
-          command: cfg.command,
+          command: cfg.command ?? "",
           args: cfg.args ?? [],
           env: cfg.env ?? {},
+          url: cfg.url ?? "",
+          headers: cfg.headers ?? {},
+          type: cfg.type ?? "",
           enabledTools: cfg.enabledTools ?? [],
           disabledTools: cfg.disabledTools ?? [],
           disabled: !!cfg.disabled,
           shadowed: scope === "global" && projectNames.has(name),
           status: cfg.disabled || opts.mcpDisabled ? "disabled" : status ? (status.connected ? "connected" : "failed") : "stopped",
           toolCount: status?.toolCount ?? 0,
+          kind: status?.kind ?? (cfg.url ? (cfg.type ?? "http") : "stdio"),
           error: status?.error ?? null,
         });
       }

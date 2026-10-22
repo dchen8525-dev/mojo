@@ -338,6 +338,46 @@ describe("GUI interactions (happy-dom)", () => {
     expect(doc.querySelector("#perm-editor")?.classList.contains("hidden")).toBe(true);
   });
 
+  it("saves and renders a remote MCP server", async () => {
+    const servers: Array<Record<string, unknown>> = [];
+    const { window, calls } = await boot({
+      routes: {
+        "/api/mcp": () => ({ servers, disabled: false }),
+        "/api/permissions": () => ({ global: [], project: [], mode: "default" }),
+        "/api/mcp/save": (_url, init) => {
+          const req = JSON.parse(String(init?.body));
+          servers.push({ name: req.name, scope: req.scope, ...req.config, status: "connected", toolCount: 3, kind: "http", error: null });
+          return { servers, disabled: false };
+        },
+      },
+    });
+    const doc = window.document;
+
+    (doc.querySelector("#manage-btn") as HTMLElement).click();
+    await vi.waitFor(() => expect(doc.querySelector("#mcp-note")?.textContent).toContain("项目"));
+    (doc.querySelector("#mcp-add") as HTMLElement).click();
+    (doc.querySelector("#mcp-name") as HTMLInputElement).value = "remote";
+    (doc.querySelector("#mcp-url") as HTMLInputElement).value = "https://mcp.example.com/mcp";
+    (doc.querySelector("#mcp-transport") as HTMLSelectElement).value = "sse";
+    (doc.querySelector("#mcp-headers") as HTMLTextAreaElement).value = "Authorization=Bearer t";
+    (doc.querySelector("#mcp-save") as HTMLElement).click();
+
+    await vi.waitFor(() => expect(doc.querySelectorAll("#mcp-list .profile-row")).toHaveLength(1));
+    const save = calls.find((c) => c.url === "/api/mcp/save")!;
+    expect(JSON.parse(String(save.init?.body))).toEqual({
+      name: "remote",
+      scope: "global",
+      config: { url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer t" }, type: "sse", disabled: false },
+    });
+    expect(doc.querySelector("#mcp-list")?.textContent).toContain("https://mcp.example.com/mcp");
+    expect(doc.querySelector("#mcp-list")?.textContent).toContain("已连接 · 3 个工具 · HTTP");
+
+    (doc.querySelector("#mcp-list .profile-row button") as HTMLElement).click();
+    expect((doc.querySelector("#mcp-url") as HTMLInputElement).value).toBe("https://mcp.example.com/mcp");
+    expect((doc.querySelector("#mcp-transport") as HTMLSelectElement).value).toBe("sse");
+    expect((doc.querySelector("#mcp-headers") as HTMLTextAreaElement).value).toBe("Authorization=Bearer t");
+  });
+
   it("keeps management editors open when a save fails", async () => {
     const fail = () => {
       throw new Error("offline");

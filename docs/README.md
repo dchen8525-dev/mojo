@@ -28,3 +28,4 @@
 | [repetition-reminders.md](repetition-reminders.md) | 2026-10-22 | 重复调用异常提醒 |
 | [atomic-writes.md](atomic-writes.md) | 2026-10-22 | 原子写入（write/edit/session） |
 | [bash-read-state.md](bash-read-state.md) | 2026-10-22 | bash 读态回填与 formatter 失效 |
+| [remote-mcp-servers.md](remote-mcp-servers.md) | 2026-10-22 | 远程 MCP 服务器（Streamable HTTP / SSE） |

@@ -1,5 +1,8 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -15,30 +18,41 @@ import { boundedResult } from "./artifacts.js";
 export const MCP_DEFER_TOOLS = 12;
 
 export interface McpServerConfig {
-  command: string;
+  command?: string;
   args?: string[];
   env?: Record<string, string>;
+  /** Remote endpoint; mutually exclusive with `command`. */
+  url?: string;
+  /** Extra HTTP headers for remote servers (e.g. Authorization). */
+  headers?: Record<string, string>;
+  /** Remote transport; unset = try streamable HTTP, then fall back to SSE. */
+  type?: "http" | "sse";
   /** Restrict which tools are exposed: allowlist of remote tool names. */
   enabledTools?: string[];  disabledTools?: string[];
   /** Kept in the config file but not connected (GUI toggle). */
   disabled?: boolean;
 }
 
+export type McpTransportKind = "stdio" | "http" | "sse";
+
 export interface McpServerStatus {
   name: string;
   connected: boolean;
   toolCount: number;
+  /** How the server is reached; absent when the connection failed before a transport was chosen. */
+  kind?: McpTransportKind;
   error?: string;
 }
 
 interface ConnectedServer {
   name: string;
   client: Client;
-  transport: StdioClientTransport;
+  transport: Transport;
   prefix: string;
 }
 
 const NAMESPACE = "mcp__";
+const REMOTE_CONNECT_TIMEOUT_MS = 15_000;
 
 /** Sanitize a name so it is a valid Anthropic tool name ([a-zA-Z0-9_-]{1,64}). */
 function safe(s: string): string {
@@ -87,7 +101,9 @@ async function readMcpFile(file: string): Promise<Record<string, McpServerConfig
   const servers = isRecord(parsed) ? (isRecord(parsed.mcpServers) ? parsed.mcpServers : parsed) : {};
   const out: Record<string, McpServerConfig> = {};
   for (const [name, cfg] of Object.entries(servers)) {
-    if (isRecord(cfg) && typeof cfg.command === "string") out[name] = cfg as unknown as McpServerConfig;
+    if (isRecord(cfg) && (typeof cfg.command === "string" || typeof cfg.url === "string")) {
+      out[name] = cfg as unknown as McpServerConfig;
+    }
   }
   return out;
 }
@@ -122,27 +138,62 @@ function optionalStringArray(value: unknown, field: string): string[] | undefine
   return value as string[];
 }
 
+function optionalHeaders(input: unknown): Record<string, string> | undefined {
+  if (input === undefined || input === null) return undefined;
+  if (!isRecord(input)) throw new Error("headers must be an object");
+  const headers: Record<string, string> = {};
+  for (const [key, val] of Object.entries(input)) {
+    if (!key || typeof val !== "string") throw new Error("header values must be strings");
+    headers[key] = val;
+  }
+  return Object.keys(headers).length ? headers : undefined;
+}
+
 /** Validate and normalize a GUI-supplied server config. */
 export function normalizeMcpConfig(input: unknown): McpServerConfig {
   if (!isRecord(input)) throw new Error("invalid server config");
   const command = typeof input.command === "string" ? input.command.trim() : "";
-  if (!command) throw new Error("command is required");
-  const cfg: McpServerConfig = { command };
-  const args = optionalStringArray(input.args, "args");
-  if (args?.length) cfg.args = args;
+  const url = typeof input.url === "string" ? input.url.trim() : "";
+  if (command && url) throw new Error("use either command (stdio) or url (remote), not both");
+  if (!command && !url) throw new Error("command or url is required");
+
+  let cfg: McpServerConfig;
+  if (url) {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new Error("url must be a valid URL");
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error("url must start with http:// or https://");
+    }
+    cfg = { url };
+    if (input.type !== undefined && input.type !== null && input.type !== "") {
+      if (input.type !== "http" && input.type !== "sse") throw new Error('type must be "http" or "sse"');
+      cfg.type = input.type;
+    }
+    const headers = optionalHeaders(input.headers);
+    if (headers) cfg.headers = headers;
+  } else {
+    cfg = { command };
+    const args = optionalStringArray(input.args, "args");
+    if (args?.length) cfg.args = args;
+    if (input.env !== undefined && input.env !== null) {
+      if (!isRecord(input.env)) throw new Error("env must be an object");
+      const env: Record<string, string> = {};
+      for (const [key, val] of Object.entries(input.env)) {
+        if (!key || typeof val !== "string") throw new Error("env values must be strings");
+        env[key] = val;
+      }
+      if (Object.keys(env).length) cfg.env = env;
+    }
+  }
+
   const enabledTools = optionalStringArray(input.enabledTools, "enabledTools");
   if (enabledTools?.length) cfg.enabledTools = enabledTools;
   const disabledTools = optionalStringArray(input.disabledTools, "disabledTools");
   if (disabledTools?.length) cfg.disabledTools = disabledTools;
-  if (input.env !== undefined && input.env !== null) {
-    if (!isRecord(input.env)) throw new Error("env must be an object");
-    const env: Record<string, string> = {};
-    for (const [key, val] of Object.entries(input.env)) {
-      if (!key || typeof val !== "string") throw new Error("env values must be strings");
-      env[key] = val;
-    }
-    if (Object.keys(env).length) cfg.env = env;
-  }
   if (input.disabled === true) cfg.disabled = true;
   return cfg;
 }
@@ -241,6 +292,56 @@ function wrapTool(
   };
 }
 
+interface ConnectResult {
+  client: Client;
+  transport: Transport;
+  kind: McpTransportKind;
+}
+
+async function connectStdio(cfg: McpServerConfig): Promise<ConnectResult> {
+  const transport = new StdioClientTransport({
+    command: cfg.command!,
+    args: cfg.args ?? [],
+    env: { ...getDefaultEnvironment(), ...(cfg.env ?? {}) },
+    cwd: process.cwd(),
+    stderr: "pipe",
+  });
+  const client = new Client({ name: "node-agent", version: "0.1.0" });
+  await client.connect(transport);
+  return { client, transport, kind: "stdio" };
+}
+
+/**
+ * Remote endpoints: try the streamable HTTP transport first and fall back to
+ * the legacy SSE transport, mirroring the MCP spec's migration guidance. An
+ * explicit `type` skips the fallback so a misconfiguration fails fast.
+ */
+async function connectRemote(cfg: McpServerConfig): Promise<ConnectResult> {
+  const url = new URL(cfg.url!);
+  const options = cfg.headers ? { requestInit: { headers: cfg.headers } } : {};
+  const attempts: Array<{ kind: "http" | "sse"; make: () => Transport }> = [];
+  if (cfg.type === "http") attempts.push({ kind: "http", make: () => new StreamableHTTPClientTransport(url, options) });
+  else if (cfg.type === "sse") attempts.push({ kind: "sse", make: () => new SSEClientTransport(url, options) });
+  else {
+    attempts.push({ kind: "http", make: () => new StreamableHTTPClientTransport(url, options) });
+    attempts.push({ kind: "sse", make: () => new SSEClientTransport(url, options) });
+  }
+
+  const failures: string[] = [];
+  for (const attempt of attempts) {
+    const transport = attempt.make();
+    const client = new Client({ name: "node-agent", version: "0.1.0" });
+    try {
+      await client.connect(transport, { timeout: REMOTE_CONNECT_TIMEOUT_MS });
+      return { client, transport, kind: attempt.kind };
+    } catch (err) {
+      failures.push(`${attempt.kind}: ${err instanceof Error ? err.message : String(err)}`);
+      await transport.close().catch(() => {});
+    }
+  }
+  throw new Error(`remote MCP connection failed (${failures.join("; ")})`);
+}
+
 export class McpManager {
   private servers = new Map<string, ConnectedServer>();
   statuses: McpServerStatus[] = [];
@@ -255,16 +356,13 @@ export class McpManager {
 
   async connect(name: string, cfg: McpServerConfig): Promise<McpServerStatus> {
     const prefix = `${NAMESPACE}${safe(name)}__`;
+    let client: Client | null = null;
+    let transport: Transport | null = null;
     try {
-      const transport = new StdioClientTransport({
-        command: cfg.command,
-        args: cfg.args ?? [],
-        env: { ...getDefaultEnvironment(), ...(cfg.env ?? {}) },
-        cwd: process.cwd(),
-        stderr: "pipe",
-      });
-      const client = new Client({ name: "node-agent", version: "0.1.0" });
-      await client.connect(transport);
+      if (cfg.url && cfg.command) throw new Error("config has both command and url — keep only one");
+      const conn = cfg.url ? await connectRemote(cfg) : await connectStdio(cfg);
+      client = conn.client;
+      transport = conn.transport;
 
       const { tools: remoteTools } = await client.listTools();
       const filtered = remoteTools.filter((t) => {
@@ -282,10 +380,12 @@ export class McpManager {
       }
 
       this.servers.set(name, { name, client, transport, prefix });
-      const status: McpServerStatus = { name, connected: true, toolCount: registered };
+      const status: McpServerStatus = { name, connected: true, toolCount: registered, kind: conn.kind };
       this.statuses = this.statuses.filter((s) => s.name !== name).concat(status);
       return status;
     } catch (err) {
+      await client?.close().catch(() => {});
+      await transport?.close().catch(() => {});
       const status: McpServerStatus = {
         name,
         connected: false,

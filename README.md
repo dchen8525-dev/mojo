@@ -72,7 +72,8 @@ Ink 的交互式 UI。
 - **自定义斜杠命令**：`.node-agent/commands/*.md` 中的 markdown 提示词模板
 - **钩子（Hooks）**：在 `SessionStart` / `UserPromptSubmit` / `PreToolUse` /
   `PostToolUse` / `PreCompact` / `Stop` 时机执行 shell 命令，支持 `async` 旁路钩子
-- **MCP 客户端**：从 `~/.node-agent/mcp.json` 或 `.mcp.json` 连接 stdio 服务器
+- **MCP 客户端**：从 `~/.node-agent/mcp.json` 或 `.mcp.json` 连接本地 stdio 服务器，或远程
+  Streamable HTTP / SSE 服务器（`url` + 可选 `headers`，HTTP 失败自动回退 SSE）
 - **MCP 服务器模式**：`agent --mcp-server` 把 mojo 自身暴露为 MCP server（只读工具 +
   `agent_chat` + 项目资源），供其他代理编排调用
 - **项目指令**：`AGENTS.md` / `CLAUDE.md` 会被注入系统提示词

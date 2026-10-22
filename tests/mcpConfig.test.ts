@@ -41,9 +41,32 @@ describe("normalizeMcpConfig", () => {
   });
 
   it("rejects missing commands and wrong field types", () => {
-    expect(() => normalizeMcpConfig({})).toThrow(/command is required/);
+    expect(() => normalizeMcpConfig({})).toThrow(/command or url is required/);
     expect(() => normalizeMcpConfig({ command: "x", args: [1] })).toThrow(/args/);
     expect(() => normalizeMcpConfig({ command: "x", env: { A: 1 } })).toThrow(/env/);
+  });
+
+  it("normalizes a remote server with headers and transport", () => {
+    expect(
+      normalizeMcpConfig({
+        url: " https://mcp.example.com/mcp ",
+        headers: { Authorization: "Bearer t" },
+        type: "sse",
+      }),
+    ).toEqual({
+      url: "https://mcp.example.com/mcp",
+      headers: { Authorization: "Bearer t" },
+      type: "sse",
+    });
+    expect(normalizeMcpConfig({ url: "http://localhost:3000/mcp" })).toEqual({ url: "http://localhost:3000/mcp" });
+  });
+
+  it("rejects ambiguous or malformed remote configs", () => {
+    expect(() => normalizeMcpConfig({ command: "x", url: "https://a.example" })).toThrow(/not both/);
+    expect(() => normalizeMcpConfig({ url: "not a url" })).toThrow(/valid URL/);
+    expect(() => normalizeMcpConfig({ url: "ftp://a.example" })).toThrow(/http:\/\/ or https:\/\//);
+    expect(() => normalizeMcpConfig({ url: "https://a.example", type: "websocket" })).toThrow(/type/);
+    expect(() => normalizeMcpConfig({ url: "https://a.example", headers: { A: 1 } })).toThrow(/header values/);
   });
 });
 
@@ -60,6 +83,14 @@ describe("MCP config files", () => {
     const scoped = await loadMcpConfigScoped(cwd, home);
     expect(scoped.global.files.command).toBe("npx");
     expect(scoped.project).toEqual({});
+  });
+
+  it("persists a remote server", async () => {
+    const { cwd, home } = await tempRoot();
+    const cfg = { url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer t" }, type: "http" as const };
+    await saveMcpServer(cwd, "global", "remote", cfg, home);
+    expect((await loadMcpConfigScoped(cwd, home)).global.remote).toEqual(cfg);
+    expect((await loadMcpConfig(cwd, home)).remote).toEqual(cfg);
   });
 
   it("lets a project server override a global one and skips disabled entries", async () => {

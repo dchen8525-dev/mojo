@@ -327,7 +327,23 @@
                   </select>
                 </label>
                 <label class="field wide">
-                  <span>命令</span>
+                  <span>远程 URL <em>http/https，填写后忽略命令</em></span>
+                  <input id="mcp-url" type="text" placeholder="https://mcp.example.com/mcp" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="field">
+                  <span>远程方式</span>
+                  <select id="mcp-transport">
+                    <option value="">自动（HTTP → SSE）</option>
+                    <option value="http">Streamable HTTP</option>
+                    <option value="sse">SSE</option>
+                  </select>
+                </label>
+                <label class="field wide">
+                  <span>HTTP Headers <em>每行 KEY=VALUE</em></span>
+                  <textarea id="mcp-headers" rows="2" spellcheck="false" placeholder="Authorization=Bearer …"></textarea>
+                </label>
+                <label class="field wide">
+                  <span>命令 <em>本地 stdio 服务器</em></span>
                   <input id="mcp-command" type="text" placeholder="npx" autocomplete="off" spellcheck="false" />
                 </label>
                 <label class="field wide">

@@ -2211,7 +2211,7 @@ function renderMcp() {
 
   const servers = Array.isArray(mcpData.servers) ? mcpData.servers : [];
   if (!servers.length) {
-    list.appendChild(el("div", "profile-empty", "还没有 MCP 服务器。点击“添加”连接一个 stdio 服务。"));
+    list.appendChild(el("div", "profile-empty", "还没有 MCP 服务器。点击“添加”连接 stdio 或远程 HTTP/SSE 服务。"));
     return;
   }
   for (const server of servers) {
@@ -2221,13 +2221,14 @@ function renderMcp() {
     const name = el("div", "profile-name");
     name.appendChild(document.createTextNode(server.name));
     name.appendChild(el("span", "profile-badge", server.scope === "project" ? "项目" : "全局"));
+    if (server.url) name.appendChild(el("span", "profile-badge", "远程"));
     if (server.disabled) name.appendChild(el("span", "profile-badge danger", "停用"));
     if (server.shadowed) name.appendChild(el("span", "profile-badge", "被覆盖"));
     main.appendChild(name);
-    main.appendChild(el("div", "profile-meta", [server.command, ...(server.args ?? [])].join(" ")));
+    main.appendChild(el("div", "profile-meta", server.url || [server.command, ...(server.args ?? [])].join(" ")));
     const statusText =
       server.status === "connected"
-        ? `已连接 · ${server.toolCount} 个工具`
+        ? `已连接 · ${server.toolCount} 个工具${server.kind ? ` · ${String(server.kind).toUpperCase()}` : ""}`
         : server.status === "failed"
           ? "连接失败"
           : server.status === "disabled"
@@ -2257,14 +2258,17 @@ function openMcpEditor(server) {
   $("#mcp-scope").value = server?.scope ?? "global";
   $("#mcp-scope").disabled = !!server;
   $("#mcp-command").value = server?.command ?? "";
+  $("#mcp-url").value = server?.url ?? "";
+  $("#mcp-transport").value = server?.type ?? "";
+  $("#mcp-headers").value = Object.entries(server?.headers ?? {}).map(([k, v]) => `${k}=${v}`).join("\n");
   $("#mcp-args").value = (server?.args ?? []).join("\n");
   $("#mcp-env").value = Object.entries(server?.env ?? {}).map(([k, v]) => `${k}=${v}`).join("\n");
   $("#mcp-disabled").checked = !!server?.disabled;
   $("#mcp-edit-note").textContent = server
     ? "改名或切换作用域：请删除后重新添加。保存会立即重连全部 MCP 服务器。"
-    : "全局写入 ~/.node-agent/mcp.json，项目写入 <项目>/.mcp.json；env 值会以 0600 权限保存。";
+    : "全局写入 ~/.node-agent/mcp.json，项目写入 <项目>/.mcp.json；含凭据的 env/headers 均以 0600 权限保存。";
   $("#mcp-editor").classList.remove("hidden");
-  $("#mcp-command").focus();
+  $("#mcp-url").focus();
 }
 
 async function deleteMcpServer(server) {
@@ -2361,31 +2365,54 @@ $("#mcp-save").onclick = async () => {
   const editing = mcpEditing;
   const name = editing?.name ?? $("#mcp-name").value.trim();
   const scope = editing?.scope ?? $("#mcp-scope").value;
-  const command = $("#mcp-command").value.trim();
+  const url = $("#mcp-url").value.trim();
   if (!name) return toast("请填写名称", true);
   if (!/^[A-Za-z0-9._-]{1,40}$/.test(name)) return toast("名称只能包含字母、数字、. _ -（≤40 字符）", true);
-  if (!command) return toast("请填写启动命令", true);
-  const args = $("#mcp-args")
-    .value.split("\n")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const env = {};
-  for (const line of $("#mcp-env").value.split("\n")) {
-    const text = line.trim();
-    if (!text) continue;
-    const eq = text.indexOf("=");
-    if (eq <= 0) return toast(`环境变量格式应为 KEY=VALUE：${text}`, true);
-    env[text.slice(0, eq).trim()] = text.slice(eq + 1);
+
+  const disabled = $("#mcp-disabled").checked;
+  let config;
+  if (url) {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(url);
+    } catch {
+      return toast("远程 URL 无效", true);
+    }
+    if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+      return toast("远程 URL 只支持 http:// 或 https://", true);
+    }
+    const headers = {};
+    for (const line of $("#mcp-headers").value.split("\n")) {
+      const text = line.trim();
+      if (!text) continue;
+      const eq = text.indexOf("=");
+      if (eq <= 0) return toast(`Header 格式应为 KEY=VALUE：${text}`, true);
+      headers[text.slice(0, eq).trim()] = text.slice(eq + 1);
+    }
+    const type = $("#mcp-transport").value;
+    config = { url, headers, disabled, ...(type ? { type } : {}) };
+  } else {
+    const command = $("#mcp-command").value.trim();
+    if (!command) return toast("请填写启动命令或远程 URL", true);
+    const args = $("#mcp-args")
+      .value.split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const env = {};
+    for (const line of $("#mcp-env").value.split("\n")) {
+      const text = line.trim();
+      if (!text) continue;
+      const eq = text.indexOf("=");
+      if (eq <= 0) return toast(`环境变量格式应为 KEY=VALUE：${text}`, true);
+      env[text.slice(0, eq).trim()] = text.slice(eq + 1);
+    }
+    config = { command, args, env, disabled };
   }
 
   const btn = $("#mcp-save");
   btn.disabled = true;
   try {
-    const r = await api("/api/mcp/save", {
-      name,
-      scope,
-      config: { command, args, env, disabled: $("#mcp-disabled").checked },
-    });
+    const r = await api("/api/mcp/save", { name, scope, config });
     if (r.error) return toast("保存失败: " + manageError(r.error), true);
     mcpData = r;
     mcpEditing = null;
