@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createCronTask, cronFilePath, loadCronTasks, cronRunsDir, type CronTask } from "../src/cron.js";
+import { createCronTask, cronFilePath, loadCronTasks, cronRunsDir, startCronRun, type CronTask } from "../src/cron.js";
 import {
   CronScheduler,
   createProcessRunner,
@@ -119,6 +119,70 @@ describe("CronScheduler", () => {
       expect(await scheduler.start()).toBe(true);
       const lease = JSON.parse(await fs.readFile(cronLeasePath(home), "utf8")) as { pid: number };
       expect(lease.pid).toBe(process.pid);
+    } finally {
+      await scheduler.stop();
+    }
+  });
+
+  it("takes over a lease whose pid is alive but heartbeats stopped", async () => {
+    const file = cronLeasePath(home);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, JSON.stringify({ pid: process.pid, token: "someone-else" }), "utf8");
+    const old = new Date(Date.now() - 60_000);
+    await fs.utimes(file, old, old);
+    const { log, lines } = silent();
+    const scheduler = new CronScheduler({
+      home,
+      intervalMs: 60_000,
+      heartbeatMs: 1000,
+      leaseStaleMs: 5000,
+      log,
+      runner: async () => ({ ok: true }),
+    });
+    try {
+      expect(await scheduler.start()).toBe(true);
+      const lease = JSON.parse(await fs.readFile(file, "utf8")) as { token?: string };
+      expect(lease.token).not.toBe("someone-else");
+      expect(lines.some((l) => l.includes("without a heartbeat"))).toBe(true);
+    } finally {
+      await scheduler.stop();
+    }
+  });
+
+  it("refreshes the lease mtime while it owns the scheduler", async () => {
+    const file = cronLeasePath(home);
+    const { log } = silent();
+    const scheduler = new CronScheduler({
+      home,
+      intervalMs: 60_000,
+      heartbeatMs: 25,
+      leaseStaleMs: 5000,
+      log,
+      runner: async () => ({ ok: true }),
+    });
+    try {
+      expect(await scheduler.start()).toBe(true);
+      const first = (await fs.stat(file)).mtimeMs;
+      let latest = first;
+      const deadline = Date.now() + 2000;
+      while (latest <= first && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 25));
+        latest = (await fs.stat(file)).mtimeMs;
+      }
+      expect(latest).toBeGreaterThan(first);
+    } finally {
+      await scheduler.stop();
+    }
+  });
+
+  it("refuses a manual run when another process already started it", async () => {
+    const task = await createCronTask({ cron: "0 9 * * *", prompt: "manual", cwd: project }, home);
+    await startCronRun(task.id, new Date(), home);
+    const scheduler = new CronScheduler({ home, intervalMs: 60_000, log: () => {}, runner: async () => ({ ok: true }) });
+    try {
+      const r = await scheduler.runNow(task.id);
+      expect(r.ok).toBe(false);
+      expect(r.error).toMatch(/already running/);
     } finally {
       await scheduler.stop();
     }

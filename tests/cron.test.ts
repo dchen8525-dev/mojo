@@ -249,6 +249,21 @@ describe("cron task store", () => {
     expect(await startCronRun("nope", new Date(), home)).toBeNull();
   });
 
+  it("refuses a manual start while a fresh run is active", async () => {
+    const created = await createCronTask({ cron: "0 9 * * *", prompt: "x", cwd: home }, home);
+    await startCronRun(created.id, new Date(), home);
+    await expect(startCronRun(created.id, new Date(), home)).rejects.toThrow(/already running/);
+
+    await finishCronRun(created.id, { ok: true }, home);
+    await expect(startCronRun(created.id, new Date(), home)).resolves.toMatchObject({ lastStatus: "running" });
+    await finishCronRun(created.id, { ok: true }, home);
+
+    // An interrupted run past the stale threshold must not block a new one.
+    await startCronRun(created.id, new Date(Date.now() - 3 * 3600_000), home);
+    await expect(startCronRun(created.id, new Date(), home)).resolves.toMatchObject({ lastStatus: "running" });
+    await finishCronRun(created.id, { ok: true }, home);
+  });
+
   it("reaps runs left running by a dead scheduler", async () => {
     const stale = task({ lastStatus: "running", runStartedAt: new Date(Date.now() - 3 * 3600_000).toISOString() });
     await writeTasks([stale]);

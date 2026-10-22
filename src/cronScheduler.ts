@@ -36,6 +36,10 @@ export interface CronSchedulerOptions {
   home?: string;
   /** Poll interval for due tasks and lease re-acquisition. */
   intervalMs?: number;
+  /** How often the owner refreshes the lease mtime. */
+  heartbeatMs?: number;
+  /** A live pid whose lease stopped heartbeating this long ago is presumed reused. */
+  leaseStaleMs?: number;
   /** Upper bound for one scheduled turn; the child is killed when exceeded. */
   runTimeoutMs?: number;
   runner?: CronRunner;
@@ -65,16 +69,39 @@ function isAlive(pid: number): boolean {
   }
 }
 
-async function readLease(file: string): Promise<{ pid?: number; token?: string } | null> {
+async function readLease(file: string): Promise<{ pid?: number; token?: string; mtimeMs?: number } | null> {
   try {
-    const raw = await fs.readFile(file, "utf8");
+    const [raw, stat] = await Promise.all([fs.readFile(file, "utf8"), fs.stat(file)]);
     const parsed = JSON.parse(raw.replace(/^\uFEFF/, "")) as { pid?: unknown; token?: unknown };
     return {
       pid: typeof parsed.pid === "number" ? parsed.pid : undefined,
       token: typeof parsed.token === "string" ? parsed.token : undefined,
+      mtimeMs: stat.mtimeMs,
     };
   } catch {
     return null; // absent or unreadable — claimable
+  }
+}
+
+/**
+ * Publish the complete lease atomically with a hard link. `wx` alone would
+ * expose a zero-length file between creation and the first write, which a
+ * concurrent scheduler would read as "unparseable, therefore claimable" and
+ * both processes would end up believing they own the lease.
+ */
+async function createLease(file: string, body: string): Promise<boolean> {
+  const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(tmp, body, { encoding: "utf8", mode: 0o600 });
+    try {
+      await fs.link(tmp, file);
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw err;
+    }
+  } finally {
+    await fs.unlink(tmp).catch(() => {});
   }
 }
 
@@ -198,11 +225,14 @@ export function createProcessRunner(opts: { home?: string; timeoutMs?: number } 
 export class CronScheduler {
   private readonly home: string;
   private readonly intervalMs: number;
+  private readonly heartbeatMs: number;
+  private readonly leaseStaleMs: number;
   private readonly runner: CronRunner;
   private readonly log: (message: string) => void;
   private readonly onChange?: () => void;
   private readonly token = randomUUID();
   private timer: NodeJS.Timeout | null = null;
+  private heartbeat: NodeJS.Timeout | null = null;
   private started = false;
   private owner = false;
   private ticking = false;
@@ -212,6 +242,8 @@ export class CronScheduler {
   constructor(opts: CronSchedulerOptions = {}) {
     this.home = opts.home ?? os.homedir();
     this.intervalMs = opts.intervalMs ?? envMs("AGENT_CRON_TICK_MS", DEFAULT_INTERVAL_MS);
+    this.heartbeatMs = opts.heartbeatMs ?? Math.max(1000, Math.min(15_000, Math.floor(this.intervalMs / 2)));
+    this.leaseStaleMs = opts.leaseStaleMs ?? this.heartbeatMs * 3;
     this.runner = opts.runner ?? createProcessRunner({ home: this.home, timeoutMs: opts.runTimeoutMs });
     this.log = opts.log ?? ((m) => console.error(m));
     this.onChange = opts.onChange;
@@ -249,51 +281,105 @@ export class CronScheduler {
       clearInterval(this.timer);
       this.timer = null;
     }
+    this.stopHeartbeat();
+    await this.releaseLease();
+  }
+
+  /** Remove the lease only if it is still ours; a standby must never delete another owner's. */
+  private async releaseLease(): Promise<void> {
     const file = cronLeasePath(this.home);
     const lease = await readLease(file);
     if (lease?.token === this.token) await fs.unlink(file).catch(() => {});
   }
 
+  private startHeartbeat(): void {
+    if (this.heartbeat) return;
+    this.heartbeat = setInterval(() => void this.refreshLease(), this.heartbeatMs);
+    this.heartbeat.unref?.();
+  }
+
+  private stopHeartbeat(): void {
+    if (!this.heartbeat) return;
+    clearInterval(this.heartbeat);
+    this.heartbeat = null;
+  }
+
+  /** Keep the lease fresh and notice if another process took it over. */
+  private async refreshLease(): Promise<void> {
+    if (!this.owner) return;
+    const file = cronLeasePath(this.home);
+    const lease = await readLease(file);
+    if (!lease) return; // transient read failure; the next tick reclaims
+    if (lease.token !== this.token) {
+      this.owner = false;
+      this.stopHeartbeat();
+      this.log("cron: lost the scheduler lease to another process");
+      return;
+    }
+    const now = new Date();
+    await fs.utimes(file, now, now).catch(() => {});
+  }
+
+  /** True when the lease still looks owned by a live, heartbeating process. */
+  private leaseIsFresh(lease: { pid?: number; mtimeMs?: number } | null): boolean {
+    if (lease?.pid === undefined || !isAlive(lease.pid)) return false;
+    const age = Date.now() - (lease.mtimeMs ?? 0);
+    return age >= 0 && age < this.leaseStaleMs;
+  }
+
   private async ensureLease(): Promise<boolean> {
     const file = cronLeasePath(this.home);
     await fs.mkdir(path.dirname(file), { recursive: true });
-    // `wx` makes create-if-absent atomic: when several processes start at the
-    // same instant exactly one wins and the rest read its token and stand by.
+    const body = `${JSON.stringify({ pid: process.pid, token: this.token, startedAt: new Date().toISOString() })}\n`;
+    // Linking a complete temp file is create-if-absent and atomic: when several
+    // schedulers start at the same instant exactly one link wins and the rest
+    // read a full lease and stand by.
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const handle = await fs.open(file, "wx", 0o600);
-        try {
-          const body = JSON.stringify({ pid: process.pid, token: this.token, startedAt: new Date().toISOString() });
-          await handle.writeFile(`${body}\n`);
-        } finally {
-          await handle.close();
+        if (await createLease(file, body)) {
+          // A tick already in flight when stop() ran could publish after the
+          // shutdown unlink; withdraw it instead of leaving a ghost lease.
+          if (!this.started) {
+            await this.releaseLease();
+            this.owner = false;
+            return false;
+          }
+          this.owner = true;
+          this.startHeartbeat();
+          return true;
         }
-        this.owner = true;
-        return true;
       } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
-          this.owner = false;
-          this.log(`cron: cannot write scheduler lease: ${err instanceof Error ? err.message : String(err)}`);
-          return false;
-        }
+        this.owner = false;
+        this.stopHeartbeat();
+        this.log(`cron: cannot write scheduler lease: ${err instanceof Error ? err.message : String(err)}`);
+        return false;
       }
       const current = await readLease(file);
       if (current?.token === this.token) {
         this.owner = true;
+        this.startHeartbeat();
         return true;
       }
-      if (current?.pid !== undefined && isAlive(current.pid)) {
+      if (this.leaseIsFresh(current)) {
         this.owner = false;
+        this.stopHeartbeat();
         return false;
       }
-      // Dead or unreadable lease: remove that exact snapshot, then retry the
-      // exclusive create. Re-reading first avoids deleting a fresh lease that
-      // another process claimed after our first read.
+      if (current?.pid !== undefined && isAlive(current.pid)) {
+        // The pid exists but its lease stopped heartbeating: pid reuse after a
+        // crash must not block takeover forever.
+        this.log("cron: taking over a scheduler lease without a heartbeat");
+      }
+      // Dead, stale or unreadable lease: remove that exact snapshot, then retry
+      // the exclusive create. Re-reading first avoids deleting a fresh lease
+      // that another process claimed (or refreshed) after our first read.
       const again = await readLease(file);
       if (again?.pid !== current?.pid || again?.token !== current?.token) continue;
+      if (this.leaseIsFresh(again)) continue;
       await fs.unlink(file).catch(() => {});
     }
     this.owner = false;
+    this.stopHeartbeat();
     return false;
   }
 
@@ -375,7 +461,12 @@ export class CronScheduler {
       return { error: err instanceof Error ? err.message : String(err) };
     }
     if (!task) return { error: "scheduled task not found" };
-    const started = await startCronRun(id, new Date(), this.home);
+    let started: CronTask | null;
+    try {
+      started = await startCronRun(id, new Date(), this.home);
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
     if (!started) return { error: "scheduled task not found" };
     return { task: started };
   }

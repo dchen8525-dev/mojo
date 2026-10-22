@@ -413,6 +413,12 @@ export async function startCronRun(id: string, now = new Date(), home = os.homed
     const tasks = await loadCronTasks(home);
     const task = tasks.find((t) => t.id === id);
     if (!task) return null;
+    // Another process (a different GUI/CLI) may be running this very task.
+    // The stale threshold keeps a killed run from blocking it forever.
+    const startedAt = task.runStartedAt ? new Date(task.runStartedAt).getTime() : Number.NaN;
+    if (task.lastStatus === "running" && Number.isFinite(startedAt) && now.getTime() - startedAt < STALE_RUN_MS) {
+      throw new Error("task is already running");
+    }
     task.lastRunAt = now.toISOString();
     task.lastStatus = "running";
     task.lastError = undefined;
