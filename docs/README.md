@@ -45,3 +45,4 @@
 | [subagent-persistent-memory.md](subagent-persistent-memory.md) | 2026-10-22 | 命名子代理持久记忆（save_memory 工具 + 系统提示注入） |
 | [shell-snapshot-and-cancelled-stream.md](shell-snapshot-and-cancelled-stream.md) | 2026-10-22 | 取消流部分文本持久化 + Windows PowerShell profile 环境快照 |
 | [subagent-mailbox.md](subagent-mailbox.md) | 2026-10-22 | 子代理会话邮箱（send_message / message_parent 双向轮边界消息） |
+| [runtime-command-queue.md](runtime-command-queue.md) | 2026-10-22 | 统一运行时命令队列（忙碌输入排队为后续回合 + 插话开关） |

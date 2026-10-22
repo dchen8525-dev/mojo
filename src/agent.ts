@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { ContentBlock, ImageBlockParam, MessageParam, ToolResultBlockParam, ToolUseBlock } from "./types.js";
 import { validateToolInput } from "./types.js";
+import { RuntimeCommandQueue, type RuntimeCommandImage } from "./runtimeQueue.js";
 import { LLM, type Config, type StreamEvents } from "./llm.js";
 import { CancelledStreamError } from "./llm/types.js";
 import { lookupModel } from "./llm/models.js";
@@ -100,8 +101,8 @@ export class Agent {
   private plan = false;
   /** True between chat() entry and exit; steer() only queues while it holds. */
   private turnRunning = false;
-  /** User inputs submitted mid-turn, applied at the next round boundary. */
-  private steerQueue: Array<{ text: string; images?: ImageBlockParam[] }> = [];
+  /** Unified runtime command queue: steering + queued follow-up prompts. */
+  readonly runtimeQueue = new RuntimeCommandQueue();
 
   /** True while a turn is running. */
   get busy(): boolean {
@@ -131,20 +132,26 @@ export class Agent {
    */
   steer(text: string, images?: ImageBlockParam[]): boolean {
     if (!this.turnRunning) return false;
-    this.steerQueue.push({ text, images });
+    const cmd = this.runtimeQueue.enqueue("steer", text, "agent");
+    if (!cmd) return false;
+    if (images?.length) cmd.images = images as RuntimeCommandImage[];
     this.onSteerQueued?.(text);
     return true;
   }
 
   /** Append queued steering messages to the history; true when any were added. */
   private drainSteer(): boolean {
-    if (!this.steerQueue.length) return false;
-    for (const s of this.steerQueue.splice(0)) {
-      const content: Array<{ type: "text"; text: string } | ImageBlockParam> = [{ type: "text", text: s.text }];
-      for (const img of s.images ?? []) content.push(img);
+    let added = false;
+    for (;;) {
+      const cmd = this.runtimeQueue.take("steer");
+      if (!cmd) break;
+      const content: Array<{ type: "text"; text: string } | ImageBlockParam> = [{ type: "text", text: cmd.prompt }];
+      for (const img of cmd.images ?? []) content.push(img as ImageBlockParam);
       this.messages.push({ role: "user", content });
+      this.runtimeQueue.complete(cmd.id);
+      added = true;
     }
-    return true;
+    return added;
   }
 
   /** Deliver finished background tasks as system-reminder user messages. */
@@ -706,7 +713,7 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
     } catch (err) {
       // Queued steering dies with a failed or aborted turn: never auto-replay
       // it into the next one.
-      this.steerQueue.length = 0;
+      this.runtimeQueue.cancelAll("steer");
       // A user abort mid-stream must not lose the text already delivered to
       // the UI: salvage it as a plain assistant message so /resume and the
       // next request see the same thing the user saw, and the history stays

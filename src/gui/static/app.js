@@ -91,6 +91,7 @@ const state = {
   perms: [], // queued permission requests
   todos: [], // latest todo plan (drives the 待办 popover)
   images: [], // staged image attachments for the next message
+  steerMode: false, // while busy: inject into the running turn instead of queuing
 };
 
 let todoSyncSeq = 0;
@@ -1334,14 +1335,24 @@ async function send() {
   renderAttachments();
   updateComposer();
   try {
-    const r = await api("/api/chat", { text, images: images.length ? images : undefined });
+    const body = { text, images: images.length ? images : undefined };
+    // 插话模式: mid-turn input injects into the running turn instead of
+    // queuing as a follow-up turn.
+    if (state.steerMode && state.busy) body.steer = true;
+    const r = await api("/api/chat", body);
     if (r.error === "busy") toast("智能体正忙", true);
-    // steer ACK arrives before the SSE echo, so only note it here.
-    if (r.queued) toast("已加入队列，将在本轮间隙生效");
+    if (r.queued === "pending") toast("已排队，将在当前回合结束后作为新回合执行");
+    else if (r.queued) toast("已加入本轮插话，将在下个间隙生效");
   } catch (err) {
     toast("发送失败: " + err.message, true);
   }
 }
+
+/* 插话模式: while busy, send injects into the running turn instead of queuing */
+$("#steer-toggle").onclick = () => {
+  state.steerMode = !state.steerMode;
+  $("#steer-toggle").classList.toggle("on", state.steerMode);
+};
 
 $("#send").onclick = send;
 $("#stop").onclick = () => api("/api/abort", {});

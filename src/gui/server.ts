@@ -18,6 +18,7 @@ import {
   type UiTurn,
 } from "./transcript.js";
 import { appendSubCall } from "../session.js";
+import type { RuntimeCommandImage } from "../runtimeQueue.js";
 import type { ProfileInput, PublicProfile } from "../llmProfiles.js";
 import { SseHub } from "./sse.js";
 import { GuiRuntime, type PermissionDecision } from "./state.js";
@@ -530,6 +531,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
     } finally {
       runtime.commandBusy = false;
       runtime.commandController = null;
+      void pumpRuntimeQueue();
     }
 
     hub.broadcast("command_end", {
@@ -602,6 +604,34 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       runtime.busy = false;
       runtime.liveTurn = null;
       runtime.controller = null;
+      void pumpRuntimeQueue();
+    }
+  }
+
+  let pumping = false;
+  /**
+   * Run queued send_prompt commands as full follow-up turns, FIFO, one at a
+   * time. Re-entrant calls are collapsed: the loop always starts from the
+   * outermost completion.
+   */
+  async function pumpRuntimeQueue(): Promise<void> {
+    if (pumping) return;
+    pumping = true;
+    try {
+      for (;;) {
+        if (runtime.busy || runtime.commandBusy || runtime.switching) return;
+        const cmd = project.agent.runtimeQueue.take("send_prompt");
+        if (!cmd) return;
+        hub.broadcast("command_dequeued", { id: cmd.id, text: cmd.prompt });
+        try {
+          await handleChat(cmd.prompt, cmd.images as import("../types.js").ImageBlockParam[]);
+          project.agent.runtimeQueue.complete(cmd.id);
+        } catch (err) {
+          project.agent.runtimeQueue.complete(cmd.id, err instanceof Error ? err.message : String(err));
+        }
+      }
+    } finally {
+      pumping = false;
     }
   }
 
@@ -793,6 +823,18 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       }
     }
 
+    if (method === "GET" && p === "/api/queue") {
+      return sendJson(res, 200, project.agent.runtimeQueue.list());
+    }
+
+    if (method === "DELETE" && p.startsWith("/api/queue/")) {
+      const id = decodeURIComponent(p.slice("/api/queue/".length));
+      const ok = project.agent.runtimeQueue.cancel(id);
+      if (!ok) return sendJson(res, 404, { error: "not cancellable" });
+      hub.broadcast("command_cancelled", { id });
+      return sendJson(res, 200, { ok: true });
+    }
+
     if (method === "POST") {
       let body: Record<string, unknown>;
       try {
@@ -808,14 +850,22 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
         const text = typeof body.text === "string" ? body.text : "";
         const images = Array.isArray(body.images) ? (body.images as import("../types.js").ImageBlockParam[]) : undefined;
         if (!text.trim() && !images?.length) return sendJson(res, 400, { error: "empty" });
-        // Mid-turn input becomes steering: queued and applied at the next
-        // round boundary instead of bouncing off with 409.
-        if (runtime.busy && !runtime.commandBusy && !runtime.switching) {
-          if (!project.agent.steer(text, images)) return sendJson(res, 409, { error: "busy" });
-          hub.broadcast("steer", { text });
-          return sendJson(res, 202, { ok: true, queued: true });
+        if (runtime.switching) return sendJson(res, 409, { error: "busy" });
+        if (runtime.busy || runtime.commandBusy) {
+          // Mid-turn input: explicit steer=true injects at the next round
+          // boundary of the running turn; otherwise the prompt is recorded as
+          // a send_prompt runtime command and runs as its own turn after.
+          if (body.steer === true && !runtime.commandBusy) {
+            if (!project.agent.steer(text, images)) return sendJson(res, 409, { error: "busy" });
+            hub.broadcast("steer", { text });
+            return sendJson(res, 202, { ok: true, queued: "steer" });
+          }
+          const cmd = project.agent.runtimeQueue.enqueue("send_prompt", text, "gui");
+          if (!cmd) return sendJson(res, 429, { error: "runtime command queue is full" });
+          if (images?.length) cmd.images = images as RuntimeCommandImage[];
+          hub.broadcast("command_queued", { id: cmd.id, text });
+          return sendJson(res, 202, { ok: true, queued: "pending", id: cmd.id });
         }
-        if (runtime.busy || runtime.commandBusy || runtime.switching) return sendJson(res, 409, { error: "busy" });
         // Fire and forget: the client watches SSE for turn events.
         void handleChat(text, images);
         return sendJson(res, 202, { ok: true });
@@ -824,6 +874,8 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       if (p === "/api/abort") {
         runtime.controller?.abort();
         runtime.commandController?.abort();
+        const cancelled = project.agent.runtimeQueue.cancelAll("send_prompt");
+        if (cancelled) hub.broadcast("system", { text: `已取消 ${cancelled} 条排队消息` });
         runtime.flushPermissions(); // never leave a turn hung on a prompt
         return sendJson(res, 200, { ok: true });
       }

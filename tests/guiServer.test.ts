@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import http from "node:http";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { Agent } from "../src/agent.js";
 import type { PermissionManager } from "../src/permissions.js";
+import { RuntimeCommandQueue } from "../src/runtimeQueue.js";
 import { SseHub } from "../src/gui/sse.js";
 import { GuiRuntime } from "../src/gui/state.js";
 import { startGuiServer, type RunningGui } from "../src/gui/server.js";
@@ -32,6 +33,7 @@ function fakeAgent(overrides: Partial<Agent> = {}): Agent {
     listModels: async () => ["m1"],
     chat: async () => "done",
     steer: () => false,
+    runtimeQueue: new RuntimeCommandQueue(),
     ...overrides,
   } as unknown as Agent;
 }
@@ -256,11 +258,16 @@ describe("gui server", () => {
     });
   });
 
-  it("returns 409 when a turn is already running", async () => {
+  it("queues mid-turn chat instead of 409; still 409 while switching", async () => {
     await withServer(async (gui, runtime) => {
       runtime.busy = true;
       const r = await req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "hi" } });
-      expect(r.status).toBe(409);
+      expect(r.status).toBe(202);
+      expect(r.json.queued).toBe("pending");
+      runtime.busy = false;
+      runtime.switching = true;
+      const s = await req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "hi" } });
+      expect(s.status).toBe(409);
     });
   });
 
@@ -276,21 +283,28 @@ describe("gui server", () => {
           req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "one" } }),
           req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "two" } }),
         ]);
-        expect([a.status, b.status].sort()).toEqual([202, 409]);
+        expect(a.status).toBe(202);
+        expect(b.status).toBe(202);
+        // readBody completion order is not guaranteed, so exactly one of the
+        // two became the live turn and the other was queued.
+        const queued = [a, b].filter((r) => r.json.queued === "pending");
+        expect(queued).toHaveLength(1);
         await started;
         expect(starts).toBe(1);
         release();
+        await vi.waitFor(() => expect(starts).toBe(2));
       },
       {
-        chat: async () => {
+        chat: async (text: string) => {
           starts++;
+          expect(text === "one" || text === "two").toBe(true);
           chatStarted();
           await gate;
           return "done";
         },
       },
     );
-    expect(starts).toBe(1);
+    expect(starts).toBe(2);
   });
 
   it("rejects unknown permission decisions instead of persisting them as allow rules", async () => {
@@ -325,7 +339,20 @@ describe("gui server", () => {
     });
   });
 
-  it("queues mid-turn chat input as steering", async () => {
+  it("queues mid-turn chat input as a pending send_prompt command by default", async () => {
+    await withServer(async (gui, runtime, agent) => {
+      runtime.busy = true;
+      const r = await req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "run this after" } });
+      expect(r.status).toBe(202);
+      expect(r.json.queued).toBe("pending");
+      expect(r.json.id).toMatch(/^cmd-/);
+      const listed = await req(gui.port, "/api/queue", { token: TOKEN });
+      expect(listed.json).toHaveLength(1);
+      expect(listed.json[0]).toMatchObject({ type: "send_prompt", prompt: "run this after", status: "accepted", source: "gui" });
+    });
+  });
+
+  it("steers mid-turn only when steer is explicit", async () => {
     await withServer(async (gui, runtime, agent) => {
       runtime.busy = true;
       const steered: string[] = [];
@@ -333,10 +360,51 @@ describe("gui server", () => {
         steered.push(text);
         return true;
       };
-      const r = await req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "also check the tests" } });
+      const r = await req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "also check the tests", steer: true } });
       expect(r.status).toBe(202);
-      expect(r.json.queued).toBe(true);
+      expect(r.json.queued).toBe("steer");
       expect(steered).toEqual(["also check the tests"]);
+      // Default path does not steer.
+      const q = await req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "queue me" } });
+      expect(q.json.queued).toBe("pending");
+      expect(steered).toEqual(["also check the tests"]);
+    });
+  });
+
+  it("runs queued send_prompt commands as follow-up turns after the current one", async () => {
+    await withServer(async (gui, runtime, agent) => {
+      let release: () => void = () => {};
+      let calls = 0;
+      const order: string[] = [];
+      (agent as { chat: unknown }).chat = async (text: string) => {
+        calls++;
+        order.push(text);
+        if (calls === 1) await new Promise<void>((r) => (release = r));
+        return "ok";
+      };
+      const first = req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "one" } });
+      await vi.waitFor(() => expect(runtime.busy).toBe(true));
+      const second = await req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "two" } });
+      expect(second.json.queued).toBe("pending");
+      release();
+      await first;
+      await vi.waitFor(() => expect(order).toEqual(["one", "two"]));
+      const listed = await req(gui.port, "/api/queue", { token: TOKEN });
+      expect(listed.json.find((c: { prompt: string }) => c.prompt === "two").status).toBe("done");
+    });
+  });
+
+  it("DELETE /api/queue/:id cancels a pending command; abort cancels all pending", async () => {
+    await withServer(async (gui, runtime, agent) => {
+      runtime.busy = true;
+      const a = await req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "keep me" } });
+      const b = await req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "drop me" } });
+      const del = await req(gui.port, `/api/queue/${b.json.id}`, { method: "DELETE", token: TOKEN });
+      expect(del.status).toBe(200);
+      expect((await req(gui.port, `/api/queue/${b.json.id}`, { method: "DELETE", token: TOKEN })).status).toBe(404);
+      await req(gui.port, "/api/abort", { method: "POST", token: TOKEN, body: {} });
+      const listed = await req(gui.port, "/api/queue", { token: TOKEN });
+      expect(listed.json.find((c: { id: string }) => c.id === a.json.id).status).toBe("cancelled");
     });
   });
 
@@ -513,7 +581,8 @@ describe("gui server", () => {
       let release!: () => void;
       (agent as unknown as { review: () => Promise<string> }).review = () =>
         new Promise<string>((resolve) => (release = () => resolve("done")));
-      const sse = collectSse(gui.port, 3); // command_start + progress + command_end
+      // command_start + command_queued + progress + command_cancelled + command_end
+      const sse = collectSse(gui.port, 5);
       await sse.ready;
       const start = await req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "/review" } });
       expect(start.status).toBe(202);
@@ -522,7 +591,10 @@ describe("gui server", () => {
       const state = await req(gui.port, "/api/state", { token: TOKEN });
       expect(state.json.busy).toBe(true);
       const chat = await req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "hi" } });
-      expect(chat.status).toBe(409);
+      expect(chat.status).toBe(202);
+      expect(chat.json.queued).toBe("pending");
+      // Drop it: this test is about busy-rejection, not the pump.
+      await req(gui.port, `/api/queue/${chat.json.id}`, { method: "DELETE", token: TOKEN });
       const project = await req(gui.port, "/api/project", { method: "POST", token: TOKEN, body: { cwd: "/tmp/x" } });
       expect(project.status).toBe(409);
       const resume = await req(gui.port, "/api/resume", { method: "POST", token: TOKEN, body: { id: "x" } });
