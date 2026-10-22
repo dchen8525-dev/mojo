@@ -770,6 +770,8 @@ async function refreshState() {
   updateWelcome();
   if (keepScroll !== null) transcriptEl.scrollTop = keepScroll;
   else scrollBottom();
+  // The redraw dropped the find highlights; re-apply them if the bar is open.
+  if (!findBar.classList.contains("hidden") && findInput.value) runFind();
   if (Array.isArray(s.customCommands)) customCmds = s.customCommands;
   todoSyncEpoch++; // invalidate any todo-only refresh that started earlier
   state.todos = Array.isArray(s.todos) ? s.todos : [];
@@ -1004,6 +1006,7 @@ function connectSSE() {
 
   on("turn_end", () => {
     finalizeLive();
+    notifyUser("回合完成", (state.liveTurn?.text || "").trim().slice(0, 140) || "模型已回复完毕。");
     state.liveTurn = null;
     state.busy = false;
     updateComposer();
@@ -1016,6 +1019,7 @@ function connectSSE() {
 
   on("turn_error", (d) => {
     finalizeLive();
+    if (!d.aborted) notifyUser("回合出错", (d.message || "未知错误").slice(0, 140));
     state.liveTurn = null;
     state.busy = false;
     updateComposer();
@@ -1083,6 +1087,7 @@ function connectSSE() {
   on("permission_request", (d) => {
     state.perms.push(d);
     showPermission();
+    notifyUser("等待权限批准", String(d.description || "").slice(0, 140));
   });
 }
 
@@ -2737,9 +2742,53 @@ $("#cron-save").onclick = async () => {
   }
 };
 
+/* ---------------- notifications ---------------- */
+
+/* Surface turn/permission/background events while the window is unfocused:
+   a system notification when permitted, and always a title-bar badge that
+   clears on focus. Hidden windows are the only audience — visible ones see
+   the stream live. */
+
+const notifyState = { unseen: 0 };
+
+function resetTitleBadge() {
+  notifyState.unseen = 0;
+  document.title = "mojo";
+}
+
+function flashTitle() {
+  notifyState.unseen += 1;
+  document.title = `(${notifyState.unseen}) mojo`;
+}
+
+window.addEventListener("focus", resetTitleBadge);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) resetTitleBadge();
+});
+
+function notifyUser(title, body) {
+  if (!document.hidden) return;
+  flashTitle();
+  try {
+    if (typeof Notification === "undefined") return;
+    if (Notification.permission === "granted") {
+      const n = new Notification(title, { body, tag: "mojo" });
+      n.onclick = () => {
+        window.focus();
+        n.close();
+      };
+    } else if (Notification.permission === "default") {
+      void Notification.requestPermission();
+    }
+  } catch {
+    /* the title badge is the fallback */
+  }
+}
+
 /* ---------------- background tasks ---------------- */
 
 let bgTimer = null;
+let bgPrevRunning = new Set();
 
 async function loadBackground(silent = false) {
   try {
@@ -2765,6 +2814,16 @@ function renderBackground(data) {
   const badge = $("#bg-count");
   badge.textContent = String(running);
   badge.classList.toggle("hidden", running === 0);
+
+  // Tasks seen running last poll and gone now (not killed) finished on their own.
+  const nowRunning = new Set(tasks.filter((t) => t.running).map((t) => t.id));
+  for (const t of tasks) {
+    if (!t.running && bgPrevRunning.has(t.id) && !t.killed) {
+      const failed = typeof t.exitCode === "number" && t.exitCode !== 0;
+      notifyUser(failed ? "后台任务失败" : "后台任务结束", String(t.command || "").slice(0, 140));
+    }
+  }
+  bgPrevRunning = nowRunning;
 
   const list = $("#bg-list");
   const scrollTop = list.scrollTop;
@@ -2820,6 +2879,84 @@ $("#background-btn").onclick = (e) => {
   setBackgroundOpen($("#background-pop").classList.contains("hidden"));
 };
 $("#bg-close").onclick = () => setBackgroundOpen(false);
+
+/* ---------------- conversation find ---------------- */
+
+/* Ctrl+F search over the transcript. Matching is per top-level transcript
+   block (a message, a thinking card, or a whole tool group) — text-level
+   highlighting inside rendered Markdown DOM is not worth the fragility, so
+   hits get an outline and Enter/Shift+Enter walk through them. */
+
+const findBar = $("#find-bar");
+const findInput = $("#find-input");
+const findCount = $("#find-count");
+let findHits = [];
+let findIndex = -1;
+
+function clearFind() {
+  for (const node of transcriptEl.querySelectorAll(".find-hit, .find-current")) {
+    node.classList.remove("find-hit", "find-current");
+  }
+  findHits = [];
+  findIndex = -1;
+  findCount.textContent = "";
+}
+
+function runFind() {
+  clearFind();
+  const q = findInput.value.trim().toLowerCase();
+  if (!q) return;
+  for (const node of transcriptEl.children) {
+    if ((node.textContent || "").toLowerCase().includes(q)) {
+      node.classList.add("find-hit");
+      findHits.push(node);
+    }
+  }
+  updateFindCount();
+  if (findHits.length) gotoFind(0);
+}
+
+function updateFindCount() {
+  findCount.textContent = findHits.length ? `${findIndex + 1} / ${findHits.length}` : "无结果";
+}
+
+function gotoFind(i) {
+  if (!findHits.length) return;
+  if (findIndex >= 0 && findHits[findIndex]) findHits[findIndex].classList.remove("find-current");
+  findIndex = ((i % findHits.length) + findHits.length) % findHits.length;
+  const node = findHits[findIndex];
+  node.classList.add("find-current");
+  updateFindCount();
+  // Detaching via a real scroll event is fine: scrollIntoView lands away from
+  // the bottom, so the scroll handler flips follow.on on its own.
+  node.scrollIntoView({ block: "center" });
+}
+
+function setFindOpen(open) {
+  findBar.classList.toggle("hidden", !open);
+  if (open) {
+    findInput.focus();
+    findInput.select();
+    runFind();
+  } else {
+    clearFind();
+  }
+}
+
+$("#find-close").onclick = () => setFindOpen(false);
+$("#find-next").onclick = () => gotoFind(findIndex + 1);
+$("#find-prev").onclick = () => gotoFind(findIndex - 1);
+findInput.addEventListener("input", runFind);
+findInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    gotoFind(e.shiftKey ? findIndex - 1 : findIndex + 1);
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    setFindOpen(false);
+    input.focus();
+  }
+});
 
 /* ---------------- todos ---------------- */
 
@@ -2906,6 +3043,12 @@ document.addEventListener("keydown", (e) => {
     sessionSearch.select();
     return;
   }
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "f") {
+    e.preventDefault();
+    if (document.querySelector(".modal:not(.hidden)")) return;
+    setFindOpen(true);
+    return;
+  }
   if (
     e.key === "?" &&
     !e.ctrlKey &&
@@ -2942,6 +3085,9 @@ document.addEventListener("keydown", (e) => {
   } else if (e.key === "Escape" && !$("#todo-pop").classList.contains("hidden")) {
     e.preventDefault();
     setTodosOpen(false);
+  } else if (e.key === "Escape" && !findBar.classList.contains("hidden")) {
+    e.preventDefault();
+    setFindOpen(false);
   } else if (e.key === "Escape" && !$("#usage-modal").classList.contains("hidden")) {
     e.preventDefault();
     $("#usage-modal").classList.add("hidden");
@@ -2983,7 +3129,6 @@ document.addEventListener("keydown", (e) => {
   loadSessions();
   loadModelOptions();
   loadBackground(true);
-  setInterval(() => {
-    if (!document.hidden) loadBackground(true);
-  }, 10_000);
+  // Poll even when hidden so unfocused windows learn about task completion.
+  setInterval(() => loadBackground(true), 10_000);
 })();

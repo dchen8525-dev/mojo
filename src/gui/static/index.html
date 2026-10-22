@@ -58,6 +58,13 @@
         <div id="transcript-wrap">
           <section id="transcript" class="hidden"></section>
           <button id="jump-bottom" class="hidden" title="回到底部">↓ 回到底部</button>
+          <div id="find-bar" class="hidden">
+            <input id="find-input" type="text" placeholder="在会话中查找…" aria-label="在会话中查找" />
+            <span id="find-count"></span>
+            <button id="find-prev" type="button" title="上一个（Shift+Enter）">↑</button>
+            <button id="find-next" type="button" title="下一个（Enter）">↓</button>
+            <button id="find-close" type="button" class="modal-x" title="关闭" aria-label="关闭查找">×</button>
+          </div>
         </div>
 
         <div id="composer">
@@ -451,6 +458,7 @@
         </div>
         <div id="help-list" class="help-body">
           <div class="help-row"><kbd>Ctrl / Cmd + K</kbd><span>搜索历史会话</span></div>
+          <div class="help-row"><kbd>Ctrl / Cmd + F</kbd><span>在当前会话中查找</span></div>
           <div class="help-row"><kbd>Ctrl / Cmd + Enter</kbd><span>发送消息</span></div>
           <div class="help-row"><kbd>Enter</kbd><span>发送（输入框内）</span></div>
           <div class="help-row"><kbd>Shift + Enter</kbd><span>换行</span></div>

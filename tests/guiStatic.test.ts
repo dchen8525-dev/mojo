@@ -190,4 +190,35 @@ describe("GUI static assets", () => {
     expect(css).toContain(".perm-preview .diff-row");
     expect(css).toContain(".perm-preview .diff-num");
   });
+
+  it("notifies about turns, permissions, and background completion only when hidden", () => {
+    expect(app).toContain("function notifyUser(title, body)");
+    expect(app).toContain("if (!document.hidden) return;");
+    expect(app).toContain("Notification.permission");
+    expect(app).toContain('document.title = `(${notifyState.unseen}) mojo`');
+    for (const hook of ['notifyUser("回合完成"', 'notifyUser("回合出错"', 'notifyUser("等待权限批准"', 'notifyUser(failed ? "后台任务失败" : "后台任务结束"']) {
+      expect(app).toContain(hook);
+    }
+    // Completion detection needs the poll to run while hidden too.
+    expect(app).toContain("// Poll even when hidden so unfocused windows learn about task completion.");
+    expect(app).toContain("bgPrevRunning");
+  });
+
+  it("wires Ctrl+F conversation find over transcript blocks", () => {
+    for (const id of ["find-bar", "find-input", "find-count", "find-prev", "find-next", "find-close"]) {
+      expect(html).toContain(`id="${id}"`);
+      expect(app).toContain(`"#${id}"`);
+    }
+    expect(app).toMatch(/e\.key\.toLowerCase\(\) === "f"/);
+    expect(app).toContain("function runFind()");
+    expect(app).toContain("function gotoFind(");
+    expect(app).toContain("findInput.addEventListener(\"input\", runFind)");
+    expect(app).toContain("transcriptEl.children");
+    expect(app).toContain("node.scrollIntoView({ block: \"center\" })");
+    // A full redraw must re-apply highlights when the find bar is open.
+    expect(app).toContain("runFind();");
+    expect(css).toContain("#find-bar");
+    expect(css).toContain(".find-current");
+    expect(html).toContain("<kbd>Ctrl / Cmd + F</kbd>");
+  });
 });

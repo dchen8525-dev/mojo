@@ -33,3 +33,6 @@
 | [cron-automation.md](cron-automation.md) | 2026-10-22 | 定时任务：cron 表达式、单所有者调度、无头执行 |
 | [memory-recall.md](memory-recall.md) | 2026-10-22 | 记忆召回选择器：裁剪旧条目按需注入 |
 | [gui-transport-hardening.md](gui-transport-hardening.md) | 2026-10-22 | GUI 请求体上限、令牌作用域、SSE 背压、会话文件权限 |
+| [adversarial-analysis-2026-10-22.md](adversarial-analysis-2026-10-22.md) | 7ff28f1 | 十轮对抗性审计报告（cron → OAuth） |
+| [scroll-ownership-approval-diff.md](scroll-ownership-approval-diff.md) | 857575a | GUI 流式滚动所有权 + 审批弹窗结构化 diff |
+| [gui-notifications-conversation-find.md](gui-notifications-conversation-find.md) | 2026-10-22 | 失焦任务通知 + Ctrl+F 会话内查找 |
