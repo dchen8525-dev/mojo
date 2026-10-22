@@ -42,3 +42,4 @@
 | [edit-match-strategies.md](edit-match-strategies.md) | 2026-10-22 | edit_file 多策略模糊匹配与歧义检测 |
 | [autocompact-decision.md](autocompact-decision.md) | 2026-10-22 | autocompact 输出预留与失败熔断 |
 | [sse-replay-fixtures.md](sse-replay-fixtures.md) | 2026-10-22 | SSE 回放夹具：事件契约漂移检测 + happy-dom 回放 |
+| [subagent-persistent-memory.md](subagent-persistent-memory.md) | 2026-10-22 | 命名子代理持久记忆（save_memory 工具 + 系统提示注入） |
