@@ -856,7 +856,11 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
           // boundary of the running turn; otherwise the prompt is recorded as
           // a send_prompt runtime command and runs as its own turn after.
           if (body.steer === true && !runtime.commandBusy) {
-            if (!project.agent.steer(text, images)) return sendJson(res, 409, { error: "busy" });
+            try {
+              if (!project.agent.steer(text, images)) return sendJson(res, 409, { error: "busy" });
+            } catch (err) {
+              return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+            }
             hub.broadcast("steer", { text });
             return sendJson(res, 202, { ok: true, queued: "steer" });
           }

@@ -5,6 +5,7 @@ import path from "node:path";
 import type { ContentBlock, ImageBlockParam, MessageParam, ToolResultBlockParam, ToolUseBlock } from "./types.js";
 import { validateToolInput } from "./types.js";
 import { RuntimeCommandQueue, type RuntimeCommandImage } from "./runtimeQueue.js";
+import { enforceSessionMediaBudget, mediaLimits, validateImages } from "./mediaBudget.js";
 import { LLM, type Config, type StreamEvents } from "./llm.js";
 import { CancelledStreamError } from "./llm/types.js";
 import { lookupModel } from "./llm/models.js";
@@ -132,6 +133,7 @@ export class Agent {
    */
   steer(text: string, images?: ImageBlockParam[]): boolean {
     if (!this.turnRunning) return false;
+    validateImages(images, mediaLimits());
     const cmd = this.runtimeQueue.enqueue("steer", text, "agent");
     if (!cmd) return false;
     if (images?.length) cmd.images = images as RuntimeCommandImage[];
@@ -527,6 +529,9 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
    * user; they ride along in the first user message.
    */
   async chat(userText: string, signal?: AbortSignal, events?: AgentEvents, images?: ImageBlockParam[]): Promise<string> {
+    // Media budget: reject inbound images past the per-message/per-image caps
+    // before anything is recorded.
+    validateImages(images, mediaLimits());
     // The session file is created on demand. Opening the app (or "new task")
     // must not litter the sidebar with empty sessions; a session exists once
     // the user actually sends something.
@@ -612,6 +617,9 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
         }
 
         const sent = this.messages.length;
+        // Session media budget: images pile up across a long session; elide
+        // the oldest ones (in place, placeholder text) before this round.
+        if (enforceSessionMediaBudget(this.messages, mediaLimits()) > 0) this.tokens.invalidate();
         // Deferred tools (bulky MCP servers) stay out of the tool list until
         // tool_search exposes them; the search tool itself is always visible.
         const activeTools = this.planMode

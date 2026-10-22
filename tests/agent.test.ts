@@ -189,6 +189,7 @@ beforeEach(() => {
   h.sentTools = [];
   h.sentSystems = [];
   h.recalled = "";
+  h.appended = [];
   h.onSend = null;
   toolEvents.length = 0;
 });
@@ -202,6 +203,40 @@ describe("Agent.chat memory recall", () => {
     expect(content[0].text).toContain("why did we choose WAL?");
     expect(content[0].text).toContain('<system-reminder event="RecalledMemory">');
     expect(content[0].text).toContain("WAL mode is required.");
+  });
+});
+
+describe("Agent.chat media budget", () => {
+  afterEach(() => {
+    delete process.env.AGENT_MAX_IMAGES_PER_MESSAGE;
+    delete process.env.AGENT_MAX_SESSION_IMAGES;
+  });
+
+  function img(): ContentBlock {
+    return {
+      type: "image",
+      source: { type: "base64", media_type: "image/png", data: "A".repeat(1024) },
+    } as unknown as ContentBlock;
+  }
+
+  it("rejects inbound images past the per-message cap before recording anything", async () => {
+    process.env.AGENT_MAX_IMAGES_PER_MESSAGE = "1";
+    const agent = makeAgent();
+    await expect(agent.chat("hi", undefined, undefined, [img(), img()] as never)).rejects.toThrow(/limit 1 per message/);
+    expect(h.appended).toHaveLength(0);
+  });
+
+  it("elides oldest resident images when the session cap trips, before the next send", async () => {
+    process.env.AGENT_MAX_SESSION_IMAGES = "1";
+    h.turns = [textTurn("a"), textTurn("b")];
+    const agent = makeAgent();
+    await agent.chat("one", undefined, undefined, [img()] as never);
+    await agent.chat("two", undefined, undefined, [img()] as never);
+    // Second chat's send sees the first chat's image elided; only the
+    // current turn's image is still live (cap 1).
+    const sent = JSON.stringify(h.sentMessages[1]);
+    expect(sent).toContain("[image removed: session media budget]");
+    expect((sent.match(/"type":"image"/g) ?? []).length).toBe(1);
   });
 });
 
