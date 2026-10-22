@@ -1,5 +1,5 @@
 export function parseArgs(argv: string[]) {
-  const args = { resume: "", cont: false, print: "", model: "", provider: "", theme: "", auto: false, yolo: false, plan: false, mcpServer: false, noMcp: false, noLsp: false, help: false, version: false, exportId: "", exportFormat: "md" as "md" | "json", gui: false, port: 0 };
+  const args = { resume: "", cont: false, print: "", model: "", provider: "", theme: "", auto: false, yolo: false, plan: false, mcpServer: false, noMcp: false, noLsp: false, noCron: false, help: false, version: false, exportId: "", exportFormat: "md" as "md" | "json", gui: false, port: 0 };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--resume" && argv[i + 1]) args.resume = argv[++i];
     else if (argv[i] === "--continue") args.cont = true;
@@ -16,6 +16,7 @@ export function parseArgs(argv: string[]) {
     else if (argv[i] === "--mcp-server") args.mcpServer = true;
     else if (argv[i] === "--no-mcp") args.noMcp = true;
     else if (argv[i] === "--no-lsp") args.noLsp = true;
+    else if (argv[i] === "--no-cron") args.noCron = true;
     else if (argv[i] === "--gui") args.gui = true;
     else if (argv[i] === "-h" || argv[i] === "--help") args.help = true;
     else if (argv[i] === "-v" || argv[i] === "--version") args.version = true;

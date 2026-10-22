@@ -20,6 +20,7 @@ import { McpManager, loadMcpConfig, type McpServerStatus } from "../mcp.js";
 import { loadSlashCommands, type SlashCommand } from "../commands.js";
 import { configureLsp, disposeLsp, loadLspConfig } from "../lsp.js";
 import { backgroundManager } from "../tools/background.js";
+import { CronScheduler } from "../cronScheduler.js";
 import {
   loadSession,
   listSessions,
@@ -83,6 +84,8 @@ export interface GuiStartOptions {
   plan?: boolean;
   noMcp?: boolean;
   noLsp?: boolean;
+  /** Don't run the scheduled-task scheduler in this process (--no-cron). */
+  noCron?: boolean;
   /** 0 picks an ephemeral port (what Electron uses). */
   port?: number;
   /** Called when the UI asks to quit (button / /quit / window close). */
@@ -207,6 +210,7 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
   const mode: Mode = opts.yolo ? "yolo" : opts.auto ? "auto" : "default";
   const noMcp = !!opts.noMcp;
   const noLsp = !!opts.noLsp;
+  const noCron = !!opts.noCron;
 
   const session = await seedSession(cwd, resumeId);
   for (const c of session.subCalls ?? []) runtime.recordSubCall(c.toolUseId, c);
@@ -221,6 +225,13 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
   runtime.attach(project.agent, project.permissions);
   await rememberRecentProject(cwd);
   void refreshModelMeta();
+
+  // ---- scheduled tasks (one process holds the lease; the rest stand by) ----
+  const cron = noCron ? null : new CronScheduler({ onChange: () => hub.broadcast("cron_changed", {}) });
+  if (cron) {
+    const owns = await cron.start();
+    console.error(owns ? "cron: scheduler active" : "cron: standby (another process owns the scheduler)");
+  }
   // A stuck permission prompt with no client to answer it would hang the turn
   // forever; when the last tab/window closes, deny outstanding prompts.
   hub.onEmpty = () => runtime.flushPermissions();
@@ -456,6 +467,8 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
       hub,
       runtime,
       token,
+      cronScheduler: cron,
+      cronDisabled: noCron,
       switchProject,
       reloadMcp,
       mcpDisabled: noMcp,
@@ -526,6 +539,7 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
     shut = true;
     runtime.controller?.abort();
     runtime.flushPermissions();
+    await cron?.stop();
     await gui.close();
     await project.mcp?.shutdown();
     await disposeLsp();

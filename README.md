@@ -77,6 +77,9 @@ Ink 的交互式 UI。
   走浏览器 OAuth 2.1 授权，令牌存于 `~/.node-agent/mcp-auth`）
 - **MCP 服务器模式**：`agent --mcp-server` 把 mojo 自身暴露为 MCP server（只读工具 +
   `agent_chat` + 项目资源），供其他代理编排调用
+- **定时任务**：`/cron`、`cron_create` 工具或 GUI「定时任务」面板管理 5 段 cron（本机时区）；
+  每次触发在指定目录新开一轮无头会话，日志落在 `~/.node-agent/cron-runs`，调度器单所有者
+  并自动接管；`--no-cron` 可关闭自动触发
 - **项目指令**：`AGENTS.md` / `CLAUDE.md` 会被注入系统提示词
 
 ## 安装
@@ -359,6 +362,7 @@ agent --yolo                  # 批准一切（谨慎使用）
 agent --plan                  # 以 Plan 模式启动（先只读探索 + 出计划待批准）
 agent --mcp-server            # 作为 MCP 服务器在 stdio 上运行（供其他代理编排）
 agent --no-mcp                # 跳过 MCP 服务器
+agent --no-cron               # 不启动定时任务调度器（任务仍可编辑与手动运行）
 ```
 
 ### 图形界面（GUI）
@@ -422,6 +426,7 @@ provider、model、baseURL 与 key，并把选择写入当前项目（项目配�
 
 `/help` · `/model [spec|list]` · `/auto [on|off]` · `/yolo` · `/plan [on|off]` ·
 `/theme [dark|light|auto]` · `/mcp` · `/lsp` · `/compact` · `/context` · `/review [base] [focus]` ·
+`/cron [add <min> <hour> <day> <month> <weekday> <prompt> | on|off|run|rm <id>]` ·
 `/permissions [clear]` · `/hooks` · `/sessions [--cwd <dir>] [--title <词>] [--tag <tag>] [N]` · `/search [-r] <词>` · `/resume <id>` · `/fork [N] [名称]` · `/rename <名称>` · `/tag [+<tag> | -<tag> | clear]` · `/export [md|json] [路径]` · `/todos` · `/undo [-y]` ·
 `/cost [usd | all | by session|model|day | export [路径]]` · `/clear` · `/quit`
 
@@ -708,6 +713,26 @@ Review @$1 for correctness issues. Focus on edge cases.
   智能体的项目指令与长期记忆
 
 协议走 stdout，所有日志走 stderr。
+
+### 定时任务（cron）
+
+想在每天 9 点自动总结提交、每周五生成周报，可以让 mojo 自己排期：
+
+```text
+/cron add 0 9 * * 1-5 总结昨天的提交并列出风险
+/cron                       ← 查看任务、下次运行与上次结果
+/cron off cr_1a2b3c4d       ← 暂停；on 重新启用，run 立即运行，rm 删除
+```
+
+也可以让 agent 用 `cron_create` 工具创建（创建与删除都需要高危审批），或在 GUI 的
+「定时任务」标签里可视化编辑。表达式是经典 5 段 `分 时 日 月 周`，按本机时区解释，支持
+区间、步长与列表；每次触发都会在任务的 `cwd` **新开一轮无头 agent 会话**执行提示词，
+输出写入 `~/.node-agent/cron-runs`。任务台账在 `~/.node-agent/cron.json`。
+
+调度器同一时间只由一个 agent 进程持有（交互式 CLI 或 GUI 后端），其他进程待命，
+持有者退出后自动接管；到期前先推进 `nextRunAt`，崩溃不会重复触发。定时运行内部禁止
+再创建/删除任务，避免任务自我繁殖。`agent --no-cron` 关闭自动触发，此时仍可编辑和
+手动运行任务。细节见 [docs/cron-automation.md](docs/cron-automation.md)。
 
 ### 子智能体
 

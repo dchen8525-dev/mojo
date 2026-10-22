@@ -190,7 +190,7 @@ beforeAll(async () => {
   process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${port}`;
 
   const { startGuiBackend } = await import("../src/gui/backend.js");
-  backend = await startGuiBackend({ cwd: project, port: 0, noMcp: true, noLsp: true, onQuit: () => {} });
+  backend = await startGuiBackend({ cwd: project, port: 0, noMcp: true, noLsp: true, noCron: true, onQuit: () => {} });
   base = `http://127.0.0.1:${backend.gui.port}`;
 });
 

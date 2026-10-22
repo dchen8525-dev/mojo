@@ -1028,6 +1028,17 @@ function connectSSE() {
     if (!$("#usage-modal").classList.contains("hidden")) void loadUsage();
   });
 
+  on("cron_changed", async () => {
+    if ($("#manage-modal").classList.contains("hidden")) return;
+    if ($("#cron-pane").classList.contains("hidden")) return;
+    try {
+      cronData = await api("/api/cron");
+      renderCron();
+    } catch {
+      /* the modal may have closed mid-flight */
+    }
+  });
+
   on("permission_request", (d) => {
     state.perms.push(d);
     showPermission();
@@ -2164,6 +2175,8 @@ $("#budget-clear").onclick = () => {
 let mcpData = { servers: [], disabled: false };
 let mcpEditing = null;
 let permData = { global: [], project: [], mode: "default" };
+let cronData = { tasks: [], disabled: false, scheduler: { running: false, owner: false }, error: null };
+let cronEditing = null;
 
 const manageError = (error) => (error === "busy" ? "请先停止当前回合" : error);
 
@@ -2171,22 +2184,26 @@ function switchManageTab(tab) {
   document.querySelectorAll("#manage-tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   $("#mcp-pane").classList.toggle("hidden", tab !== "mcp");
   $("#perm-pane").classList.toggle("hidden", tab !== "perm");
+  $("#cron-pane").classList.toggle("hidden", tab !== "cron");
   if (tab !== "mcp") $("#mcp-editor").classList.add("hidden");
   if (tab !== "perm") $("#perm-editor").classList.add("hidden");
+  if (tab !== "cron") $("#cron-editor").classList.add("hidden");
 }
 
 async function openManage(tab = "mcp") {
   $("#manage-modal").classList.remove("hidden");
   $("#mcp-editor").classList.add("hidden");
   $("#perm-editor").classList.add("hidden");
+  $("#cron-editor").classList.add("hidden");
   mcpEditing = null;
+  cronEditing = null;
   switchManageTab(tab);
   await loadManagement();
 }
 
 async function loadManagement() {
   try {
-    const [mcp, perms] = await Promise.all([api("/api/mcp"), api("/api/permissions")]);
+    const [mcp, perms, cron] = await Promise.all([api("/api/mcp"), api("/api/permissions"), api("/api/cron")]);
     if (mcp?.error) toast("读取 MCP 配置失败: " + mcp.error, true);
     else {
       mcpData = mcp;
@@ -2194,6 +2211,11 @@ async function loadManagement() {
     }
     if (perms?.error) toast("读取权限规则失败: " + perms.error, true);
     else renderPermissions(perms);
+    if (cron?.error && !cron.tasks?.length) toast("读取定时任务失败: " + cron.error, true);
+    else {
+      cronData = cron;
+      renderCron();
+    }
   } catch {
     toast("读取管理数据失败", true);
   }
@@ -2352,6 +2374,119 @@ async function deleteRule(rule) {
   }
 }
 
+function renderCron() {
+  const list = $("#cron-list");
+  list.replaceChildren();
+  const off = !!cronData.disabled;
+  const sched = cronData.scheduler ?? {};
+  $("#cron-note").textContent = off
+    ? "本次以 --no-cron 启动：任务不会自动触发，也不能立即运行；编辑仍会保存。"
+    : !sched.running
+      ? "调度器未在此进程运行。"
+      : sched.owner
+        ? "调度器在本进程运行。任务以无头 agent 会话执行，输出记录在 ~/.node-agent/cron-runs。"
+        : "调度器由另一个 agent 进程持有，本进程待命；任务仍可编辑和立即运行。";
+
+  if (cronData.error) {
+    list.appendChild(el("div", "profile-empty", "读取任务失败: " + cronData.error));
+    return;
+  }
+  const tasks = Array.isArray(cronData.tasks) ? cronData.tasks : [];
+  if (!tasks.length) {
+    list.appendChild(el("div", "profile-empty", "还没有定时任务。点击“添加”，用 5 段 cron 表达式安排一次自包含的 agent 运行。"));
+    return;
+  }
+  for (const task of tasks) {
+    const row = el("div", "profile-row" + (task.enabled ? "" : " muted"));
+    const dot = task.running || task.lastStatus === "ok" ? "connected" : task.lastStatus === "error" ? "failed" : "stopped";
+    row.appendChild(el("span", "status-dot " + dot));
+    const main = el("div", "profile-main");
+    const name = el("div", "profile-name");
+    name.appendChild(document.createTextNode(task.name));
+    name.appendChild(el("span", "profile-badge", task.cron));
+    if (task.running) name.appendChild(el("span", "profile-badge", "运行中"));
+    else if (!task.enabled) name.appendChild(el("span", "profile-badge danger", "已暂停"));
+    else if (task.lastStatus === "error") name.appendChild(el("span", "profile-badge danger", "上次失败"));
+    main.appendChild(name);
+    const next = task.enabled ? new Date(task.nextRunAt).toLocaleString() : "暂停中";
+    main.appendChild(el("div", "profile-meta", `下次 ${next} · 已运行 ${task.runCount} 次 · ${task.cwd}`));
+    const last = task.lastRunAt
+      ? `上次 ${new Date(task.lastRunAt).toLocaleString()}${task.lastStatus === "error" && task.lastError ? ` · ${task.lastError}` : ""}`
+      : "从未运行";
+    main.appendChild(el("div", "profile-meta", last));
+    row.appendChild(main);
+
+    const actions = el("div", "profile-actions");
+    const run = el("button", "", "运行");
+    run.type = "button";
+    run.disabled = off || !!task.running;
+    run.onclick = () => void runCronTask(task);
+    const toggle = el("button", "", task.enabled ? "暂停" : "启用");
+    toggle.type = "button";
+    toggle.onclick = () => void toggleCronTask(task, !task.enabled);
+    const edit = el("button", "", "编辑");
+    edit.type = "button";
+    edit.onclick = () => openCronEditor(task);
+    const del = el("button", "del", "删除");
+    del.type = "button";
+    del.onclick = () => void deleteCronTask(task);
+    actions.append(run, toggle, edit, del);
+    row.appendChild(actions);
+    list.appendChild(row);
+  }
+}
+
+function openCronEditor(task) {
+  cronEditing = task ? { id: task.id } : null;
+  $("#cron-name").value = task?.name ?? "";
+  $("#cron-expr").value = task?.cron ?? "";
+  $("#cron-cwd").value = task?.cwd ?? state.cwd ?? "";
+  $("#cron-prompt").value = task?.prompt ?? "";
+  $("#cron-enabled").checked = task ? !!task.enabled : true;
+  $("#cron-edit-note").textContent = task
+    ? "保存后按新的表达式重新计算下一次运行；工作目录必须是绝对路径。"
+    : "表达式使用本机时区，例如 0 9 * * 1-5 表示工作日 09:00；每次运行都会新开一轮无头会话。";
+  $("#cron-editor").classList.remove("hidden");
+  $("#cron-expr").focus();
+}
+
+async function runCronTask(task) {
+  try {
+    const r = await api("/api/cron/run", { id: task.id });
+    if (r.error) return toast("运行失败: " + r.error, true);
+    cronData = r;
+    renderCron();
+    toast(`已启动「${task.name}」，完成后状态会刷新`);
+  } catch (err) {
+    toast("运行失败: " + (err instanceof Error ? err.message : String(err)), true);
+  }
+}
+
+async function toggleCronTask(task, enabled) {
+  try {
+    const r = await api("/api/cron/toggle", { id: task.id, enabled });
+    if (r.error) return toast("操作失败: " + r.error, true);
+    cronData = r;
+    renderCron();
+    toast(enabled ? `已启用「${task.name}」` : `已暂停「${task.name}」`);
+  } catch (err) {
+    toast("操作失败: " + (err instanceof Error ? err.message : String(err)), true);
+  }
+}
+
+async function deleteCronTask(task) {
+  if (!(await confirmText(`删除定时任务「${task.name}」？后续将不再运行。`))) return;
+  try {
+    const r = await api("/api/cron/delete", { id: task.id });
+    if (r.error) return toast("删除失败: " + r.error, true);
+    cronData = r;
+    renderCron();
+    toast(`已删除「${task.name}」`);
+  } catch (err) {
+    toast("删除失败: " + (err instanceof Error ? err.message : String(err)), true);
+  }
+}
+
 $("#manage-btn").onclick = () => void openManage();
 $("#manage-close").onclick = () => $("#manage-modal").classList.add("hidden");
 document.querySelectorAll("#manage-tabs button").forEach((b) => (b.onclick = () => switchManageTab(b.dataset.tab)));
@@ -2454,6 +2589,39 @@ $("#perm-save").onclick = async () => {
     toast("规则已添加");
   } catch (err) {
     toast("添加失败: " + (err instanceof Error ? err.message : String(err)), true);
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+$("#cron-add").onclick = () => openCronEditor(null);
+$("#cron-cancel").onclick = () => {
+  $("#cron-editor").classList.add("hidden");
+  cronEditing = null;
+};
+$("#cron-save").onclick = async () => {
+  const name = $("#cron-name").value.trim();
+  const cron = $("#cron-expr").value.trim().replace(/\s+/g, " ");
+  const prompt = $("#cron-prompt").value.trim();
+  const cwd = $("#cron-cwd").value.trim();
+  const enabled = $("#cron-enabled").checked;
+  if (!cron) return toast("请填写执行时间表达式", true);
+  if (cron.split(" ").length !== 5) return toast("cron 需要 5 段：分 时 日 月 周", true);
+  if (!prompt) return toast("请填写提示词", true);
+  if (cwd && !/^([A-Za-z]:[\\/]|\/)/.test(cwd)) return toast("工作目录需要绝对路径", true);
+
+  const btn = $("#cron-save");
+  btn.disabled = true;
+  try {
+    const r = await api("/api/cron/save", { ...(cronEditing ? { id: cronEditing.id } : {}), name, cron, prompt, cwd, enabled });
+    if (r.error) return toast("保存失败: " + r.error, true);
+    cronData = r;
+    cronEditing = null;
+    $("#cron-editor").classList.add("hidden");
+    renderCron();
+    toast("定时任务已保存");
+  } catch (err) {
+    toast("保存失败: " + (err instanceof Error ? err.message : String(err)), true);
   } finally {
     btn.disabled = false;
   }

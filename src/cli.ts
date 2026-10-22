@@ -18,6 +18,7 @@ import { loadSlashCommands, renderCommand, expandFileReferences } from "./comman
 import { configureLsp, disposeLsp, loadLspConfig } from "./lsp.js";
 import { renderSessionMarkdown, createSession, loadSession, listSessions } from "./session.js";
 import { runAgentCommand, type CommandContext } from "./agentCommands.js";
+import { CronScheduler } from "./cronScheduler.js";
 import {
   ansiEmphasize,
   ansiHelpers,
@@ -126,9 +127,18 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
   ANSI = ansiHelpers(resolved.theme);
   const mcp = await setupMcp(args);
   await setupLsp(args, session.cwd);
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-  const ask = (q: string) => new Promise<string>((res) => rl.question(q, res));
+  // Headless runs (scheduled tasks, pipes) cannot answer permission prompts;
+  // deny instead of blocking forever on stdin.
+  const interactive = !!process.stdin.isTTY && !!process.stdout.isTTY;
+  let rl: readline.Interface | null = null;
+  const ask = (q: string) =>
+    new Promise<string>((res) => {
+      if (!rl) return res("n");
+      rl.question(q, res);
+    });
+  if (interactive) rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
   const permissions = new PermissionManager(async (desc: string, risk: Risk, preview?: string) => {
+    if (!interactive) return "no";
     const tag = risk === "high" ? ANSI.error("[high]") : ANSI.warn("[write]");
     if (preview) console.log(ANSI.dim(preview.split("\n").map((l) => `  ${l}`).join("\n")));
     const answer = (await ask(`${tag} ${ANSI.bold(desc)}\n  allow? [y]es / [n]o / [a]lways / [d]eny-always > `))
@@ -196,7 +206,7 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
     const costStr = cost > 0 ? ` · $${cost.toFixed(4)}` : "";
     console.error(ANSI.dim(`— ${secs}s · ${used.toLocaleString()} tok · ` +
       `${agent.provider}:${agent.model}${costStr}`));
-    rl.close();
+    rl?.close();
     await mcp?.shutdown();
   }
 }
@@ -247,6 +257,12 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
   if (args.plan) agent.planMode = true;
   await agent.startSession(session.messages?.length ? "resume" : "startup", undefined, session.todos);
 
+  const cron = args.noCron ? null : new CronScheduler({ log: (m) => console.error(ANSI.dim(m)) });
+  if (cron) {
+    const owns = await cron.start();
+    if (owns) console.error(ANSI.dim(`cron: scheduler active (${new Date().toLocaleTimeString()})`));
+  }
+
   const cmdCtx: CommandContext = {
     agent,
     permissions,
@@ -255,6 +271,7 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
     customCommands,
     cwd: session.cwd,
     notify: (m) => console.log(ANSI.warn(m)),
+    cronScheduler: cron,
   };
   async function handleCommand(line: string): Promise<string | null | "quit"> {
     const [cmd, ...rest] = line.slice(1).split(/\s+/);
@@ -318,6 +335,7 @@ async function runInteractive(args: ReturnType<typeof parseArgs>) {
     { exitOnCtrlC: false },
   );
   await app.waitUntilExit();
+  await cron?.stop();
   await mcp?.shutdown();
   await disposeLsp();
 }
@@ -353,6 +371,7 @@ const USAGE = `Usage: agent [options]
     --port <n>         Port for --gui (default: random free port)
     --no-mcp           Don't connect to any local MCP server
     --no-lsp           Don't start any language server
+    --no-cron          Don't run the scheduled-task scheduler in this process
     -h, --help         Show this help
     -v, --version      Show version
 `;
@@ -374,6 +393,7 @@ async function runGui(args: ReturnType<typeof parseArgs>) {
     plan: args.plan,
     noMcp: args.noMcp,
     noLsp: args.noLsp,
+    noCron: args.noCron,
     port: args.port,
     onQuit: () => {
       void backend.shutdown().then(() => process.exit(0));

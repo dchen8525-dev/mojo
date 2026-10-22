@@ -7,6 +7,8 @@ import type { SlashCommand } from "./commands.js";
 import { knownModelNames } from "./llm.js";
 import { createSession, listSessions, loadSession, renderSessionMarkdown, renameSession, searchSessions, tagSession } from "./session.js";
 import { getLspManager } from "./lsp.js";
+import { createCronTask, deleteCronTask, formatCronTask, loadCronTasks, validateCron, updateCronTask } from "./cron.js";
+import type { CronScheduler } from "./cronScheduler.js";
 
 /**
  * Slash-command handling shared by the Ink terminal UI and the GUI backend.
@@ -42,12 +44,14 @@ export interface CommandContext {
   notify?: (message: string) => void;
   /** Aborts long-running commands when the host UI stops the command. */
   signal?: AbortSignal;
+  /** Local scheduler for /cron run; absent in hosts that do not schedule. */
+  cronScheduler?: CronScheduler | null;
 }
 
 /** Names of the built-in commands (for /help listings and the GUI palette). */
 export const BUILTIN_COMMANDS = [
   "help", "model", "auto", "yolo", "plan", "mcp", "lsp", "compact", "context", "review",
-  "permissions", "hooks", "sessions", "search", "resume", "fork", "rename", "tag", "export", "todos", "undo", "cost", "clear", "quit",
+  "permissions", "hooks", "sessions", "search", "resume", "fork", "rename", "tag", "export", "todos", "undo", "cost", "cron", "clear", "quit",
 ] as const;
 
 /**
@@ -68,7 +72,7 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       return {
         kind: "ok",
         text: [
-          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks [trust|revoke] · /sessions [--cwd <dir>] [--title <词>] [--tag <tag>] [N] · /search [-r] <term> · /resume <id> · /fork [N] [名称] · /rename <名称> · /tag [+<tag> | -<tag> | clear] · /export [md|json] [路径] · /todos · /undo [-y] [--force] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
+          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks [trust|revoke] · /sessions [--cwd <dir>] [--title <词>] [--tag <tag>] [N] · /search [-r] <term> · /resume <id> · /fork [N] [名称] · /rename <名称> · /tag [+<tag> | -<tag> | clear] · /export [md|json] [路径] · /todos · /cron [add <分> <时> <日> <月> <周> <提示词> | on|off|run|rm <id>] · /undo [-y] [--force] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
           "file refs: @path/to/file inlines the file; Ctrl+V pastes a clipboard image",
           custom ? `custom commands: ${custom}` : "",
         ]
@@ -476,6 +480,73 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
           ` (kept ${kept}/${total} messages${kept < keep ? ", rounded back to a clean boundary" : ""})\n` +
           `now continuing in the fork; ${fromId} is unchanged — get back with /resume ${fromId}`,
       };
+    }
+    case "cron": {
+      const sub = (rest[0] ?? "").toLowerCase();
+      if (!sub) {
+        try {
+          const tasks = await loadCronTasks();
+          if (!tasks.length) {
+            return {
+              kind: "ok",
+              text: "no scheduled tasks — /cron add <minute> <hour> <day> <month> <weekday> <prompt>",
+            };
+          }
+          return { kind: "ok", text: [`${tasks.length} scheduled task(s):`, ...tasks.map(formatCronTask)].join("\n") };
+        } catch (err) {
+          return { kind: "error", text: err instanceof Error ? err.message : String(err) };
+        }
+      }
+      if (sub === "add") {
+        const cron = rest.slice(1, 6).join(" ");
+        const prompt = rest.slice(6).join(" ").trim();
+        if (rest.length < 7 || !prompt) {
+          return {
+            kind: "error",
+            text: "usage: /cron add <minute> <hour> <day> <month> <weekday> <prompt>\n  e.g. /cron add 0 9 * * 1-5 总结昨天的提交并列出风险",
+          };
+        }
+        const check = validateCron(cron);
+        if (!check.ok) return { kind: "error", text: check.error };
+        try {
+          const task = await createCronTask({ cron, prompt, cwd });
+          return {
+            kind: "ok",
+            text: `created ${task.id} "${task.name}" (${task.cron}); next run ${new Date(task.nextRunAt).toLocaleString()}`,
+          };
+        } catch (err) {
+          return { kind: "error", text: err instanceof Error ? err.message : String(err) };
+        }
+      }
+      const id = rest[1] ?? "";
+      if (!id) return { kind: "error", text: "usage: /cron on|off|run|rm <id>" };
+      if (sub === "rm" || sub === "delete") {
+        try {
+          const ok = await deleteCronTask(id);
+          return ok ? { kind: "ok", text: `deleted ${id}` } : { kind: "error", text: `scheduled task "${id}" not found` };
+        } catch (err) {
+          return { kind: "error", text: err instanceof Error ? err.message : String(err) };
+        }
+      }
+      if (sub === "on" || sub === "off") {
+        try {
+          const task = await updateCronTask(id, { enabled: sub === "on" });
+          return {
+            kind: "ok",
+            text: `${task.enabled ? "enabled" : "paused"} ${task.id}; ${task.enabled ? `next run ${new Date(task.nextRunAt).toLocaleString()}` : "it will not fire until enabled"}`,
+          };
+        } catch (err) {
+          return { kind: "error", text: err instanceof Error ? err.message : String(err) };
+        }
+      }
+      if (sub === "run") {
+        if (!ctx.cronScheduler) return { kind: "error", text: "the scheduler is not running in this host (start without --no-cron)" };
+        const r = await ctx.cronScheduler.runNowDetached(id);
+        return r.ok
+          ? { kind: "ok", text: `started ${id}; the result appears in /cron and ~/.node-agent/cron-runs` }
+          : { kind: "error", text: r.error ?? "run failed" };
+      }
+      return { kind: "error", text: "usage: /cron [add <min> <hour> <day> <month> <weekday> <prompt> | on|off|run|rm <id>]" };
     }
     case "clear": {
       const s = await createSession(cwd);

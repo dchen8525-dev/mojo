@@ -37,6 +37,39 @@ vi.mock("../src/usage.js", async () => {
   };
 });
 
+// /cron reads the real ledger by default; keep tests off ~/.node-agent.
+const cronLedger: { tasks: Array<Record<string, unknown>> } = { tasks: [] };
+vi.mock("../src/cron.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/cron.js")>("../src/cron.js");
+  return {
+    ...actual,
+    loadCronTasks: async () => cronLedger.tasks as never,
+    createCronTask: async (input: { name?: string; cron: string; prompt: string; cwd: string }) => ({
+      id: "cr_aaa00001",
+      name: input.name || input.prompt.slice(0, 20),
+      cron: input.cron,
+      prompt: input.prompt,
+      cwd: input.cwd,
+      enabled: true,
+      createdAt: new Date().toISOString(),
+      nextRunAt: new Date(Date.now() + 3600_000).toISOString(),
+      runCount: 0,
+    }),
+    updateCronTask: async (id: string, patch: { enabled?: boolean }) => ({
+      id,
+      name: "daily",
+      cron: "0 9 * * *",
+      prompt: "p",
+      cwd: "/tmp/repo",
+      enabled: !!patch.enabled,
+      createdAt: new Date().toISOString(),
+      nextRunAt: new Date(Date.now() + 3600_000).toISOString(),
+      runCount: 1,
+    }),
+    deleteCronTask: async (id: string) => id === "cr_aaa00001",
+  };
+});
+
 function fakeAgent(overrides: Partial<Agent> = {}): Agent {
   const costs = { budgetUsd: null as number | null, format: () => "$0.00 total" };
   return {
@@ -473,5 +506,76 @@ describe("runAgentCommand", () => {
     const r = await runAgentCommand("/fork 1", ctx({ agent }));
     expect(r.kind).toBe("error");
     expect(r.text).toContain("would drop the whole history");
+  });
+
+  it("/cron lists tasks and explains how to add one", async () => {
+    cronLedger.tasks = [];
+    const empty = await runAgentCommand("/cron", ctx());
+    expect(empty.kind).toBe("ok");
+    expect(empty.text).toContain("/cron add");
+
+    cronLedger.tasks = [
+      {
+        id: "cr_aaa00001",
+        name: "daily",
+        cron: "0 9 * * *",
+        prompt: "p",
+        cwd: "/tmp/repo",
+        enabled: true,
+        createdAt: new Date().toISOString(),
+        nextRunAt: new Date(Date.now() + 3600_000).toISOString(),
+        runCount: 0,
+      },
+    ];
+    const list = await runAgentCommand("/cron", ctx());
+    expect(list.text).toContain("cr_aaa00001");
+    expect(list.text).toContain("0 9 * * *");
+    cronLedger.tasks = [];
+  });
+
+  it("/cron add parses five cron fields plus a prompt", async () => {
+    const r = await runAgentCommand("/cron add 0 9 * * 1 每周总结提交", ctx());
+    expect(r.kind).toBe("ok");
+    expect(r.text).toContain("created cr_aaa00001");
+    expect(r.text).toContain("每周总结提交");
+  });
+
+  it("/cron add rejects bad expressions and missing prompt", async () => {
+    const bad = await runAgentCommand("/cron add 60 9 * * 1 总结", ctx());
+    expect(bad.kind).toBe("error");
+    expect(bad.text).toContain("minute value 60");
+    const noPrompt = await runAgentCommand("/cron add 0 9 * * 1", ctx());
+    expect(noPrompt.kind).toBe("error");
+    expect(noPrompt.text).toContain("usage: /cron add");
+  });
+
+  it("/cron toggles and deletes tasks", async () => {
+    const off = await runAgentCommand("/cron off cr_aaa00001", ctx());
+    expect(off.kind).toBe("ok");
+    expect(off.text).toContain("paused");
+    const on = await runAgentCommand("/cron on cr_aaa00001", ctx());
+    expect(on.text).toContain("enabled");
+    const rm = await runAgentCommand("/cron rm cr_aaa00001", ctx());
+    expect(rm.kind).toBe("ok");
+    const missing = await runAgentCommand("/cron rm nope", ctx());
+    expect(missing.kind).toBe("error");
+  });
+
+  it("/cron run uses the host scheduler when present", async () => {
+    const seen: string[] = [];
+    const cronScheduler = {
+      runNowDetached: async (id: string) => {
+        seen.push(id);
+        return { ok: true };
+      },
+    } as never;
+    const r = await runAgentCommand("/cron run cr_aaa00001", ctx({ cronScheduler }));
+    expect(r.kind).toBe("ok");
+    expect(r.text).toContain("started");
+    expect(seen).toEqual(["cr_aaa00001"]);
+
+    const absent = await runAgentCommand("/cron run cr_aaa00001", ctx());
+    expect(absent.kind).toBe("error");
+    expect(absent.text).toContain("scheduler");
   });
 });

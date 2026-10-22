@@ -30,3 +30,4 @@
 | [bash-read-state.md](bash-read-state.md) | 2026-10-22 | bash 读态回填与 formatter 失效 |
 | [remote-mcp-servers.md](remote-mcp-servers.md) | 2026-10-22 | 远程 MCP 服务器（Streamable HTTP / SSE） |
 | [mcp-oauth.md](mcp-oauth.md) | 2026-10-22 | MCP OAuth 2.1 授权（PKCE + 本机回环回调） |
+| [cron-automation.md](cron-automation.md) | 2026-10-22 | 定时任务：cron 表达式、单所有者调度、无头执行 |

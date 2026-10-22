@@ -33,6 +33,8 @@ import {
 } from "../mcp.js";
 import type { RuleScope } from "../permissions.js";
 import { USAGE_FILE, aggregateUsage, flushUsage, readUsageLog } from "../usage.js";
+import { createCronTask, deleteCronTask, loadCronTasks, updateCronTask, validateCron } from "../cron.js";
+import type { CronScheduler } from "../cronScheduler.js";
 
 export interface GuiServerOptions {
   /** Mutable project context; replaced in place when the user switches projects. */
@@ -87,6 +89,10 @@ export interface GuiServerOptions {
   reloadMcp?: () => Promise<McpServerStatus[]>;
   /** True when the backend was started with --no-mcp. */
   mcpDisabled?: boolean;
+  /** Scheduler behind the 定时任务 tab and /cron run; null when --no-cron. */
+  cronScheduler?: CronScheduler | null;
+  /** True when the backend was started with --no-cron. */
+  cronDisabled?: boolean;
   /** Usage ledger path override (tests point this at a temp file). */
   usageFile?: string;
   /** Called after /quit or the shutdown button. */
@@ -332,6 +338,25 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
     };
   }
 
+  async function cronSnapshot() {
+    let tasks: Array<Record<string, unknown>> = [];
+    let error: string | null = null;
+    try {
+      tasks = (await loadCronTasks(home)).map((t) => ({
+        ...t,
+        running: !!opts.cronScheduler?.isRunning(t.id),
+      }));
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+    }
+    return {
+      tasks,
+      disabled: !!opts.cronDisabled,
+      scheduler: { running: !!opts.cronScheduler, owner: !!opts.cronScheduler?.isOwner },
+      error,
+    };
+  }
+
   function buildEvents(turn: UiTurn): AgentEvents {
     return {
       onTextDelta: (d) => {
@@ -442,6 +467,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
           cwd: project.agent.cwd,
           notify: (m) => hub.broadcast("system", { text: m }),
           signal: controller.signal,
+          cronScheduler: opts.cronScheduler ?? null,
         });
         // A model switch may change the context window.
         if (cmd === "model" && result.kind === "ok") opts.refreshModelMeta?.();
@@ -671,6 +697,10 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       return sendJson(res, 200, permissionSnapshot());
     }
 
+    if (method === "GET" && p === "/api/cron") {
+      return sendJson(res, 200, await cronSnapshot());
+    }
+
     if (method === "GET" && p === "/api/search") {
       const url = new URL(req.url ?? "", "http://localhost");
       const q = (url.searchParams.get("q") ?? "").trim();
@@ -732,6 +762,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
           customCommands: project.customCommands,
           cwd: project.agent.cwd,
           notify: (m) => hub.broadcast("system", { text: m }),
+          cronScheduler: opts.cronScheduler ?? null,
         });
         if (r.quit) opts.onQuit();
         // A model switch may change the context window.
@@ -880,6 +911,67 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
         }
         if (!removed) return sendJson(res, 404, { error: "rule not found" });
         return sendJson(res, 200, { ok: true, ...permissionSnapshot() });
+      }
+
+      if (p === "/api/cron/save") {
+        const id = typeof body.id === "string" ? body.id.trim() : "";
+        const cron = typeof body.cron === "string" ? body.cron.trim() : "";
+        const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+        const name = typeof body.name === "string" ? body.name.trim() : "";
+        const cwd = typeof body.cwd === "string" && body.cwd.trim() ? body.cwd.trim() : project.cwd;
+        const enabled = body.enabled !== false;
+        if (!cron || !prompt) return sendJson(res, 400, { error: "cron and prompt are required" });
+        const check = validateCron(cron);
+        if (!check.ok) return sendJson(res, 400, { error: check.error });
+        try {
+          if (id) await updateCronTask(id, { name, cron, prompt, cwd, enabled }, home);
+          else await createCronTask({ name, cron, prompt, cwd, enabled }, home);
+        } catch (err) {
+          return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        }
+        hub.broadcast("cron_changed", {});
+        return sendJson(res, 200, { ok: true, ...(await cronSnapshot()) });
+      }
+
+      if (p === "/api/cron/delete") {
+        const id = typeof body.id === "string" ? body.id.trim() : "";
+        if (!id) return sendJson(res, 400, { error: "missing id" });
+        let deleted: boolean;
+        try {
+          deleted = await deleteCronTask(id, home);
+        } catch (err) {
+          return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        }
+        if (!deleted) return sendJson(res, 404, { error: "scheduled task not found" });
+        hub.broadcast("cron_changed", {});
+        return sendJson(res, 200, { ok: true, ...(await cronSnapshot()) });
+      }
+
+      if (p === "/api/cron/toggle") {
+        const id = typeof body.id === "string" ? body.id.trim() : "";
+        if (!id) return sendJson(res, 400, { error: "missing id" });
+        if (typeof body.enabled !== "boolean") return sendJson(res, 400, { error: "enabled must be a boolean" });
+        try {
+          await updateCronTask(id, { enabled: body.enabled }, home);
+        } catch (err) {
+          return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        }
+        hub.broadcast("cron_changed", {});
+        return sendJson(res, 200, { ok: true, ...(await cronSnapshot()) });
+      }
+
+      if (p === "/api/cron/run") {
+        const id = typeof body.id === "string" ? body.id.trim() : "";
+        if (!id) return sendJson(res, 400, { error: "missing id" });
+        if (!opts.cronScheduler) return sendJson(res, 400, { error: "scheduler is disabled for this run (--no-cron)" });
+        let r;
+        try {
+          r = await opts.cronScheduler.runNowDetached(id);
+        } catch (err) {
+          return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        }
+        hub.broadcast("cron_changed", {});
+        return sendJson(res, r.ok ? 200 : 400, { ...(await cronSnapshot()), ...r });
       }
 
       if (p === "/api/project") {

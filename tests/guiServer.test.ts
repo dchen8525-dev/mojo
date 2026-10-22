@@ -61,6 +61,8 @@ async function withServer(
     activateLlmProfile: (id: string) => Promise<{ ok: boolean; provider?: string; model?: string; error?: string; warning?: string }>;
     disableLlmProfile: (id: string) => Promise<{ ok: boolean; error?: string }>;
     listModelsForProfile: (input: ProfileInput) => Promise<{ models?: string[]; error?: string }>;
+    cronScheduler: import("../src/cronScheduler.js").CronScheduler | null;
+    cronDisabled: boolean;
   }> = {},
 ): Promise<void> {
   const hub = new SseHub();
@@ -100,6 +102,8 @@ async function withServer(
       activateLlmProfile: serverOverrides.activateLlmProfile ?? (async () => ({ ok: true, provider: "anthropic", model: "m" })),
       disableLlmProfile: serverOverrides.disableLlmProfile ?? (async () => ({ ok: true })),
       listModelsForProfile: serverOverrides.listModelsForProfile ?? (async () => ({ models: ["m1"] })),
+      cronScheduler: serverOverrides.cronScheduler,
+      cronDisabled: serverOverrides.cronDisabled,
       onQuit: () => {},
     },
     0,
@@ -843,6 +847,158 @@ describe("gui server", () => {
       {},
       { permissions },
       );
+  });
+
+  it("manages scheduled tasks through the API", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "mojo-gui-cron-"));
+    const home = path.join(root, "home");
+    const cwd = path.join(root, "project");
+    await fs.mkdir(cwd, { recursive: true });
+    await fs.mkdir(home, { recursive: true });
+    const runs: string[] = [];
+    const scheduler = {
+      isRunning: (id: string) => id === "running-id",
+      isOwner: true,
+      runNowDetached: async (id: string) => {
+        runs.push(id);
+        return { ok: id !== "known-bad", error: id === "known-bad" ? "spawn failed" : undefined };
+      },
+    } as unknown as import("../src/cronScheduler.js").CronScheduler;
+    try {
+      await withServer(
+        async (gui) => {
+          const empty = await req(gui.port, "/api/cron", { token: TOKEN });
+          expect(empty.status).toBe(200);
+          expect(empty.json).toMatchObject({
+            tasks: [],
+            disabled: false,
+            scheduler: { running: true, owner: true },
+            error: null,
+          });
+
+          const save = await req(gui.port, "/api/cron/save", {
+            token: TOKEN,
+            method: "POST",
+            body: { name: "晨会摘要", cron: "0 9 * * 1-5", prompt: "总结昨天的提交", cwd },
+          });
+          expect(save.status).toBe(200);
+          expect(save.json.tasks).toHaveLength(1);
+          expect(save.json.tasks[0]).toMatchObject({
+            name: "晨会摘要",
+            cron: "0 9 * * 1-5",
+            cwd,
+            enabled: true,
+            runCount: 0,
+          });
+          const id = save.json.tasks[0].id as string;
+
+          const badCron = await req(gui.port, "/api/cron/save", {
+            token: TOKEN,
+            method: "POST",
+            body: { cron: "61 9 * * *", prompt: "x", cwd },
+          });
+          expect(badCron.status).toBe(400);
+          expect(badCron.json.error).toContain("minute");
+
+          const badCwd = await req(gui.port, "/api/cron/save", {
+            token: TOKEN,
+            method: "POST",
+            body: { cron: "0 9 * * *", prompt: "x", cwd: "relative/dir" },
+          });
+          expect(badCwd.status).toBe(400);
+
+          const edit = await req(gui.port, "/api/cron/save", {
+            token: TOKEN,
+            method: "POST",
+            body: { id, name: "", cron: "30 8 * * *", prompt: "改后的提示词", cwd },
+          });
+          expect(edit.status).toBe(200);
+          expect(edit.json.tasks[0]).toMatchObject({ id, cron: "30 8 * * *", prompt: "改后的提示词" });
+          expect(edit.json.tasks[0].name).toContain("改后");
+
+          const toggle = await req(gui.port, "/api/cron/toggle", {
+            token: TOKEN,
+            method: "POST",
+            body: { id, enabled: false },
+          });
+          expect(toggle.status).toBe(200);
+          expect(toggle.json.tasks[0]).toMatchObject({ id, enabled: false });
+
+          const badToggle = await req(gui.port, "/api/cron/toggle", {
+            token: TOKEN,
+            method: "POST",
+            body: { id, enabled: "no" },
+          });
+          expect(badToggle.status).toBe(400);
+
+          const run = await req(gui.port, "/api/cron/run", {
+            token: TOKEN,
+            method: "POST",
+            body: { id },
+          });
+          expect(run.status).toBe(200);
+          expect(run.json.ok).toBe(true);
+          expect(runs).toEqual([id]);
+
+          const runBad = await req(gui.port, "/api/cron/run", {
+            token: TOKEN,
+            method: "POST",
+            body: { id: "known-bad" },
+          });
+          expect(runBad.status).toBe(400);
+          expect(runBad.json.error).toBe("spawn failed");
+
+          const del = await req(gui.port, "/api/cron/delete", {
+            token: TOKEN,
+            method: "POST",
+            body: { id },
+          });
+          expect(del.status).toBe(200);
+          expect(del.json.tasks).toEqual([]);
+
+          const missing = await req(gui.port, "/api/cron/delete", {
+            token: TOKEN,
+            method: "POST",
+            body: { id },
+          });
+          expect(missing.status).toBe(404);
+        },
+        {},
+        { home, cronScheduler: scheduler },
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a corrupt cron ledger and a disabled scheduler", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "mojo-gui-cron-bad-"));
+    try {
+      await fs.mkdir(path.join(home, ".node-agent"), { recursive: true });
+      await fs.writeFile(path.join(home, ".node-agent", "cron.json"), "{not json", "utf8");
+      await withServer(
+        async (gui) => {
+          const list = await req(gui.port, "/api/cron", { token: TOKEN });
+          expect(list.status).toBe(200);
+          expect(list.json.tasks).toEqual([]);
+          expect(list.json.disabled).toBe(true);
+          expect(list.json.scheduler).toEqual({ running: false, owner: false });
+          expect(list.json.error).toContain("cron.json");
+
+          const run = await req(gui.port, "/api/cron/run", {
+            token: TOKEN,
+            method: "POST",
+            body: { id: "whatever" },
+          });
+          expect(run.status).toBe(400);
+          expect(run.json.error).toContain("--no-cron");
+        },
+        {},
+        { home, cronScheduler: null, cronDisabled: true },
+      );
+    } finally {
+      await fs.rm(home, { recursive: true, force: true });
+    }
   });
 
   it("/api/llm/profiles passes the masked list through", async () => {

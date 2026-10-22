@@ -299,6 +299,7 @@
           <div class="manage-tabs" id="manage-tabs">
             <button type="button" data-tab="mcp" class="active">MCP 服务器</button>
             <button type="button" data-tab="perm">权限规则</button>
+            <button type="button" data-tab="cron">定时任务</button>
           </div>
           <button id="manage-close" class="modal-x" type="button" title="关闭" aria-label="关闭">×</button>
         </div>
@@ -396,6 +397,41 @@
               <div class="profile-editor-actions">
                 <button id="perm-save" class="primary" type="button">添加规则</button>
                 <button id="perm-cancel" type="button">取消</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="cron-pane" class="manage-pane hidden">
+            <p class="settings-note" id="cron-note"></p>
+            <div class="profile-list-head">
+              <span>任务 · 本机时区 · 每次运行新开一轮无头会话</span>
+              <button id="cron-add" class="link-btn" type="button">＋ 添加</button>
+            </div>
+            <div id="cron-list" class="profile-list"></div>
+            <div id="cron-editor" class="profile-editor hidden">
+              <div class="settings-grid">
+                <label class="field wide">
+                  <span>名称 <em>可留空，默认取提示词开头</em></span>
+                  <input id="cron-name" type="text" maxlength="60" placeholder="每日站会摘要" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="field">
+                  <span>执行时间 <em>分 时 日 月 周</em></span>
+                  <input id="cron-expr" type="text" maxlength="120" placeholder="0 9 * * 1-5" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="field">
+                  <span>工作目录</span>
+                  <input id="cron-cwd" type="text" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="field wide">
+                  <span>提示词 <em>自包含指令；运行结果写入 ~/.node-agent/cron-runs</em></span>
+                  <textarea id="cron-prompt" rows="4" maxlength="8000" placeholder="检查当前仓库的未提交改动，总结风险并写入 notes/risk.md"></textarea>
+                </label>
+                <label class="plan-toggle"><input type="checkbox" id="cron-enabled" checked /> 启用</label>
+              </div>
+              <p class="settings-note" id="cron-edit-note"></p>
+              <div class="profile-editor-actions">
+                <button id="cron-save" class="primary" type="button">保存任务</button>
+                <button id="cron-cancel" type="button">取消</button>
               </div>
             </div>
           </div>

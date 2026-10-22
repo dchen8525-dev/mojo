@@ -385,6 +385,126 @@ describe("GUI interactions (happy-dom)", () => {
     expect((doc.querySelector("#mcp-headers") as HTMLTextAreaElement).value).toBe("Authorization=Bearer t");
   });
 
+  it("manages scheduled tasks from the management tab", async () => {
+    const meta = { disabled: false, scheduler: { running: true, owner: true }, error: null };
+    const tasks: Array<Record<string, unknown>> = [
+      {
+        id: "cr_1",
+        name: "晨会摘要",
+        cron: "0 9 * * 1-5",
+        prompt: "总结昨天的提交",
+        cwd: "D:\\proj",
+        enabled: true,
+        nextRunAt: "2026-10-23T01:00:00.000Z",
+        runCount: 4,
+        lastRunAt: "2026-10-22T01:00:00.000Z",
+        lastStatus: "ok",
+      },
+      {
+        id: "cr_2",
+        name: "夜间清理",
+        cron: "30 23 * * *",
+        prompt: "清理临时文件",
+        cwd: "D:\\proj",
+        enabled: false,
+        nextRunAt: "2026-10-22T15:30:00.000Z",
+        runCount: 0,
+      },
+    ];
+    const snapshot = () => ({ tasks: tasks.map((t) => ({ ...t })), ...meta });
+    const { window, calls } = await boot({
+      routes: {
+        "/api/mcp": { servers: [], disabled: false },
+        "/api/permissions": { global: [], project: [], mode: "default" },
+        "/api/cron": snapshot,
+        "/api/cron/save": (_url, init) => {
+          const body = JSON.parse(String(init?.body));
+          if (body.id === "cr_1") {
+            Object.assign(tasks[0], body);
+          } else {
+            tasks.push({ id: "cr_new", nextRunAt: "2026-10-24T00:00:00.000Z", runCount: 0, enabled: true, ...body });
+          }
+          return { ok: true, ...snapshot() };
+        },
+        "/api/cron/run": (_url, init) => {
+          const { id } = JSON.parse(String(init?.body));
+          const task = tasks.find((t) => t.id === id)!;
+          task.running = true;
+          return { ok: true, ...snapshot() };
+        },
+        "/api/cron/toggle": (_url, init) => {
+          const { id, enabled } = JSON.parse(String(init?.body));
+          const task = tasks.find((t) => t.id === id)!;
+          task.enabled = enabled;
+          return { ok: true, ...snapshot() };
+        },
+        "/api/cron/delete": (_url, init) => {
+          const { id } = JSON.parse(String(init?.body));
+          const index = tasks.findIndex((t) => t.id === id);
+          if (index >= 0) tasks.splice(index, 1);
+          return { ok: true, ...snapshot() };
+        },
+      },
+    });
+    const doc = window.document;
+    const rowOf = (label: string) =>
+      [...doc.querySelectorAll("#cron-list .profile-row")].find((row) => row.textContent?.includes(label)) as HTMLElement;
+
+    (doc.querySelector("#manage-btn") as HTMLElement).click();
+    await vi.waitFor(() => expect(doc.querySelector("#mcp-list")?.textContent).toContain("还没有 MCP 服务器"));
+    (doc.querySelector('#manage-tabs button[data-tab="cron"]') as HTMLElement).click();
+
+    expect(doc.querySelector("#cron-pane")?.classList.contains("hidden")).toBe(false);
+    expect(doc.querySelector("#mcp-pane")?.classList.contains("hidden")).toBe(true);
+    await vi.waitFor(() => expect(doc.querySelectorAll("#cron-list .profile-row")).toHaveLength(2));
+    expect(doc.querySelector("#cron-note")?.textContent).toContain("调度器在本进程运行");
+    expect(rowOf("晨会摘要")?.textContent).toContain("0 9 * * 1-5");
+    expect(rowOf("夜间清理")?.textContent).toContain("已暂停");
+    expect(rowOf("夜间清理")?.textContent).toContain("暂停中");
+
+    (doc.querySelector("#cron-add") as HTMLElement).click();
+    expect(doc.querySelector("#cron-editor")?.classList.contains("hidden")).toBe(false);
+    expect(doc.querySelector("#cron-edit-note")?.textContent).toContain("本机时区");
+    (doc.querySelector("#cron-name") as HTMLInputElement).value = "周报";
+    (doc.querySelector("#cron-expr") as HTMLInputElement).value = "0 18 * * 5";
+    (doc.querySelector("#cron-cwd") as HTMLInputElement).value = "D:\\proj";
+    (doc.querySelector("#cron-prompt") as HTMLTextAreaElement).value = "汇总本周提交";
+    (doc.querySelector("#cron-save") as HTMLElement).click();
+
+    await vi.waitFor(() => expect(doc.querySelectorAll("#cron-list .profile-row")).toHaveLength(3));
+    const save = calls.find((c) => c.url === "/api/cron/save")!;
+    expect(JSON.parse(String(save.init?.body))).toEqual({
+      name: "周报",
+      cron: "0 18 * * 5",
+      prompt: "汇总本周提交",
+      cwd: "D:\\proj",
+      enabled: true,
+    });
+    expect(doc.querySelector("#cron-editor")?.classList.contains("hidden")).toBe(true);
+
+    (rowOf("晨会摘要")!.querySelectorAll("button")[0] as HTMLElement).click();
+    await vi.waitFor(() => expect(doc.querySelector("#toast")?.textContent).toContain("已启动"));
+    expect(calls.find((c) => c.url === "/api/cron/run")?.init?.body).toBe(JSON.stringify({ id: "cr_1" }));
+    expect(rowOf("晨会摘要")?.textContent).toContain("运行中");
+
+    (rowOf("晨会摘要")!.querySelectorAll("button")[1] as HTMLElement).click();
+    await vi.waitFor(() => expect(doc.querySelector("#toast")?.textContent).toContain("已暂停"));
+    expect(JSON.parse(String(calls.find((c) => c.url === "/api/cron/toggle")?.init?.body))).toEqual({
+      id: "cr_1",
+      enabled: false,
+    });
+
+    (rowOf("夜间清理")!.querySelectorAll("button")[2] as HTMLElement).click();
+    expect((doc.querySelector("#cron-expr") as HTMLInputElement).value).toBe("30 23 * * *");
+    (doc.querySelector("#cron-cancel") as HTMLElement).click();
+
+    (rowOf("夜间清理")!.querySelectorAll("button")[3] as HTMLElement).click();
+    (doc.querySelector("#input-ok") as HTMLElement).click();
+    await vi.waitFor(() => expect(doc.querySelectorAll("#cron-list .profile-row")).toHaveLength(2));
+    expect(JSON.parse(String(calls.find((c) => c.url === "/api/cron/delete")?.init?.body))).toEqual({ id: "cr_2" });
+    expect(doc.querySelector("#toast")?.textContent).toContain("已删除");
+  });
+
   it("keeps management editors open when a save fails", async () => {
     const fail = () => {
       throw new Error("offline");
