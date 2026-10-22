@@ -914,12 +914,17 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
     const cut = pickForkBoundary(this.messages, keep);
     const prefix = this.messages.slice(0, cut);
     if (!prefix.length) return null;
-    const { id } = await forkSession(this.cwd, prefix, { title, fromId: this.sessionId, todos: todoStore.items });
+    const { id, messages: inherited } = await forkSession(this.cwd, prefix, {
+      title,
+      fromId: this.sessionId,
+      todos: todoStore.items,
+    });
     // A fork continues the same job, so its plan carries over.
     const todos = [...todoStore.items];
-    // Re-point this agent at the new file: same in-memory history, but future
-    // turns persist to (and can diverge in) the fork instead of the original.
-    await this.resetSession(id, prefix, `${this.llm.provider}:${this.llm.model}`, todos);
+    // Re-point this agent at the new file: inherited = prefix + the fork
+    // notice, so the persisted count matches what forkSession wrote and the
+    // model sees where its context came from.
+    await this.resetSession(id, inherited, `${this.llm.provider}:${this.llm.model}`, todos);
     return id;
   }
 }

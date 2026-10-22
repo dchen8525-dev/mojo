@@ -74,7 +74,7 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       return {
         kind: "ok",
         text: [
-          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp [trust|revoke] · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks [trust|revoke] · /sessions [--cwd <dir>] [--title <词>] [--tag <tag>] [N] · /search [-r] <term> · /resume <id> · /fork [N] [名称] · /rename <名称> · /tag [+<tag> | -<tag> | clear] · /export [md|json] [路径] · /todos · /cron [add <分> <时> <日> <月> <周> <提示词> | on|off|run|rm <id>] · /doctor · /undo [-y] [--force] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
+          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp [trust|revoke] · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks [trust|revoke] · /sessions [--cwd <dir>] [--title <词>] [--tag <tag>] [--fork-of <id>] [N] · /search [-r] <term> · /resume <id> · /fork [N] [名称] · /rename <名称> · /tag [+<tag> | -<tag> | clear] · /export [md|json] [路径] · /todos · /cron [add <分> <时> <日> <月> <周> <提示词> | on|off|run|rm <id>] · /doctor · /undo [-y] [--force] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
           "file refs: @path/to/file inlines the file; Ctrl+V pastes a clipboard image",
           custom ? `custom commands: ${custom}` : "",
         ]
@@ -332,17 +332,19 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       };
     }
     case "sessions": {
-      // /sessions [--cwd <dir>] [--title <kw>] [N]  — N caps the listed rows (default 10)
+      // /sessions [--cwd <dir>] [--title <kw>] [--tag <tag>] [--fork-of <id>] [N]
       const words = [...rest];
       let cwdFilter = "";
       let titleFilter = "";
       let tagFilter = "";
+      let forkOf = "";
       let limit = 10;
       for (let i = 0; i < words.length; i++) {
-        if ((words[i] === "--cwd" || words[i] === "--title" || words[i] === "--tag") && words[i + 1] !== undefined) {
+        if ((words[i] === "--cwd" || words[i] === "--title" || words[i] === "--tag" || words[i] === "--fork-of") && words[i + 1] !== undefined) {
           const v = words[++i];
           if (words[i - 1] === "--cwd") cwdFilter = v.toLowerCase();
           else if (words[i - 1] === "--title") titleFilter = v.toLowerCase();
+          else if (words[i - 1] === "--fork-of") forkOf = v.toLowerCase();
           else tagFilter = v.toLowerCase();
         } else if (/^\d+$/.test(words[i])) {
           limit = Math.max(1, Number(words[i]));
@@ -354,11 +356,15 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       if (titleFilter)
         list = list.filter((s) => (s.title ?? "").toLowerCase().includes(titleFilter) || s.id.includes(titleFilter));
       if (tagFilter) list = list.filter((s) => (s.tags ?? []).some((t) => t.toLowerCase().includes(tagFilter)));
-      const desc = [cwdFilter && `cwd~"${cwdFilter}"`, titleFilter && `title~"${titleFilter}"`, tagFilter && `tag~"${tagFilter}"`]
+      if (forkOf) list = list.filter((s) => (s.forkedFrom ?? "").toLowerCase().startsWith(forkOf));
+      const desc = [cwdFilter && `cwd~"${cwdFilter}"`, titleFilter && `title~"${titleFilter}"`, tagFilter && `tag~"${tagFilter}"`, forkOf && `fork-of ${forkOf}`]
         .filter(Boolean)
         .join(" & ");
       if (!list.length) return { kind: "ok", text: desc ? `(no sessions match ${desc})` : "(no sessions)" };
       const shown = list.slice(0, limit);
+      // Branch lineage: children per session id (counted across all sessions).
+      const childCount = new Map<string, number>();
+      for (const s of all) if (s.forkedFrom) childCount.set(s.forkedFrom, (childCount.get(s.forkedFrom) ?? 0) + 1);
       const head = desc
         ? `${list.length} match${desc ? ` (${desc})` : ""}`
         : `${shown.length} shown / ${all.length} total`;
@@ -369,7 +375,9 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
           shown
             .map((s) => {
               const tags = s.tags?.length ? ` [${s.tags.join(",")}]` : "";
-              return `${s.id}  ${s.updatedAt.slice(0, 16)}  ${s.model ?? "?"}  ${s.title ? `"${s.title}" ` : ""}${tags}${s.cwd}`;
+              const fork = s.forkedFrom ? `⑂${s.forkedFrom.slice(0, 8)}${s.forkPoint ? `@${s.forkPoint}` : ""} ` : "";
+              const children = childCount.get(s.id) ? ` (+${childCount.get(s.id)}⑂)` : "";
+              return `${s.id}  ${s.updatedAt.slice(0, 16)}  ${s.model ?? "?"}  ${fork}${s.title ? `"${s.title}" ` : ""}${tags}${children}${s.cwd}`;
             })
             .join("\n"),
       };
@@ -626,7 +634,8 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
           `forked into session ${newId}` +
           (title ? ` "${title}"` : "") +
           ` (kept ${kept}/${total} messages${kept < keep ? ", rounded back to a clean boundary" : ""})\n` +
-          `now continuing in the fork; ${fromId} is unchanged — get back with /resume ${fromId}`,
+          `now continuing in the fork; ${fromId} is unchanged — get back with /resume ${fromId}\n` +
+          `list this branch with /sessions --fork-of ${fromId}`,
       };
     }
     case "cron": {

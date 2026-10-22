@@ -283,8 +283,14 @@ describe("forkSession", () => {
     expect(fork.id).not.toBe(parent.id);
 
     const loaded = await session.loadSession(fork.id);
-    expect(loaded?.messages.map((m) => m.content)).toEqual(["q1", "a1"]);
+    // The fork notice is appended after the inherited prefix.
+    expect(loaded?.messages.map((m) => m.content)).toHaveLength(3);
+    expect(loaded?.messages[0].content).toBe("q1");
+    expect(String(loaded?.messages[2].content)).toContain('<system-reminder event="SessionFork">');
+    expect(String(loaded?.messages[2].content)).toContain(parent.id);
     expect(loaded?.meta.forkedFrom).toBe(parent.id);
+    expect(loaded?.meta.forkPoint).toBe(2);
+    expect(fork.messages).toHaveLength(3);
 
     // The parent file is untouched.
     expect((await session.loadSession(parent.id))?.messages).toHaveLength(2);
@@ -295,6 +301,7 @@ describe("forkSession", () => {
     const loaded = await session.loadSession(fork.id);
     expect(loaded?.meta.title).toBe("try light");
     expect(loaded?.meta.forkedFrom).toBe("abc123");
+    expect(loaded?.meta.forkPoint).toBe(1);
   });
 
   it("creates an empty-titled fork when no title is given", async () => {
@@ -302,6 +309,16 @@ describe("forkSession", () => {
     const loaded = await session.loadSession(fork.id);
     expect(loaded?.meta.title).toBeUndefined();
     expect(loaded?.meta.forkedFrom).toBeUndefined();
+  });
+
+  it("adds no fork notice or forkPoint without a parent", async () => {
+    const msgs = [{ role: "user" as const, content: "hi" }];
+    const fork = await session.forkSession("D:\\proj", msgs, {});
+    expect(fork.messages).toEqual(msgs);
+    expect(fork.meta.forkPoint).toBeUndefined();
+    const loaded = await session.loadSession(fork.id);
+    expect(loaded?.messages).toHaveLength(1);
+    expect(loaded?.meta.forkPoint).toBeUndefined();
   });
 });
 

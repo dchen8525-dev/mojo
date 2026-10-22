@@ -76,7 +76,13 @@ vi.mock("../src/session.js", () => ({
   renameSession: async () => true,
   searchSessions: async () => [],
   renderSessionMarkdown: () => "",
-  forkSession: async () => ({ id: "fork0000", meta: { id: "fork0000", cwd: "", startedAt: "", updatedAt: "" } }),
+  forkSession: async (_cwd: string, messages: MessageParam[], opts: { fromId?: string }) => {
+    // Mirror the real store: forked sessions end with a fork notice.
+    const written = [...messages];
+    if (opts.fromId)
+      written.push({ role: "user", content: `<system-reminder event="SessionFork">forked from ${opts.fromId}</system-reminder>` });
+    return { id: "fork0000", meta: { id: "fork0000", cwd: "", startedAt: "", updatedAt: "" }, messages: written };
+  },
   saveTodos: async (id: string, todos: unknown) => {
     h.savedTodos.push({ id, todos });
     return true;
@@ -803,12 +809,14 @@ describe("Agent.fork", () => {
     const id = await agent.fork(4);
     expect(id).toBe("fork0000");
     expect(agent.sessionId).toBe("fork0000");
-    expect(agent.getMessages()).toHaveLength(4);
+    // 4 inherited messages + the fork notice.
+    expect(agent.getMessages()).toHaveLength(5);
+    expect(String(agent.getMessages()[4].content)).toContain('event="SessionFork"');
     // The next turn persists to the fork, not the original.
     h.turns = [textTurn("next")];
     h.calls = 0;
     await agent.chat("continue");
-    expect(agent.getMessages()).toHaveLength(6);
+    expect(agent.getMessages()).toHaveLength(7);
   });
 
   it("rounds a mid-loop keep back to a clean assistant boundary", async () => {
@@ -824,7 +832,8 @@ describe("Agent.fork", () => {
     // preceding user turn to index 1, so only the first exchange is kept.
     const id = await agent.fork(5);
     expect(id).toBe("fork0000");
-    expect(agent.getMessages()).toHaveLength(2);
+    // 2 inherited messages + the fork notice.
+    expect(agent.getMessages()).toHaveLength(3);
   });
 
   it("returns null when no clean boundary exists", async () => {

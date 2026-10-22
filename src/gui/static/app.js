@@ -1827,6 +1827,11 @@ async function loadSessions() {
     const item = el("div", "session-item" + (s.id === state.sessionId ? " active" : ""));
     const title = el("div", "s-title");
     // 徽标放在标题前面：标题过长被省略号截断时它不会被一起吃掉
+    if (s.forkedFrom) {
+      const fb = el("span", "s-badge fork", "⑂");
+      fb.title = `分叉自 ${s.forkedFrom.slice(0, 8)}${s.forkPoint ? `（继承 ${s.forkPoint} 条消息）` : ""}`;
+      title.appendChild(fb);
+    }
     if (s.id === state.sessionId) title.appendChild(el("span", "s-badge", "当前"));
     title.appendChild(document.createTextNode(s.title || s.preview || s.id));
     item.appendChild(title);

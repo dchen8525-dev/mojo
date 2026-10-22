@@ -243,6 +243,11 @@ button {
   background: var(--accent-soft);
 }
 
+.s-badge.fork {
+  color: var(--yellow);
+  background: rgba(161, 98, 7, 0.15);
+}
+
 .session-item .s-meta {
   display: flex;
   justify-content: space-between;

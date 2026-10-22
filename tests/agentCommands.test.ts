@@ -20,10 +20,16 @@ vi.mock("../src/session.js", () => ({
   tagSession: async (_id: string, tags: string[]) => [...new Set(tags.map((t) => t.trim().slice(0, 24)).filter(Boolean))].slice(0, 8),
   searchSessions: async () => searchLedger.hits as never,
   renderSessionMarkdown: () => "# exported",
-  forkSession: async (_cwd: string, messages: unknown[], opts: { title?: string; fromId?: string }) => ({
-    id: "fork9999",
-    meta: { id: "fork9999", cwd: _cwd, startedAt: "", updatedAt: "", title: opts.title, forkedFrom: opts.fromId, messages: messages.length },
-  }),
+  forkSession: async (_cwd: string, messages: unknown[], opts: { title?: string; fromId?: string }) => {
+    const written = [...messages];
+    if (opts.fromId)
+      written.push({ role: "user", content: `<system-reminder event="SessionFork">forked from ${opts.fromId}</system-reminder>` });
+    return {
+      id: "fork9999",
+      meta: { id: "fork9999", cwd: _cwd, startedAt: "", updatedAt: "", title: opts.title, forkedFrom: opts.fromId },
+      messages: written,
+    };
+  },
 }));
 
 // /cost subcommands read the usage ledger; fake it so tests never touch ~/.node-agent.
@@ -300,6 +306,25 @@ describe("runAgentCommand", () => {
   it("/sessions with none", async () => {
     const r = await runAgentCommand("/sessions", ctx());
     expect(r.text).toBe("(no sessions)");
+  });
+
+  it("/sessions shows fork lineage and filters with --fork-of", async () => {
+    sessionLedger.metas = [
+      { id: "parent0001", cwd: "D:\\web", updatedAt: "2026-09-10T10:00:00.000Z" },
+      { id: "child00002", cwd: "D:\\web", updatedAt: "2026-09-11T10:00:00.000Z", forkedFrom: "parent0001", forkPoint: 4 },
+    ];
+    const all = await runAgentCommand("/sessions", ctx());
+    expect(all.text).toContain("⑂parent00@4"); // child row carries the fork marker
+    expect(all.text).toContain("(+1⑂)"); // parent row carries the children count
+
+    const only = await runAgentCommand("/sessions --fork-of parent00", ctx());
+    expect(only.text).toContain("child00002");
+    expect(only.text).toContain("fork-of parent00");
+    expect(only.text).not.toContain("parent0001");
+
+    const none = await runAgentCommand("/sessions --fork-of zzzz", ctx());
+    expect(none.text).toContain("no sessions match");
+    sessionLedger.metas = [];
   });
 
   it("/sessions filters by --cwd / --title and caps with a limit", async () => {

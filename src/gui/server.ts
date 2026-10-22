@@ -56,7 +56,7 @@ export interface GuiServerOptions {
   resumeSession: (id: string) => Promise<string | null>;
   /** List sessions for the sidebar. */
   listSessions: () => Promise<
-    Array<{ id: string; cwd: string; updatedAt: string; model?: string; title?: string; tags?: string[]; preview?: string }>
+    Array<{ id: string; cwd: string; updatedAt: string; model?: string; title?: string; tags?: string[]; preview?: string; forkedFrom?: string; forkPoint?: number }>
   >;
   /** Full-text search over saved sessions (sidebar quick search). */
   searchSessions: (

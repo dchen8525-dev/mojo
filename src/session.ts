@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import type { MessageParam } from "./types.js";
 import { atomicWriteFile } from "./atomicWrite.js";
 import { sanitizeTodos, type TodoItem } from "./tools/todo.js";
+import { systemReminder } from "./reminder.js";
 
 const SESSION_DIR = path.join(os.homedir(), ".node-agent", "sessions");
 
@@ -22,6 +23,8 @@ export interface SessionMeta {
   tags?: string[];
   /** Session id this one was branched from (set by /fork). */
   forkedFrom?: string;
+  /** Messages copied from the parent at fork time (the cut point). */
+  forkPoint?: number;
   /** Latest todo plan, so the GUI panel survives a restart or session switch. */
   todos?: TodoItem[];
 }
@@ -270,7 +273,7 @@ export async function forkSession(
   cwd: string,
   messages: MessageParam[],
   opts: { title?: string; fromId?: string; todos?: TodoItem[] } = {},
-): Promise<{ id: string; meta: SessionMeta }> {
+): Promise<{ id: string; meta: SessionMeta; messages: MessageParam[] }> {
   const { id } = await createSession(cwd);
   const clean = opts.title?.trim().slice(0, 80);
   const todos = sanitizeTodos(opts.todos ?? []) ?? [];
@@ -278,13 +281,40 @@ export async function forkSession(
     // Rewrite the meta header once, carrying all fields, before any appends.
     await updateMeta(id, (meta) => {
       if (clean) meta.title = clean;
-      if (opts.fromId) meta.forkedFrom = opts.fromId;
+      if (opts.fromId) {
+        meta.forkedFrom = opts.fromId;
+        meta.forkPoint = messages.length;
+      }
       if (todos.length) meta.todos = todos;
     });
   }
-  if (messages.length) await appendMessages(id, messages);
+  // The fork notice tells the model the inherited prefix is context, not
+  // something said in this session. Written only to the child file.
+  const written = [...messages];
+  if (opts.fromId) {
+    written.push({
+      role: "user",
+      content: systemReminder(
+        `This session forked from session ${opts.fromId}: the ${messages.length} message(s) above are inherited verbatim from it. New turns in this session diverge from the original.`,
+        { event: "SessionFork" },
+      ),
+    });
+  }
+  if (written.length) await appendMessages(id, written);
   const now = new Date().toISOString();
-  return { id, meta: { id, cwd, startedAt: now, updatedAt: now, ...(clean ? { title: clean } : {}), ...(opts.fromId ? { forkedFrom: opts.fromId } : {}), ...(todos.length ? { todos } : {}) } };
+  return {
+    id,
+    meta: {
+      id,
+      cwd,
+      startedAt: now,
+      updatedAt: now,
+      ...(clean ? { title: clean } : {}),
+      ...(opts.fromId ? { forkedFrom: opts.fromId, forkPoint: messages.length } : {}),
+      ...(todos.length ? { todos } : {}),
+    },
+    messages: written,
+  };
 }
 
 /** Delete a session file. Returns false when it did not exist. */
@@ -360,6 +390,7 @@ async function parseSessionFile(full: string): Promise<ParsedSession | null> {
             : {}),
           ...(Array.isArray(obj.tags) ? { tags: parseTags(obj.tags) } : {}),
           ...(typeof obj.forkedFrom === "string" && obj.forkedFrom ? { forkedFrom: obj.forkedFrom } : {}),
+          ...(Number.isFinite(obj.forkPoint) && obj.forkPoint >= 0 ? { forkPoint: obj.forkPoint } : {}),
           ...(todos?.length ? { todos } : {}),
         };
       } else if (obj.type === "model" && meta && typeof obj.model === "string") {
