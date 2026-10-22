@@ -170,4 +170,24 @@ describe("GUI static assets", () => {
     expect(app).toContain('$("#new-session").focus({ preventScroll: true })');
     expect(app).toContain("sidebarToggle.focus({ preventScroll: true })");
   });
+
+  it("keeps the stream viewport user-owned with a jump button", () => {
+    expect(html).toContain('id="jump-bottom"');
+    expect(html).toContain('id="transcript-wrap"');
+    expect(app).toContain("BOTTOM_SLACK");
+    expect(app).toContain("follow.lock");
+    // Growth must go through the gated scrollBottom, not raw assignment.
+    expect(app).toMatch(/function scrollBottom\(\) \{\s*\n\s*if \(follow\.on\)/);
+    expect(app.match(/transcriptEl\.scrollTop = transcriptEl\.scrollHeight;/g)?.length).toBe(1);
+    expect(css).toContain("#jump-bottom");
+    expect(css).toContain("#transcript-wrap");
+  });
+
+  it("renders diff previews as structured rows and keeps plain fallback", () => {
+    expect(app).toContain("looksLikeDiff");
+    expect(app).toContain("renderDiffPreview");
+    expect(app).toContain("HUNK_RE");
+    expect(css).toContain(".perm-preview .diff-row");
+    expect(css).toContain(".perm-preview .diff-num");
+  });
 });

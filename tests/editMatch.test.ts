@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { applyEdits, diffStats, findAll, findFuzzyEdits, nearestMiss, renderDiff } from "../src/tools/editMatch.js";
-import { editFileTool } from "../src/tools/write.js";
+import { editFileTool, writeFileTool } from "../src/tools/write.js";
 import { configureLsp } from "../src/lsp.js";
 import type { ToolContext } from "../src/types.js";
 
@@ -170,5 +170,57 @@ describe("edit_file tool behaviour", () => {
     const r = await editFileTool.execute({ path: "g.txt", old_string: "drop\n", new_string: "" }, ctx);
     expect(r.isError).toBeUndefined();
     expect(await fs.readFile(path.join(dir, "g.txt"), "utf8")).toBe("keep\nkeep2\n");
+  });
+});
+
+describe("write_file permission preview", () => {
+  let dir: string;
+  let asked: Array<{ desc: string; preview?: string }>;
+  let ctx: ToolContext;
+
+  beforeEach(async () => {
+    configureLsp(dir ?? ".", { enabled: false });
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-write-preview-"));
+    asked = [];
+    ctx = {
+      get cwd() {
+        return dir;
+      },
+      askPermission: async (desc, _risk, preview) => {
+        asked.push({ desc, preview });
+        return true;
+      },
+    };
+  });
+
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it("shows created content as an added-file diff", async () => {
+    await writeFileTool.execute({ path: "new.txt", content: "hello\nworld\n" }, ctx);
+    const preview = asked[0].preview ?? "";
+    expect(preview).toContain("@@ -0,0 +1,3 @@"); // trailing newline counts as a line
+    expect(preview).toContain("+hello");
+    expect(preview).toContain("+world");
+  });
+
+  it("shows an overwrite as removed/added lines against the old file", async () => {
+    await fs.writeFile(path.join(dir, "a.txt"), "keep\nold line\nalso keep\n", "utf8");
+    const ctxWithReadState = { ...ctx, fileState: undefined } as ToolContext; // overwrite guard is not under test here
+    await writeFileTool.execute({ path: "a.txt", content: "keep\nnew line\nalso keep\n" }, ctxWithReadState);
+    const preview = asked[0].preview ?? "";
+    expect(preview).toMatch(/^@@ -1,\d+ \+1,\d+ @@/m);
+    expect(preview).toContain("-old line");
+    expect(preview).toContain("+new line");
+    expect(preview).toContain(" keep");
+  });
+
+  it("caps very large previews with a truncation marker", async () => {
+    const content = Array.from({ length: 300 }, (_, i) => `line ${i}`).join("\n");
+    await writeFileTool.execute({ path: "big.txt", content }, ctx);
+    const preview = asked[0].preview ?? "";
+    expect(preview).toContain("[... preview truncated:");
+    expect(preview.split("\n")).toHaveLength(121);
   });
 });

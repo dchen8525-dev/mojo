@@ -7,6 +7,12 @@ import { editGuardMessage } from "../fileState.js";
 import { atomicWriteFile } from "../atomicWrite.js";
 import { applyEdits, diffStats, findAll, findFuzzyEdits, nearestMiss, renderDiff, type Edit } from "./editMatch.js";
 
+/** A whole-file "added" diff for new/empty files, in the same shape as renderDiff. */
+function createDiffPreview(content: string): string {
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  return `@@ -0,0 +1,${lines.length} @@\n${lines.map((l) => `+${l}`).join("\n")}`;
+}
+
 export const writeFileTool: Tool = {
   name: "write_file",
   description:
@@ -38,10 +44,28 @@ export const writeFileTool: Tool = {
         if (blocked) return { content: editGuardMessage(ctx.cwd, abs, blocked), isError: true };
       }
 
+      // Show the planned change as a diff, not just counts: the GUI and the
+      // Ink UI render `@@`-headed previews with line numbers.
+      let preview: string | undefined;
+      if (existed) {
+        const current = await fs.readFile(abs, "utf8").catch(() => null);
+        preview = current
+          ? renderDiff(current, [{ start: 0, end: current.length, text: content }])
+          : createDiffPreview(content);
+      } else {
+        preview = createDiffPreview(content);
+      }
+      const previewLines = preview.split("\n");
+      if (previewLines.length > 120) {
+        preview =
+          previewLines.slice(0, 120).join("\n") + `\n[... preview truncated: ${previewLines.length - 120} more lines]`;
+      }
+
       const ok = await ctx.askPermission(
         `${existed ? "Overwrite" : "Create"} file ${relPath(ctx.cwd, abs)} ` +
           `(${content.split("\n").length} lines, ${content.length} chars)`,
         "high",
+        preview,
       );
       if (!ok) return { content: "The user rejected this edit. Ask before trying again.", isError: true };
 

@@ -551,9 +551,46 @@ function refreshThinkingCard(card, text, live) {
   });
 }
 
-function scrollBottom() {
-  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+/* Scroll ownership: streaming appends only pin the viewport while the user is
+   already at the bottom. Any real scroll away (wheel, touch, scrollbar, keys)
+   detaches — growth never steals the viewport — until the user returns to the
+   bottom or clicks the jump button. Our own scrollBottom() sets `lock` so the
+   scroll handler can tell its event from a user scroll. */
+const BOTTOM_SLACK = 32;
+const follow = { on: true, lock: false };
+const jumpBottom = $("#jump-bottom");
+
+function distanceFromBottom() {
+  return transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight;
 }
+
+function updateJumpButton() {
+  jumpBottom.classList.toggle("hidden", follow.on);
+}
+
+function scrollBottom() {
+  if (follow.on) {
+    follow.lock = true;
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  }
+  updateJumpButton();
+}
+
+transcriptEl.addEventListener("scroll", () => {
+  const nearBottom = distanceFromBottom() <= BOTTOM_SLACK;
+  if (follow.lock && nearBottom) {
+    follow.lock = false;
+    return;
+  }
+  follow.lock = false;
+  follow.on = nearBottom;
+  updateJumpButton();
+});
+
+jumpBottom.onclick = () => {
+  follow.on = true;
+  scrollBottom();
+};
 
 function appendItem(node) {
   transcriptEl.appendChild(node);
@@ -702,6 +739,8 @@ async function refreshState() {
   state.planMode = s.planMode;
   state.mode = s.mode;
   state.sessionId = s.sessionId;
+  // A full redraw must not yank a detached viewport back to the stream tail.
+  const keepScroll = follow.on ? null : transcriptEl.scrollTop;
   transcriptEl.replaceChildren();
   // Consecutive tool cards from the same model round are collected into one group.
   let group = null;
@@ -729,6 +768,8 @@ async function refreshState() {
   state.liveTurn = s.liveTurn ?? null;
   mountLive();
   updateWelcome();
+  if (keepScroll !== null) transcriptEl.scrollTop = keepScroll;
+  else scrollBottom();
   if (Array.isArray(s.customCommands)) customCmds = s.customCommands;
   todoSyncEpoch++; // invalidate any todo-only refresh that started earlier
   state.todos = Array.isArray(s.todos) ? s.todos : [];
@@ -1047,6 +1088,48 @@ function connectSSE() {
 
 /* ---------------- permission modal ---------------- */
 
+/* Edit previews arrive as unified diffs (renderDiff in editMatch.ts, git diff
+   for git tools); render them as numbered rows like a code review. Non-diff
+   previews (plans, command lines) keep the plain colored pre. */
+const HUNK_RE = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+const DIFF_HEADER_RE = /^(diff --git |index |--- |\+\+\+ |new file mode|deleted file mode|rename |similarity )/;
+
+function looksLikeDiff(text) {
+  return HUNK_RE.test(text) || /^diff --git /m.test(text);
+}
+
+function renderDiffPreview(container, text) {
+  let oldNo = 0;
+  let newNo = 0;
+  for (const line of text.split("\n")) {
+    const hunk = HUNK_RE.exec(line);
+    if (hunk || DIFF_HEADER_RE.test(line) || line.startsWith("\\") || line.startsWith("[...")) {
+      if (hunk) {
+        oldNo = parseInt(hunk[1], 10);
+        newNo = parseInt(hunk[2], 10);
+      }
+      container.appendChild(el("div", "diff-meta", line));
+      continue;
+    }
+    const row = el("div", "diff-row");
+    const oldCell = el("span", "diff-num");
+    const newCell = el("span", "diff-num");
+    if (line.startsWith("+")) {
+      newCell.textContent = newNo++;
+      row.classList.add("add");
+    } else if (line.startsWith("-")) {
+      oldCell.textContent = oldNo++;
+      row.classList.add("del");
+    } else {
+      oldCell.textContent = oldNo++;
+      newCell.textContent = newNo++;
+      line = line.slice(1); // context lines carry a leading space
+    }
+    row.append(oldCell, newCell, el("span", "diff-code", line));
+    container.appendChild(row);
+  }
+}
+
 function showPermission() {
   if (!state.perms.length || !$("#perm-modal").classList.contains("hidden")) return;
   const p = state.perms[0];
@@ -1055,13 +1138,13 @@ function showPermission() {
   $("#perm-desc").textContent = p.description;
   const preview = $("#perm-preview");
   preview.replaceChildren();
-  if (p.preview) {
+  if (p.preview && looksLikeDiff(p.preview)) {
+    renderDiffPreview(preview, p.preview);
+  } else if (p.preview) {
     for (const line of p.preview.split("\n")) {
       const span = el("span", line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : "", line + "\n");
       preview.appendChild(span);
     }
-  } else {
-    preview.textContent = "";
   }
   $("#perm-modal").classList.remove("hidden");
   preview.scrollTop = 0;
@@ -1237,6 +1320,10 @@ async function send() {
   input.value = "";
   input.style.height = "auto";
   hidePalette();
+  // A new user message is an explicit "show me the latest" — reattach even if
+  // the user was reading earlier output.
+  follow.on = true;
+  updateJumpButton();
   const images = state.images;
   state.images = [];
   renderAttachments();
