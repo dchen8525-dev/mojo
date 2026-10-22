@@ -11,6 +11,7 @@ import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { registerTool, unregisterToolsByPrefix } from "./tools/index.js";
 import { boundedResult } from "./artifacts.js";
 import { McpOAuthFlow } from "./mcpAuth.js";
+import { atomicWriteFile } from "./atomicWrite.js";
 
 /**
  * An MCP server exposing more than this many tools has them marked deferred:
@@ -57,6 +58,18 @@ interface ConnectedServer {
 
 const NAMESPACE = "mcp__";
 const REMOTE_CONNECT_TIMEOUT_MS = 15_000;
+const LIST_TOOLS_TIMEOUT_MS = 15_000;
+const MAX_LISTED_TOOLS = 1000;
+
+function envMs(name: string, fallback: number): number {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  const h = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return h === "localhost" || h === "::1" || /^127(?:\.\d{1,3}){3}$/.test(h);
+}
 
 /** Sanitize a name so it is a valid Anthropic tool name ([a-zA-Z0-9_-]{1,64}). */
 function safe(s: string): string {
@@ -105,6 +118,7 @@ async function readMcpFile(file: string): Promise<Record<string, McpServerConfig
   const servers = isRecord(parsed) ? (isRecord(parsed.mcpServers) ? parsed.mcpServers : parsed) : {};
   const out: Record<string, McpServerConfig> = {};
   for (const [name, cfg] of Object.entries(servers)) {
+    if (name === "__proto__") continue;
     if (isRecord(cfg) && (typeof cfg.command === "string" || typeof cfg.url === "string")) {
       out[name] = cfg as unknown as McpServerConfig;
     }
@@ -177,6 +191,9 @@ export function normalizeMcpConfig(input: unknown): McpServerConfig {
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       throw new Error("url must start with http:// or https://");
     }
+    if (useOauth && parsed.protocol === "http:" && !isLoopbackHost(parsed.hostname)) {
+      throw new Error("oauth requires https (plain http is only allowed for localhost)");
+    }
     cfg = { url };
     if (input.type !== undefined && input.type !== null && input.type !== "") {
       if (input.type !== "http" && input.type !== "sse") throw new Error('type must be "http" or "sse"');
@@ -210,7 +227,7 @@ export function normalizeMcpConfig(input: unknown): McpServerConfig {
 
 async function writeMcpFile(file: string, root: Record<string, unknown>): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  await fs.writeFile(file, `${JSON.stringify(root, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  await atomicWriteFile(file, `${JSON.stringify(root, null, 2)}\n`, 0o600);
   await fs.chmod(file, 0o600).catch(() => {});
 }
 
@@ -225,6 +242,7 @@ export async function saveMcpServer(
   if (!/^[A-Za-z0-9._-]{1,40}$/.test(cleanName)) {
     throw new Error("server name must be 1-40 characters: letters, digits, dot, underscore or dash");
   }
+  if (cleanName === "__proto__") throw new Error("server name is reserved");
   const cfg = normalizeMcpConfig(config);
   const file = mcpConfigPath(scope, cwd, home);
   const parsed = await readMcpFileForWrite(file);
@@ -265,12 +283,14 @@ function flattenContent(content: Array<{ type: string; text?: string; data?: str
     .join("\n");
 }
 
+interface RemoteToolDef {
+  name: string;
+  description?: string;
+  inputSchema?: unknown;
+}
+
 /** Wrap one remote MCP tool as a local Tool. */
-function wrapTool(
-  server: ConnectedServer,
-  remote: { name: string; description?: string; inputSchema?: unknown },
-  deferred: boolean,
-): Tool {
+function wrapTool(server: ConnectedServer, remote: RemoteToolDef, deferred: boolean): Tool {
   const localName = `${server.prefix}${safe(remote.name)}`;
   return {
     name: localName,
@@ -308,7 +328,27 @@ interface ConnectResult {
   kind: McpTransportKind;
 }
 
-async function connectStdio(cfg: McpServerConfig): Promise<ConnectResult> {
+/** Collect every page of tools/list; a repeated cursor cannot loop forever. */
+async function listAllTools(client: Client): Promise<RemoteToolDef[]> {
+  const timeout = envMs("AGENT_MCP_LIST_TIMEOUT_MS", LIST_TOOLS_TIMEOUT_MS);
+  const tools: RemoteToolDef[] = [];
+  const seen = new Set<string>();
+  let cursor: string | undefined;
+  for (let page = 0; page < 50; page++) {
+    const res = await client.listTools(cursor ? { cursor } : undefined, { timeout });
+    for (const t of res.tools) {
+      tools.push({ name: t.name, description: t.description, inputSchema: t.inputSchema });
+      if (tools.length >= MAX_LISTED_TOOLS) return tools;
+    }
+    cursor = res.nextCursor;
+    if (!cursor) return tools;
+    if (seen.has(cursor)) throw new Error("MCP server repeated a tools/list cursor");
+    seen.add(cursor);
+  }
+  return tools;
+}
+
+async function connectStdio(cfg: McpServerConfig, name: string): Promise<ConnectResult> {
   const transport = new StdioClientTransport({
     command: cfg.command!,
     args: cfg.args ?? [],
@@ -316,8 +356,21 @@ async function connectStdio(cfg: McpServerConfig): Promise<ConnectResult> {
     cwd: process.cwd(),
     stderr: "pipe",
   });
+  // The SDK pipes stderr into a PassThrough. It must be consumed or a chatty
+  // server eventually blocks on a full pipe; keep a tail for diagnostics.
+  let stderrTail = "";
+  transport.stderr?.on("data", (chunk: Buffer) => {
+    stderrTail = (stderrTail + chunk.toString("utf8")).slice(-4000);
+  });
   const client = new Client({ name: "node-agent", version: "0.1.0" });
-  await client.connect(transport);
+  try {
+    await client.connect(transport);
+  } catch (err) {
+    const tail = stderrTail.trim().split("\n").slice(-5).join(" · ");
+    await client.close().catch(() => {});
+    await transport.close().catch(() => {});
+    throw new Error(`stdio MCP server "${name}" failed: ${describeError(err)}${tail ? ` — stderr: ${tail}` : ""}`);
+  }
   return { client, transport, kind: "stdio" };
 }
 
@@ -441,11 +494,11 @@ export class McpManager {
     let transport: Transport | null = null;
     try {
       if (cfg.url && cfg.command) throw new Error("config has both command and url — keep only one");
-      const conn = cfg.url ? await connectRemote(cfg, name, this.opts) : await connectStdio(cfg);
+      const conn = cfg.url ? await connectRemote(cfg, name, this.opts) : await connectStdio(cfg, name);
       client = conn.client;
       transport = conn.transport;
 
-      const { tools: remoteTools } = await client.listTools();
+      const remoteTools = await listAllTools(client);
       const filtered = remoteTools.filter((t) => {
         if (cfg.enabledTools?.length) return cfg.enabledTools.includes(t.name);
         if (cfg.disabledTools?.length) return !cfg.disabledTools.includes(t.name);

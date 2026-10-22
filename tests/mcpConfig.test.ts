@@ -63,6 +63,10 @@ describe("normalizeMcpConfig", () => {
       url: "https://a.example/mcp",
       oauth: true,
     });
+    expect(normalizeMcpConfig({ url: "http://127.0.0.1:8080/mcp", oauth: true })).toEqual({
+      url: "http://127.0.0.1:8080/mcp",
+      oauth: true,
+    });
   });
 
   it("rejects ambiguous or malformed remote configs", () => {
@@ -73,6 +77,7 @@ describe("normalizeMcpConfig", () => {
     expect(() => normalizeMcpConfig({ url: "https://a.example", headers: { A: 1 } })).toThrow(/header values/);
     expect(() => normalizeMcpConfig({ url: "https://a.example", oauth: "yes" })).toThrow(/oauth must be a boolean/);
     expect(() => normalizeMcpConfig({ command: "x", oauth: true })).toThrow(/only valid for remote/);
+    expect(() => normalizeMcpConfig({ url: "http://mcp.example.com", oauth: true })).toThrow(/https/);
   });
 });
 
@@ -121,6 +126,12 @@ describe("MCP config files", () => {
     expect(await deleteMcpServer(cwd, "project", "one", home)).toBe(true);
     expect(await deleteMcpServer(cwd, "project", "one", home)).toBe(false);
     expect(Object.keys((await loadMcpConfigScoped(cwd, home)).project)).toEqual(["two"]);
+  });
+
+  it("refuses prototype-polluting server names", async () => {
+    const { cwd, home } = await tempRoot();
+    await expect(saveMcpServer(cwd, "global", "__proto__", { command: "x" }, home)).rejects.toThrow(/reserved/);
+    expect(Object.keys((await loadMcpConfigScoped(cwd, home)).global)).toEqual([]);
   });
 
   it("refuses to overwrite a corrupt config file", async () => {

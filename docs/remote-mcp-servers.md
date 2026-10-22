@@ -18,10 +18,15 @@
 ## 连接与暴露
 
 - 每次传输尝试有 15 秒连接超时；显式 `type` 时不做回退，配置错误快速失败。
+- `tools/list` 自动翻页直到没有 `nextCursor`（最多 50 页 / 1000 个工具），每页 15 秒超时
+  （`AGENT_MCP_LIST_TIMEOUT_MS`），服务器重复返回同一 cursor 时报错而不是死循环。
+- stdio 子进程的 stderr 会被持续消费，避免日志过多的服务器因管道反压卡死；启动失败时错误
+  信息附带 stderr 末尾 5 行。
 - 连接成功后工具按 `mcp__<服务器名>__<工具名>` 注册，仍走统一的权限确认；工具数超过
   `MCP_DEFER_TOOLS`（12）时进入 tool_search 延迟目录（见 tool-search-deferred-catalog.md）。
 - `/mcp` 与 GUI 状态显示实际使用的传输类型（stdio / http / sse）；两种传输都失败时，错误信息
   会列出每个传输的失败原因。
+- 配置文件以临时文件 + rename 原子写入；服务器名拒绝 `__proto__`，防止 JSON 对象原型污染。
 
 ## GUI
 

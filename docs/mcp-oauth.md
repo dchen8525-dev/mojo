@@ -10,6 +10,9 @@
   （`oauth is only valid for remote servers`）。
 - `oauth` 与静态 `headers` 可并存：授权成功后 SDK 在 `Authorization: Bearer <token>` 之外
   仍会带上配置的 headers（用于网关等额外凭据）。
+- `oauth` 要求 `https://`；明文 `http://` 只允许回环地址（`localhost` / `127.*` / `::1`），
+  防止令牌与授权码在网络上明文传输。校验不通过时报
+  `oauth requires https (plain http is only allowed for localhost)`。
 - 未配置 `oauth` 时保持原有行为，不发起任何授权请求。
 
 ## 流程
