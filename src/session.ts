@@ -83,12 +83,26 @@ function invalidateSession(id: string): void {
 }
 
 export async function createSession(cwd: string): Promise<{ id: string; meta: SessionMeta }> {
-  const id = crypto.randomBytes(4).toString("hex");
-  const now = new Date().toISOString();
-  const meta: SessionMeta = { id, cwd, startedAt: now, updatedAt: now };
-  await fs.mkdir(SESSION_DIR, { recursive: true });
-  await fs.writeFile(fileFor(id), JSON.stringify({ type: "meta", ...meta }) + "\n", "utf8");
-  return { id, meta };
+  await fs.mkdir(SESSION_DIR, { recursive: true, mode: 0o700 });
+  await fs.chmod(SESSION_DIR, 0o700).catch(() => {}); // existing dirs keep their old mode
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const id = crypto.randomBytes(4).toString("hex");
+    const now = new Date().toISOString();
+    const meta: SessionMeta = { id, cwd, startedAt: now, updatedAt: now };
+    try {
+      // "wx" turns an id collision into EEXIST instead of overwriting a session.
+      await fs.writeFile(fileFor(id), JSON.stringify({ type: "meta", ...meta }) + "\n", {
+        encoding: "utf8",
+        mode: 0o600,
+        flag: "wx",
+      });
+      await fs.chmod(fileFor(id), 0o600).catch(() => {});
+      return { id, meta };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
+  }
+  throw new Error("could not allocate a unique session id");
 }
 
 export async function appendMessages(id: string, messages: MessageParam[]) {

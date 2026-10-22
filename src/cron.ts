@@ -277,16 +277,27 @@ function cleanName(name: string | undefined, prompt: string): string {
   return (trimmed || fallback).slice(0, NAME_MAX);
 }
 
-function assertInput(input: CronTaskInput): void {
+async function assertCwd(cwd: string): Promise<void> {
+  let stat;
+  try {
+    stat = await fs.stat(cwd);
+  } catch {
+    throw new Error(`cwd is not a directory: ${cwd}`);
+  }
+  if (!stat.isDirectory()) throw new Error(`cwd is not a directory: ${cwd}`);
+}
+
+async function assertInput(input: CronTaskInput): Promise<void> {
   if (!input.prompt.trim()) throw new Error("prompt is required");
   if (input.prompt.length > PROMPT_MAX) throw new Error(`prompt is longer than ${PROMPT_MAX} characters`);
   if (!path.isAbsolute(input.cwd)) throw new Error("cwd must be an absolute path");
+  await assertCwd(input.cwd);
   parseCron(input.cron);
 }
 
 export async function createCronTask(input: CronTaskInput, home = os.homedir()): Promise<CronTask> {
   return serialize(async () => {
-    assertInput(input);
+    await assertInput(input);
     const tasks = await loadCronTasks(home);
     if (tasks.length >= MAX_CRON_TASKS) throw new Error(`at most ${MAX_CRON_TASKS} scheduled tasks`);
     const now = new Date();
@@ -320,6 +331,9 @@ export async function updateCronTask(id: string, patch: CronTaskPatch, home = os
     if (!prompt) throw new Error("prompt is required");
     if (prompt.length > PROMPT_MAX) throw new Error(`prompt is longer than ${PROMPT_MAX} characters`);
     if (!path.isAbsolute(cwd)) throw new Error("cwd must be an absolute path");
+    // Only validate a new working directory: a legacy task pointing at a
+    // temporarily unavailable path must still be togglable.
+    if (patch.cwd !== undefined && cwd !== task.cwd) await assertCwd(cwd);
 
     const scheduleChanged = patch.cron !== undefined && cron !== task.cron;
     const wasDisabled = !task.enabled;

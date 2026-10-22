@@ -1,5 +1,8 @@
 import type { ServerResponse } from "node:http";
 
+/** Drop a tab that has stopped reading before its backlog can grow unbounded. */
+const MAX_BUFFERED_BYTES = 4 * 1024 * 1024;
+
 /**
  * Broadcasts server-sent events to every connected GUI client. The hub is
  * transport-only: the caller decides what events mean.
@@ -22,13 +25,16 @@ export class SseHub {
 
   remove(res: ServerResponse): void {
     this.clients.delete(res);
-    if (!this.clients.size) {
-      if (this.heartbeat) {
-        clearInterval(this.heartbeat);
-        this.heartbeat = undefined;
-      }
-      this.onEmpty?.();
+    this.maybeEmpty();
+  }
+
+  private maybeEmpty(): void {
+    if (this.clients.size) return;
+    if (this.heartbeat) {
+      clearInterval(this.heartbeat);
+      this.heartbeat = undefined;
     }
+    this.onEmpty?.();
   }
 
   get clientCount(): number {
@@ -43,9 +49,16 @@ export class SseHub {
   private broadcastRaw(frame: string): void {
     for (const res of this.clients) {
       try {
+        if (res.writableLength > MAX_BUFFERED_BYTES) {
+          this.clients.delete(res);
+          this.maybeEmpty();
+          res.destroy();
+          continue;
+        }
         res.write(frame);
       } catch {
         this.clients.delete(res);
+        this.maybeEmpty();
       }
     }
   }

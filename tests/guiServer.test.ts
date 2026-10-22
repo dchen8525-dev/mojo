@@ -206,6 +206,34 @@ describe("gui server", () => {
     });
   });
 
+  it("accepts the query token only on the SSE endpoint", async () => {
+    await withServer(async (gui) => {
+      const r = await req(gui.port, `/api/state?token=${TOKEN}`);
+      expect(r.status).toBe(401);
+    });
+  });
+
+  it("rejects request bodies above the configured limit", async () => {
+    const previous = process.env.AGENT_GUI_MAX_BODY_MB;
+    process.env.AGENT_GUI_MAX_BODY_MB = "1";
+    try {
+      await withServer(async (gui) => {
+        const big = await req(gui.port, "/api/settings", {
+          method: "POST",
+          token: TOKEN,
+          body: { pad: "x".repeat(1024 * 1024 + 10) },
+        });
+        expect(big.status).toBe(413);
+        expect(big.json.error).toMatch(/too large/);
+        const ok = await req(gui.port, "/api/settings", { method: "POST", token: TOKEN, body: { planMode: true } });
+        expect(ok.status).toBe(200);
+      });
+    } finally {
+      if (previous === undefined) delete process.env.AGENT_GUI_MAX_BODY_MB;
+      else process.env.AGENT_GUI_MAX_BODY_MB = previous;
+    }
+  });
+
   it("serves the static index without a token", async () => {
     await withServer(async (gui) => {
       const r = await req(gui.port, "/");

@@ -22,6 +22,15 @@ beforeAll(async () => {
 });
 
 describe("createSession / loadSession", () => {
+  it("creates session files with owner-only permissions", async () => {
+    const { id } = await session.createSession("x");
+    if (process.platform === "win32") return;
+    const dir = await fs.stat(path.join(fakeHome, ".node-agent", "sessions"));
+    expect(dir.mode & 0o777).toBe(0o700);
+    const file = await fs.stat(path.join(fakeHome, ".node-agent", "sessions", `${id}.jsonl`));
+    expect(file.mode & 0o777).toBe(0o600);
+  });
+
   it("round-trips meta and messages", async () => {
     const { id, meta } = await session.createSession("D:\\proj");
     expect(meta.id).toBe(id);

@@ -32,3 +32,4 @@
 | [mcp-oauth.md](mcp-oauth.md) | 2026-10-22 | MCP OAuth 2.1 授权（PKCE + 本机回环回调） |
 | [cron-automation.md](cron-automation.md) | 2026-10-22 | 定时任务：cron 表达式、单所有者调度、无头执行 |
 | [memory-recall.md](memory-recall.md) | 2026-10-22 | 记忆召回选择器：裁剪旧条目按需注入 |
+| [gui-transport-hardening.md](gui-transport-hardening.md) | 2026-10-22 | GUI 请求体上限、令牌作用域、SSE 背压、会话文件权限 |

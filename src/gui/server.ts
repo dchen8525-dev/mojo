@@ -1,4 +1,5 @@
 import http from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -180,9 +181,26 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
   res.end(data);
 }
 
+/** Chat bodies carry base64 images; keep them bounded instead of buffering anything. */
+function maxBodyBytes(): number {
+  const mb = Number(process.env.AGENT_GUI_MAX_BODY_MB);
+  return Number.isFinite(mb) && mb > 0 ? Math.floor(mb * 1024 * 1024) : 64 * 1024 * 1024;
+}
+
+class BodyTooLargeError extends Error {}
+
 async function readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+  const limit = maxBodyBytes();
   const chunks: Buffer[] = [];
-  for await (const c of req) chunks.push(c as Buffer);
+  let size = 0;
+  let tooLarge = false;
+  for await (const c of req) {
+    const chunk = c as Buffer;
+    size += chunk.length;
+    if (size > limit) tooLarge = true; // keep draining, but stop retaining
+    if (!tooLarge) chunks.push(chunk);
+  }
+  if (tooLarge) throw new BodyTooLargeError();
   const raw = Buffer.concat(chunks).toString("utf8");
   if (!raw) return {};
   try {
@@ -226,10 +244,18 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
     return buf;
   }
 
-  /** The startup token (header or query for SSE) is the gate; the server
-   *  binds to 127.0.0.1 and never sets CORS headers. */
-  function authorized(req: http.IncomingMessage, url: URL): boolean {
-    return req.headers["x-agent-token"] === token || url.searchParams.get("token") === token;
+  /** The startup token in the header is the gate; EventSource cannot set
+   *  headers, so the SSE route also accepts ?token=. The server binds to
+   *  127.0.0.1 and never sets CORS headers. */
+  const tokenBuf = Buffer.from(token);
+  function tokenMatches(candidate: string | string[] | null | undefined): boolean {
+    if (typeof candidate !== "string") return false;
+    const supplied = Buffer.from(candidate);
+    return supplied.length === tokenBuf.length && timingSafeEqual(supplied, tokenBuf);
+  }
+  function authorized(req: http.IncomingMessage, url: URL, route: string): boolean {
+    if (tokenMatches(req.headers["x-agent-token"])) return true;
+    return route === "/api/events" && tokenMatches(url.searchParams.get("token"));
   }
 
   async function usageSnapshot() {
@@ -606,7 +632,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       res.end();
       return;
     }
-    if (!authorized(req, url)) {
+    if (!authorized(req, url, p)) {
       return sendJson(res, 401, { error: "unauthorized" });
     }
 
@@ -718,7 +744,15 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
     }
 
     if (method === "POST") {
-      const body = await readBody(req);
+      let body: Record<string, unknown>;
+      try {
+        body = await readBody(req);
+      } catch (err) {
+        if (err instanceof BodyTooLargeError) {
+          return sendJson(res, 413, { error: `request body too large (limit ${Math.floor(maxBodyBytes() / 1024 / 1024)} MB)` });
+        }
+        throw err;
+      }
 
       if (p === "/api/chat") {
         const text = typeof body.text === "string" ? body.text : "";

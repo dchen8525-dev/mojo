@@ -166,6 +166,22 @@ describe("cron task store", () => {
     await expect(createCronTask({ cron: "bad", prompt: "x", cwd: process.cwd() }, home)).rejects.toThrow(/5 fields/);
     await expect(createCronTask({ cron: "* * * * *", prompt: "  ", cwd: process.cwd() }, home)).rejects.toThrow(/prompt/);
     await expect(createCronTask({ cron: "* * * * *", prompt: "x", cwd: "relative/dir" }, home)).rejects.toThrow(/absolute/);
+    await expect(createCronTask({ cron: "* * * * *", prompt: "x", cwd: path.join(home, "missing") }, home)).rejects.toThrow(
+      /not a directory/,
+    );
+    const fileAsDir = path.join(home, "not-a-dir");
+    await fs.writeFile(fileAsDir, "x");
+    await expect(createCronTask({ cron: "* * * * *", prompt: "x", cwd: fileAsDir }, home)).rejects.toThrow(/not a directory/);
+  });
+
+  it("validates a changed working directory but still toggles a vanished one", async () => {
+    const created = await createCronTask({ cron: "0 9 * * *", prompt: "x", cwd: home }, home);
+    await expect(updateCronTask(created.id, { cwd: path.join(home, "gone") }, home)).rejects.toThrow(/not a directory/);
+
+    // A task whose directory disappeared after creation must stay editable.
+    const legacy = task({ id: "cr_legacy01", cwd: path.join(home, "gone") });
+    await writeTasks([legacy]);
+    await expect(updateCronTask(legacy.id, { enabled: false }, home)).resolves.toMatchObject({ enabled: false });
   });
 
   it("caps the number of tasks", async () => {

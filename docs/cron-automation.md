@@ -13,7 +13,8 @@
   `enabled`、`createdAt`、`nextRunAt`、`runCount`，以及最近一次运行的
   `lastRunAt` / `lastStatus`（`ok` | `error` | `running`）/ `lastError` / `lastLog` /
   `runStartedAt`。
-- `name` 留空时取提示词前 40 个字符；提示词上限 8000 字符；`cwd` 必须是绝对路径。
+- `name` 留空时取提示词前 40 个字符；提示词上限 8000 字符；`cwd` 必须是绝对路径，且创建
+  任务或修改 `cwd` 时必须存在且为目录（仅切换启用状态不重新校验）。
 - 运行日志写入 `~/.node-agent/cron-runs/<id>-<ISO 时间戳>.log`（目录 0700，文件 0600），
   开头记录任务、表达式、目录与提示词，结尾记录退出码；日志不可写只影响记录，不会中断运行
   或拖垮调度进程。
