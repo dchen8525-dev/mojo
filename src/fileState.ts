@@ -13,6 +13,8 @@ interface ReadRecord {
   size: number;
   /** The read covered the whole file (offset 0 through EOF). */
   full: boolean;
+  /** Original (non-key-normalized) absolute path, for reporting. */
+  path: string;
 }
 
 export class FileStateStore {
@@ -23,7 +25,19 @@ export class FileStateStore {
   }
 
   record(absPath: string, stat: { mtimeMs: number; size: number }, full = true) {
-    this.reads.set(this.key(absPath), { mtimeMs: stat.mtimeMs, size: stat.size, full });
+    const key = this.key(absPath);
+    // Delete first so a re-read moves the entry to the end (insertion order).
+    this.reads.delete(key);
+    this.reads.set(key, { mtimeMs: stat.mtimeMs, size: stat.size, full, path: absPath });
+  }
+
+  /**
+   * The most recent reads, newest last (Map preserves insertion order; a
+   * re-read moves the entry to the end). Used to restore read context after a
+   * compaction drops the file contents from history.
+   */
+  recent(n: number): Array<{ path: string; full: boolean; mtimeMs: number; size: number }> {
+    return [...this.reads.values()].slice(-n).map(({ path, full, mtimeMs, size }) => ({ path, full, mtimeMs, size }));
   }
 
   /** Record the on-disk state after our own write (content is current in context). */

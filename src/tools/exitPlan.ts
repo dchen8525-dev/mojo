@@ -41,7 +41,7 @@ export const exitPlanTool: Tool = {
         isError: true,
       };
     }
-    ctx.approvePlan?.();
+    await ctx.approvePlan?.(plan);
     return {
       content: "Plan approved. You are now in normal (executing) mode with full tool access. Carry out the plan you just presented.",
     };

@@ -14,6 +14,8 @@ import { deferredTools, getTool, tools, todoStore, isExposed } from "./tools/ind
 import { TURN_COMPLETION, toolGuidance } from "./prompts.js";
 import { planWaves, runWave } from "./scheduler.js";
 import { systemReminder } from "./reminder.js";
+import { buildReadStateReminder } from "./contextRestore.js";
+import { approvedPlanReminder, copyPlanFile, planVisibleIn, readPlanFile, writePlanFile } from "./planFile.js";
 import { RepetitionTracker } from "./repetition.js";
 import { backgroundManager } from "./tools/background.js";
 import { subagentTasks } from "./taskRegistry.js";
@@ -459,6 +461,7 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
    */
   private async compact(events?: AgentEvents, signal?: AbortSignal, trigger: "auto" | "manual" = "auto") {
     if (this.messages.length < 6) return;
+    this.restoreRan = false;
     if (this.hooks) {
       const hr = await this.hooks.run("PreCompact", { cwd: this.cwd, session_id: this.sessionId, trigger }, undefined);
       if (hr.blocked) {
@@ -490,6 +493,7 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
       // trim whole exchanges instead.
       this.messages = truncateTo(this.messages, budget);
       this.tokens.invalidate();
+      await this.restoreAfterCompaction(events);
       events?.onCompacted?.(before, this.tokenEstimate());
       return;
     }
@@ -520,11 +524,13 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
       // Persist the handoff summary so decisions/gotchas outlive this session.
       const note = await appendMemoryNote(this.cwd, summary, new Date().toISOString().slice(0, 10));
       if (note) events?.onHook?.("compact", `handoff summary saved to ${note}`);
+      await this.restoreAfterCompaction(events, tail);
     } catch (err) {
       if (signal?.aborted) throw err; // user cancelled: leave history alone
       // Summarizer failed (or produced nothing): truncate whole exchanges
       // until the history comfortably fits the budget.
       this.messages = truncateTo(this.messages, budget);
+      await this.restoreAfterCompaction(events);
     }
     this.tokens.invalidate();
     const after = this.tokenEstimate();
@@ -535,6 +541,41 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
       this.tokens.invalidate();
     }
     events?.onCompacted?.(before, this.tokenEstimate());
+  }
+
+  /**
+   * After a compaction rewrites history, re-bridge what was dropped but still
+   * matters: recently read files whose contents left context (read-state
+   * restore) and the approved plan when it is no longer visible. Runs at most
+   * once per compaction.
+   */
+  private restoreRan = false;
+  private async restoreAfterCompaction(events?: AgentEvents, tail: MessageParam[] = this.messages): Promise<void> {
+    if (this.restoreRan) return;
+    this.restoreRan = true;
+    const reminder = await buildReadStateReminder(this.fileState, tail, this.cwd);
+    if (reminder) {
+      this.messages.push({ role: "user", content: reminder });
+      this.tokens.invalidate();
+      events?.onHook?.("compact", "read-state restored for recently read files");
+    }
+    if (await this.ensurePlanAttached()) {
+      events?.onHook?.("compact", "approved plan re-attached after compaction");
+    }
+  }
+
+  /**
+   * Re-attach the approved plan as a system-reminder when it is no longer
+   * visible in history (after a compaction, or on the first turn of a resumed
+   * session). Returns true when the reminder was injected.
+   */
+  private async ensurePlanAttached(): Promise<boolean> {
+    if (this.approvedPlan === undefined) this.approvedPlan = await readPlanFile(this.cwd, this.sessionId);
+    const plan = this.approvedPlan;
+    if (!plan || planVisibleIn(this.messages, plan)) return false;
+    this.messages.push({ role: "user", content: approvedPlanReminder(plan) });
+    this.tokens.invalidate();
+    return true;
   }
 
   /**
@@ -562,6 +603,9 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
     // the model for this request.
     const recalled = await recallMemory(this.cwd, userText);
     if (recalled) prompt += `\n\n${systemReminder(recalled, { event: "RecalledMemory" })}`;
+    // A resumed/forked session picks its approved plan back up (injected once,
+    // only when it is not already visible in history).
+    await this.ensurePlanAttached();
 
     const content: Array<{ type: "text"; text: string } | ImageBlockParam> = [];
     if (prompt) content.push({ type: "text", text: prompt });
@@ -774,6 +818,8 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
 
   /** True when this turn already wrote memory via the save_memory tool. */
   private saveMemoryThisTurn = false;
+  /** The user-approved plan (loaded lazily from the session's plan file). */
+  private approvedPlan: string | null | undefined;
 
   /**
    * Post-turn memory extraction (opt-in via AGENT_MEMORY_EXTRACTION=1): one
@@ -902,8 +948,12 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
         onSubTool: (n, p, ok, r, round) => events?.onSubTool?.(tu.id, n, p, ok, r, round),
         planMode: this.planMode,
         fileState: this.fileState,
-        approvePlan: () => {
+        approvePlan: async (plan?: string) => {
           this.planMode = false;
+          if (plan && plan.trim()) {
+            this.approvedPlan = plan;
+            await writePlanFile(this.cwd, this.sessionId, plan);
+          }
           events?.onPlanApproved?.();
         },
       });
@@ -921,7 +971,15 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
         if (hr.reason) events?.onHook?.("PostToolUse", hr.reason);
         if (hr.context) result.content += `\n\n${systemReminder(hr.context, { event: "PostToolUse" })}`;
       }
-      return { type: "tool_result", tool_use_id: tu.id, content: result.content, is_error: result.isError };
+      const toolResult: ToolResultBlockParam = result.images?.length
+        ? {
+            type: "tool_result",
+            tool_use_id: tu.id,
+            content: [{ type: "text", text: result.content }, ...result.images],
+            is_error: result.isError,
+          }
+        : { type: "tool_result", tool_use_id: tu.id, content: result.content, is_error: result.isError };
+      return toolResult;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       events?.onToolEnd?.(tu.id, tu.name, false, msg, msg);
@@ -969,6 +1027,9 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
     this.checkpoints = new CheckpointStore(sessionId);
     // A session start has no model context yet, so no file counts as read.
     this.fileState.clear();
+    // The plan (if any) is re-loaded per session id on the next turn.
+    this.approvedPlan = undefined;
+    this.restoreRan = false;
     this.messages = history ?? [];
     this.persisted = this.messages.length;
     this.lastPersistedModel = modelSpec ?? "";
@@ -995,6 +1056,8 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
     });
     // A fork continues the same job, so its plan carries over.
     const todos = [...todoStore.items];
+    // A fork continues the same job, so its approved plan carries over too.
+    await copyPlanFile(this.cwd, this.sessionId, id);
     // Re-point this agent at the new file: inherited = prefix + the fork
     // notice, so the persisted count matches what forkSession wrote and the
     // model sees where its context came from.

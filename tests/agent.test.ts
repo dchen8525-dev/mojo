@@ -718,8 +718,10 @@ describe("Agent.chat cost budget", () => {
 });
 
 describe("Agent plan mode", () => {
-  function agentWithPermissions(check: (...args: unknown[]) => Promise<boolean>) {
-    const a = new Agent(process.cwd(), "test-session", { check } as never);
+  async function agentWithPermissions(check: (...args: unknown[]) => Promise<boolean>) {
+    // exit_plan approval now writes a plan file, so keep the cwd out of the repo.
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "agent-planmode-"));
+    const a = new Agent(cwd, "test-session", { check } as never);
     a.planMode = true;
     return a;
   }
@@ -731,7 +733,7 @@ describe("Agent plan mode", () => {
     h.calls = 0;
     h.sentTools = [];
     h.sentSystems = [];
-    const agent = agentWithPermissions(async () => true);
+    const agent = await agentWithPermissions(async () => true);
     await agent.chat("plan this");
     const sent = h.sentTools[0];
     expect(sent).toContain("exit_plan");
@@ -748,7 +750,7 @@ describe("Agent plan mode", () => {
 
   it("runTool blocks a write tool called during plan mode", async () => {
     h.turns = [toolTurn([["t_serial", { n: 1 }]]), textTurn("ok")];
-    const agent = agentWithPermissions(async () => true);
+    const agent = await agentWithPermissions(async () => true);
     await agent.chat("go");
     const blocked = lastSentContent()[0] as { content: string; is_error?: boolean };
     expect(blocked.is_error).toBe(true);
@@ -760,7 +762,7 @@ describe("Agent plan mode", () => {
     h.turns = [toolTurn([["exit_plan", { plan: "1. edit src/a.ts" }]]), textTurn("executing")];
     const approved: unknown[][] = [];
     let planApprovedEvents = 0;
-    const agent = agentWithPermissions(async (desc, _risk, _readOnly, preview) => {
+    const agent = await agentWithPermissions(async (desc, _risk, _readOnly, preview) => {
       approved.push([desc, preview]);
       return true;
     });
@@ -776,7 +778,7 @@ describe("Agent plan mode", () => {
 
   it("exit_plan rejection keeps plan mode", async () => {
     h.turns = [toolTurn([["exit_plan", { plan: "bad plan" }]]), textTurn("revising")];
-    const agent = agentWithPermissions(async () => false);
+    const agent = await agentWithPermissions(async () => false);
     await agent.chat("go");
     expect(agent.planMode).toBe(true);
     const result = lastSentContent()[0] as { content: string; is_error?: boolean };
@@ -790,7 +792,7 @@ describe("Agent plan mode", () => {
       toolTurn([["t_serial", { n: 7 }]]),
       textTurn("finished"),
     ];
-    const agent = agentWithPermissions(async () => true);
+    const agent = await agentWithPermissions(async () => true);
     await agent.chat("go");
     expect(agent.planMode).toBe(false);
     expect(toolEvents).toContain("s-run 7");
@@ -987,5 +989,115 @@ describe("cancelled-stream salvage", () => {
     await expect(b.chat("hi")).rejects.toThrow("aborted");
     expect(h.appended.some((m) => m.role === "assistant")).toBe(false);
     h.onSend = null;
+  });
+});
+
+/* ---------------- batch 29: post-compaction restore + plan continuity ---------------- */
+
+const { writePlanFile, readPlanFile, planFilePath } = await import("../src/planFile.js");
+
+async function tmpAgentCwd(prefix: string): Promise<string> {
+  return fs.mkdtemp(path.join(os.tmpdir(), prefix));
+}
+
+describe("Agent approved-plan continuity", () => {
+  it("writes the plan file on exit_plan approval and does not duplicate it while visible", async () => {
+    const cwd = await tmpAgentCwd("agent-planct1-");
+    const agent = new Agent(cwd, "planct1", permissions);
+    agent.planMode = true;
+    h.turns = [toolTurn([["exit_plan", { plan: "# Plan alpha\n1. do the thing" }]]), textTurn("ok")];
+    await agent.chat("go");
+    expect(await fs.readFile(planFilePath(cwd, "planct1"), "utf8")).toContain("Plan alpha");
+
+    // The plan is still visible via the exit_plan tool_use input: no reminder.
+    h.turns = [textTurn("continuing")];
+    h.calls = 0;
+    await agent.chat("continue");
+    const last = h.sentMessages[h.sentMessages.length - 1];
+    expect(last.some((m) => typeof m.content === "string" && m.content.includes('event="ApprovedPlan"'))).toBe(false);
+  });
+
+  it("re-injects the plan once on resume when it is not visible", async () => {
+    const cwd = await tmpAgentCwd("agent-planct2-");
+    await writePlanFile(cwd, "planct2", "# Plan beta\n2. add tests");
+    const agent = new Agent(cwd, "planct2", permissions, seedHistory(1));
+    h.turns = [textTurn("ok")];
+    await agent.chat("continue the plan");
+    const msgs = agent.debugMessages();
+    const reminders = msgs.filter((m) => typeof m.content === "string" && m.content.includes('event="ApprovedPlan"'));
+    expect(reminders).toHaveLength(1);
+    expect(String(reminders[0].content)).toContain("Plan beta");
+
+    // The reminder is now in history: a second turn does not duplicate it.
+    h.turns = [textTurn("ok2")];
+    h.calls = 0;
+    await agent.chat("next");
+    expect(
+      agent.debugMessages().filter((m) => typeof m.content === "string" && m.content.includes('event="ApprovedPlan"')),
+    ).toHaveLength(1);
+  });
+
+  it("re-attaches the plan after a compaction drops it", async () => {
+    const cwd = await tmpAgentCwd("agent-planct3-");
+    const agent = new Agent(cwd, "planct3", permissions, seedHistory(10));
+    await writePlanFile(cwd, "planct3", "# Plan gamma\n3. verify");
+    h.turns = [textTurn("## Task\nshipped")];
+    await agent.compactNow();
+    const msgs = agent.debugMessages();
+    expect(msgs.some((m) => typeof m.content === "string" && m.content.includes('event="ApprovedPlan"'))).toBe(true);
+  });
+
+  it("carries the plan over to a fork", async () => {
+    const cwd = await tmpAgentCwd("agent-planct4-");
+    await writePlanFile(cwd, "planct4", "# Plan delta\nkeep going");
+    const agent = new Agent(cwd, "planct4", permissions, seedHistory(1));
+    expect(await agent.fork(2)).toBe("fork0000");
+    expect(await readPlanFile(cwd, "fork0000")).toContain("Plan delta");
+  });
+});
+
+describe("Agent post-compaction read-state restore", () => {
+  beforeAll(() => {
+    registerTool({
+      name: "t_readfile",
+      description: "test",
+      isReadOnly: true,
+      parallelSafe: true,
+      inputSchema: { type: "object", properties: {} },
+      async execute(_input, ctx) {
+        const f = path.join(ctx.cwd, "note.ts");
+        ctx.fileState?.record(f, await fs.stat(f), true);
+        // Keep the filename out of the tool result: it would land in the kept
+        // tail and the restore would correctly skip it as still visible.
+        return { content: "done" };
+      },
+    });
+  });
+
+  it("re-injects recently read file contents after a compaction", async () => {
+    const cwd = await tmpAgentCwd("agent-ctxrestore-");
+    await fs.writeFile(path.join(cwd, "note.ts"), "export const answer = 42;\n", "utf8");
+    const agent = new Agent(cwd, "ctxrestore", permissions, seedHistory(10));
+    // Zero reported usage keeps the token anchor unset, so compactNow still
+    // sees the char-based estimate (well over budget) and actually compacts.
+    h.turns = [toolTurn([["t_readfile", {}]], 0, 0), textTurn("noted", 0, 0)];
+    await agent.chat("read the file");
+    h.turns = [textTurn("## Task\nsummary of the work")];
+    await agent.compactNow();
+    const msgs = agent.debugMessages();
+    const reminder = msgs.find((m) => typeof m.content === "string" && m.content.includes('event="ReadStateRestored"'));
+    expect(reminder).toBeDefined();
+    expect(String(reminder!.content)).toContain("export const answer = 42;");
+    expect(String(reminder!.content)).toContain("note.ts");
+  });
+
+  it("injects nothing when no files were read", async () => {
+    const cwd = await tmpAgentCwd("agent-ctxrestore2-");
+    const agent = new Agent(cwd, "ctxrestore2", permissions, seedHistory(10));
+    h.turns = [textTurn("## Task\nplain summary")];
+    await agent.compactNow();
+    expect(
+      agent.debugMessages().some((m) => typeof m.content === "string" && m.content.includes("ReadStateRestored")),
+    ).toBe(false);
   });
 });

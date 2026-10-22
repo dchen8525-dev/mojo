@@ -76,6 +76,8 @@ export function isBlockedAddress(ip: string): boolean {
   if (zeroUntil(4) && groups[4] === 0xffff && groups[5] === 0) {
     return isBlockedAddress(hexesToIpv4(groups[6], groups[7]));
   }
+  // Discard-only range (RFC 6666): nothing routable can live here.
+  if (groups[0] === 0x100 && groups.slice(1, 4).every((g) => g === 0)) return true;
   return (
     /^f[cd]/.test(s) || // unique local fc00::/7
     /^fe[89ab]/.test(s) || // link-local fe80::/10

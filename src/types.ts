@@ -11,6 +11,11 @@ export type ImageBlockParam = Anthropic.Messages.ImageBlockParam;
 export interface ToolResult {
   content: string;
   isError?: boolean;
+  /**
+   * Images decoded from tool output (e.g. a data-URL screenshot on bash
+   * stdout). Attached to the tool_result as content blocks alongside text.
+   */
+  images?: ImageBlockParam[];
 }
 
 export type Risk = "low" | "medium" | "high";
@@ -43,8 +48,8 @@ export interface ToolContext {
   onSubTool?: (name: string, inputPreview: string, ok: boolean, preview: string, round?: number) => void;
   /** True while the agent is in plan mode (read-only exploration before execution). */
   planMode?: boolean;
-  /** Called by exit_plan when the user approves the plan; the agent leaves plan mode. */
-  approvePlan?: () => void;
+  /** Called by exit_plan when the user approves the plan; the agent leaves plan mode. May persist the plan asynchronously. */
+  approvePlan?: (plan?: string) => void | Promise<void>;
   /**
    * Per-session read/write record. When present, edit_file/write_file refuse
    * files that were never read or changed on disk after the read.

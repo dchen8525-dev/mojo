@@ -7,6 +7,7 @@ import { str, num, bool, truncate, describeError, hasOutsidePathArg } from "./ut
 import { backgroundManager } from "./background.js";
 import { isFormatterCommand, syncBashFileState } from "./bashFileState.js";
 import { mergeShellSnapshotEnv, shellSnapshotEnv } from "../shellSnapshot.js";
+import { postProcessBashOutput } from "../bashHints.js";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 /** Output beyond this is killed; the full capture is spilled to a file. */
@@ -280,9 +281,12 @@ export const bashTool: Tool = {
           succeeded && ctx.fileState && isFormatterCommand(command)
             ? "\n[Note: a formatter ran - earlier file reads were invalidated; read a file again before editing it.]"
             : "";
-        const combined = `${body}${status ? `\n${status}` : ""}${note}${formatNote}`;
+        // Post-transforms: data-URL screenshots become image blocks and known
+        // failure patterns (rate limits) get a steering hint.
+        const post = postProcessBashOutput(`${body}${status ? `\n${status}` : ""}${note}${formatNote}`);
         resolve({
-          content: truncate(combined, maxOutput),
+          content: truncate(post.text, maxOutput),
+          images: post.images.length ? post.images : undefined,
           isError: !!killed || (code !== 0 && code !== null),
         });
       });
