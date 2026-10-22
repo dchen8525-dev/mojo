@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";import type { ContentBlock, MessageParam, ToolUseBlock } from "../src/types.js";
+import { CancelledStreamError } from "../src/llm/types.js";
 
 // Scripted fake LLM: each send() pops the next canned turn.
 const h = vi.hoisted(() => ({
@@ -16,6 +17,7 @@ const h = vi.hoisted(() => ({
   sentTools: [] as string[][],
   sentSystems: [] as string[],
   recalled: "",
+  appended: [] as MessageParam[],
   savedTodos: [] as Array<{ id: string; todos: unknown }>,
   /** Test hook, invoked at the start of every fake send(). */
   onSend: null as null | (() => void),
@@ -66,7 +68,9 @@ vi.mock("../src/llm.js", () => ({
 
 // Keep tests from writing real session files.
 vi.mock("../src/session.js", () => ({
-  appendMessages: async () => {},
+  appendMessages: async (_id: string, msgs: MessageParam[]) => {
+    h.appended.push(...msgs);
+  },
   appendModel: async () => {},
   rewriteMessages: async () => {},
   renameSession: async () => true,
@@ -892,5 +896,30 @@ describe("subagent permission wiring", () => {
     const spawn = calls.find((c) => c.desc.includes("WRITING subagent"));
     expect(spawn).toBeTruthy();
     expect(spawn!.readOnly).toBe(false);
+  });
+});
+
+describe("cancelled-stream salvage", () => {
+  it("persists the partial streamed text when the user aborts mid-stream", async () => {
+    h.appended = [];
+    h.onSend = () => {
+      throw new CancelledStreamError("partial answer survived");
+    };
+    const a = makeAgent();
+    await expect(a.chat("hi")).rejects.toThrow("aborted");
+    const asst = h.appended.find((m) => m.role === "assistant");
+    expect(asst).toBeDefined();
+    expect(JSON.stringify(asst!.content)).toContain("partial answer survived");
+    expect(h.appended.some((m) => m.role === "user")).toBe(true);
+
+    // A blank partial salvages nothing: history keeps only the user turn.
+    h.appended = [];
+    h.onSend = () => {
+      throw new CancelledStreamError("");
+    };
+    const b = makeAgent();
+    await expect(b.chat("hi")).rejects.toThrow("aborted");
+    expect(h.appended.some((m) => m.role === "assistant")).toBe(false);
+    h.onSend = null;
   });
 });

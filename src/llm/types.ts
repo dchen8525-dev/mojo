@@ -61,6 +61,20 @@ export class StreamIdleError extends Error {
   }
 }
 
+/**
+ * User abort mid-stream. The message stays "aborted" (existing callers match
+ * on it); `partialText` carries what was already streamed so the agent can
+ * salvage it into the history instead of losing the visible work.
+ */
+export class CancelledStreamError extends Error {
+  readonly partialText: string;
+  constructor(partialText: string) {
+    super("aborted");
+    this.name = "CancelledStreamError";
+    this.partialText = partialText;
+  }
+}
+
 export type Provider = "anthropic" | "openai";
 
 /**

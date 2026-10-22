@@ -3,7 +3,7 @@ import path from "node:path";
 import { readFileSync } from "node:fs";
 import type { MessageParam, Tool, ContentBlock, ToolUseBlock } from "./types.js";
 import type { AssistantTurn, LLMBackend, Provider, RetryReason, StreamEvents, SystemPrompt } from "./llm/types.js";
-import { StreamInterrupted } from "./llm/types.js";
+import { StreamInterrupted, CancelledStreamError } from "./llm/types.js";
 import { AnthropicBackend } from "./llm/anthropic.js";
 import { OpenAiBackend } from "./llm/openai.js";
 import { lookupModel } from "./llm/models.js";
@@ -11,6 +11,7 @@ import { fetchModelMeta, getModelMeta, setModelMeta, type ModelMeta } from "./mo
 import { recordJournalTurn } from "./journal.js";
 
 export type { AssistantTurn, StreamEvents, Provider } from "./llm/types.js";
+export { CancelledStreamError } from "./llm/types.js";
 export { knownModelNames, lookupModel } from "./llm/models.js";
 
 export interface Config {
@@ -417,6 +418,10 @@ export class LLM {
   ): Promise<AssistantTurn> {
     const MAX_RESUMES = 2;
     let partial = "";
+    // Track what the caller has actually seen. If the user aborts mid-stream,
+    // this is the only record of the visible text - the agent salvages it
+    // into the history so the transcript keeps what was already on screen.
+    let streamed = "";
 
     for (let attempt = 0; ; attempt++) {
       let resumedMessages = messages;
@@ -437,11 +442,17 @@ export class LLM {
         }
       }
 
+      // Deltas seen on a resumed attempt. The model may re-emit text we
+      // already showed (OpenAI has no prefill), so these are held back and
+      // only the new suffix is emitted once the overlap can be computed.
+      let resumedDelta = "";
       try {
-        // On a resumed attempt the model may re-emit text we already showed
-        // (OpenAI has no prefill). Hold its deltas back and emit only the new
-        // suffix once the overlap can be computed, so nothing is duplicated.
-        const attemptEvents = partial && events ? { ...events, onTextDelta: () => {} } : events;
+        const attemptEvents =
+          partial && events
+            ? { ...events, onTextDelta: (d: string) => { resumedDelta += d; } }
+            : events && partial === ""
+              ? { ...events, onTextDelta: (d: string) => { streamed += d; events.onTextDelta?.(d); } }
+              : events;
         const turn = await LLM.withRetry(
           (retryAttempt) =>
             // A stalled stream gets an increasingly generous idle budget:
@@ -472,8 +483,13 @@ export class LLM {
       } catch (err) {
         // Backends surface aborts differently (APIUserAbortError, or the last
         // transient error when cancellation lands during a backoff). Callers
-        // only special-case the "aborted" message, so normalize it here.
-        if (signal?.aborted) throw new Error("aborted");
+        // only special-case the "aborted" message, so keep it and attach the
+        // streamed-so-far text for the agent to salvage.
+        if (signal?.aborted) {
+          throw new CancelledStreamError(
+            attempt === 0 ? streamed : partial + (this.provider === "anthropic" ? resumedDelta : ""),
+          );
+        }
         if (err instanceof StreamInterrupted && attempt < MAX_RESUMES) {
           partial += err.partialText;
           continue;

@@ -6,6 +6,7 @@ import type { Tool, ToolContext, ToolResult } from "../types.js";
 import { str, num, bool, truncate, describeError, hasOutsidePathArg } from "./utils.js";
 import { backgroundManager } from "./background.js";
 import { isFormatterCommand, syncBashFileState } from "./bashFileState.js";
+import { mergeShellSnapshotEnv, shellSnapshotEnv } from "../shellSnapshot.js";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 /** Output beyond this is killed; the full capture is spilled to a file. */
@@ -205,15 +206,21 @@ export const bashTool: Tool = {
       }
     }
 
+    // Windows: merge the user's PowerShell-profile env diff (PATH additions,
+    // tool vars) into the spawn env — the -NoProfile spawn would otherwise
+    // silently drop everything the profile sets up. POSIX runs `-lc` and
+    // already sources the profile per command.
+    const isWin = process.platform === "win32";
+    const snapEnv = isWin ? mergeShellSnapshotEnv(process.env, await shellSnapshotEnv()) : process.env;
+
     return new Promise<ToolResult>((resolve) => {
-      const isWin = process.platform === "win32";
       const shell = isWin ? pickWin32Shell() : { exe: "/bin/bash", prefix: ["-lc"] };
       // On Windows, Node's default argument escaping (\" ...\") is not understood
       // by cmd.exe, which breaks any command containing quotes. Pass the command
       // line verbatim instead; /s makes cmd strip only the outermost quotes.
       const child = spawn(shell.exe, [...shell.prefix, command], {
         cwd: workdir,
-        env: process.env,
+        env: snapEnv,
         windowsHide: true,
         windowsVerbatimArguments: isWin,
       });

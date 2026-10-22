@@ -5,6 +5,7 @@ import path from "node:path";
 import type { ContentBlock, ImageBlockParam, MessageParam, ToolResultBlockParam, ToolUseBlock } from "./types.js";
 import { validateToolInput } from "./types.js";
 import { LLM, type Config, type StreamEvents } from "./llm.js";
+import { CancelledStreamError } from "./llm/types.js";
 import { lookupModel } from "./llm/models.js";
 import type { SystemPrompt } from "./llm/types.js";
 import { deferredTools, getTool, tools, todoStore, isExposed } from "./tools/index.js";
@@ -695,6 +696,21 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
       // Queued steering dies with a failed or aborted turn: never auto-replay
       // it into the next one.
       this.steerQueue.length = 0;
+      // A user abort mid-stream must not lose the text already delivered to
+      // the UI: salvage it as a plain assistant message so /resume and the
+      // next request see the same thing the user saw, and the history stays
+      // API-valid (text-only assistant message needs no tool_result).
+      if (err instanceof CancelledStreamError && err.partialText.trim()) {
+        try {
+          this.messages.push({
+            role: "assistant",
+            content: [{ type: "text", text: err.partialText }],
+          });
+          await this.persistTurn();
+        } catch {
+          // salvage is best-effort; the original abort still propagates
+        }
+      }
       throw err;
     } finally {
       this.turnRunning = false;
@@ -711,6 +727,12 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
       if (hr.reason) events?.onHook?.("Stop", hr.reason);
     }
 
+    await this.persistTurn();
+    return finalText;
+  }
+
+  /** Append everything not yet on disk; rewrite when history was compacted. */
+  private async persistTurn(): Promise<void> {
     let rewrote = false;
     if (this.persisted <= this.messages.length) {
       await appendMessages(this.sessionId, this.messages.slice(this.persisted));
@@ -724,7 +746,6 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
       await appendModel(this.sessionId, spec);
       this.lastPersistedModel = spec;
     }
-    return finalText;
   }
 
   private async runTool(tu: ToolUseBlock, signal: AbortSignal | undefined, events?: AgentEvents): Promise<ToolResultBlockParam> {

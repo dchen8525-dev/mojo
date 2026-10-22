@@ -4,6 +4,7 @@ import { openSync, readFileSync, closeSync, statSync, readSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pickWin32Shell } from "./bash.js";
+import { mergeShellSnapshotEnv, shellSnapshotEnv } from "../shellSnapshot.js";
 
 /**
  * Background shell tasks: `bash run_in_background` starts a command that keeps
@@ -63,7 +64,7 @@ class BackgroundManager {
     const shell = isWin ? pickWin32Shell() : { exe: "/bin/bash", prefix: ["-lc"] };
     const child = spawn(shell.exe, [...shell.prefix, command], {
       cwd,
-      env: process.env,
+      env: isWin ? mergeShellSnapshotEnv(process.env, await shellSnapshotEnv()) : process.env,
       stdio: ["ignore", fd, fd],
       windowsHide: true,
       windowsVerbatimArguments: isWin,
