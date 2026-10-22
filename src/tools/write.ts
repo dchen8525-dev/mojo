@@ -4,6 +4,7 @@ import type { Tool, ToolContext, ToolResult } from "../types.js";
 import { relPath, resolvePath, str, truncate, describeError } from "./utils.js";
 import { diagnosticsHint } from "../lsp.js";
 import { editGuardMessage } from "../fileState.js";
+import { atomicWriteFile } from "../atomicWrite.js";
 import { applyEdits, diffStats, findAll, findFuzzyEdits, nearestMiss, renderDiff, type Edit } from "./editMatch.js";
 
 export const writeFileTool: Tool = {
@@ -46,7 +47,7 @@ export const writeFileTool: Tool = {
 
       const checkpoint = await ctx.checkpoint?.(abs, "write_file");
       await fs.mkdir(path.dirname(abs), { recursive: true });
-      await fs.writeFile(abs, content, "utf8");
+      await atomicWriteFile(abs, content);
       await checkpoint?.finalize?.();
       await ctx.fileState?.recordCurrent(abs);
       const hint = await diagnosticsHint(ctx.cwd, abs, content);
@@ -138,7 +139,7 @@ export const editFileTool: Tool = {
       if (!ok) return { content: "The user rejected this edit. Ask before trying again.", isError: true };
 
       const checkpoint = await ctx.checkpoint?.(abs, "edit_file");
-      await fs.writeFile(abs, updated, "utf8");
+      await atomicWriteFile(abs, updated);
       await checkpoint?.finalize?.();
       await ctx.fileState?.recordCurrent(abs);
       const hint = await diagnosticsHint(ctx.cwd, abs, updated);

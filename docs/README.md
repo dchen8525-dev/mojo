@@ -3,7 +3,7 @@
 本目录是 mojo 各功能的事实规范（spec），借鉴 ZCode 的 docs discipline：**每个功能一篇简短、
 带日期与 commit 的 spec**。今后新功能合入 main 时应随附对应 spec；行为变化时先改 spec 再改代码。
 
-## 索引（2026-10-21 ZCode 借鉴弧线）
+## 索引（2026-10-21/22 ZCode 借鉴弧线）
 
 | Spec | Commit | 主题 |
 | --- | --- | --- |
@@ -21,3 +21,10 @@
 | [system-reminder-channel.md](system-reminder-channel.md) | 3395af1 | 元通知统一 `<system-reminder>` 通道 |
 | [tool-search-deferred-catalog.md](tool-search-deferred-catalog.md) | 9b72828 | tool_search 延迟工具目录 |
 | [background-subagents.md](background-subagents.md) | 2026-10-21 | 后台子代理（分离运行 + 完成提醒） |
+| [bash-background-completions.md](bash-background-completions.md) | b42fc3f | bash 后台任务完成通知 |
+| [undo-conflict-detection.md](undo-conflict-detection.md) | b42fc3f | /undo 冲突检测与 --force |
+| [prompt-assembly.md](prompt-assembly.md) | 2026-10-22 | 提示词装配：turn completion / 工具门控 / 仓库快照 |
+| [tool-input-validation.md](tool-input-validation.md) | 2026-10-22 | 工具输入校验错误格式化 |
+| [repetition-reminders.md](repetition-reminders.md) | 2026-10-22 | 重复调用异常提醒 |
+| [atomic-writes.md](atomic-writes.md) | 2026-10-22 | 原子写入（write/edit/session） |
+| [bash-read-state.md](bash-read-state.md) | 2026-10-22 | bash 读态回填与 formatter 失效 |

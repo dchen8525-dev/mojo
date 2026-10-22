@@ -4,6 +4,7 @@ import path from "node:path";
 import type { Tool, ToolContext, ToolResult } from "../types.js";
 import { relPath, str, bool, truncate, describeError } from "./utils.js";
 import { applyEdits, findAll, renderDiff, type Edit } from "./editMatch.js";
+import { atomicWriteFile } from "../atomicWrite.js";
 
 /**
  * Cross-file search & replace (codemod style): one glob + one pattern replaces
@@ -148,7 +149,7 @@ export const multiEditTool: Tool = {
       for (const h of hits) {
         try {
           const checkpoint = await ctx.checkpoint?.(h.abs, "multi_edit");
-          await fs.writeFile(h.abs, h.updated, "utf8");
+          await atomicWriteFile(h.abs, h.updated);
           await checkpoint?.finalize?.();
           await ctx.fileState?.recordCurrent(h.abs);
           written.push(relPath(ctx.cwd, h.abs));

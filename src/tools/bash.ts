@@ -5,6 +5,7 @@ import path from "node:path";
 import type { Tool, ToolContext, ToolResult } from "../types.js";
 import { str, num, bool, truncate, describeError } from "./utils.js";
 import { backgroundManager } from "./background.js";
+import { isFormatterCommand, syncBashFileState } from "./bashFileState.js";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 /** Output beyond this is killed; the full capture is spilled to a file. */
@@ -261,7 +262,15 @@ export const bashTool: Tool = {
             ? `\n[Output truncated: full ${out.length.toLocaleString()} chars saved to ${file} - read it with read_file offset/limit.]`
             : `\n[Output truncated after ${out.length.toLocaleString()} chars (could not save to disk).]`;
         }
-        const combined = `${body}${status ? `\n${status}` : ""}${note}`;
+        const succeeded = !killed && code === 0;
+        if (succeeded) {
+          await syncBashFileState(command, workdir, out.length <= maxOutput, ctx.fileState);
+        }
+        const formatNote =
+          succeeded && ctx.fileState && isFormatterCommand(command)
+            ? "\n[Note: a formatter ran - earlier file reads were invalidated; read a file again before editing it.]"
+            : "";
+        const combined = `${body}${status ? `\n${status}` : ""}${note}${formatNote}`;
         resolve({
           content: truncate(combined, maxOutput),
           isError: !!killed || (code !== 0 && code !== null),

@@ -25,10 +25,11 @@ describe("validateToolInput", () => {
     expect(err).toContain("Missing required parameter \"path\"");
   });
 
-  it("rejects a wrong primitive type", () => {
+  it("rejects a wrong primitive type and shows the received value", () => {
     const err = validateToolInput(schema, { path: "x", limit: "five" });
     expect(err).toContain("must be integer");
     expect(err).toContain("got string");
+    expect(err).toContain('("five")');
   });
 
   it("ignores unknown keys and extra values", () => {
@@ -38,6 +39,48 @@ describe("validateToolInput", () => {
   it("returns null when the schema declares no properties", () => {
     expect(validateToolInput({ type: "object" }, { anything: true })).toBeNull();
     expect(validateToolInput(undefined, {})).toBeNull();
+  });
+
+  it("suggests the intended parameter when a required one is misspelled", () => {
+    const editSchema: Anthropic.Messages.Tool["input_schema"] = {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        old_string: { type: "string" },
+        new_string: { type: "string" },
+      },
+      required: ["path", "old_string", "new_string"],
+    };
+    const err = validateToolInput(editSchema, { path: "x", old_str: "a", new_str: "b" });
+    expect(err).toContain('Missing required parameter "old_string"');
+    expect(err).toContain('did you mean "old_string"');
+    expect(err).toContain("Available parameters: path, old_string, new_string");
+  });
+
+  it("lists allowed values for an enum", () => {
+    const enumSchema: Anthropic.Messages.Tool["input_schema"] = {
+      type: "object",
+      properties: { mode: { type: "string", enum: ["research", "worker"] } },
+      required: ["mode"],
+    };
+    const err = validateToolInput(enumSchema, { mode: "explore" });
+    expect(err).toContain('must be one of: "research", "worker"');
+    expect(err).toContain('"explore"');
+  });
+
+  it("checks array item types", () => {
+    const arraySchema: Anthropic.Messages.Tool["input_schema"] = {
+      type: "object",
+      properties: { tags: { type: "array", items: { type: "string" } } },
+      required: ["tags"],
+    };
+    const err = validateToolInput(arraySchema, { tags: ["a", 2] });
+    expect(err).toContain("array of string");
+    expect(err).toContain("item 1 is number");
+  });
+
+  it("rejects a non-object tool input", () => {
+    expect(validateToolInput(schema, null as never)).toContain("must be a JSON object, got null");
   });
 });
 

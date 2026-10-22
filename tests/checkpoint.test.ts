@@ -107,6 +107,41 @@ describe("CheckpointStore", () => {
     await expect(fs.access(path.join(storeDir, "snap-1.bin"))).rejects.toThrow();
   });
 
+  it("refuses to undo when the file changed after the agent's write", async () => {
+    const s = store();
+    const f = path.join(work, "conflict.ts");
+    await fs.writeFile(f, "original\n", "utf8");
+    const entry = (await s.capture(f, "edit_file"))!;
+    await fs.writeFile(f, "agent edit\n", "utf8");
+    await s.finalize(entry);
+    await fs.writeFile(f, "user's later edit\n", "utf8");
+
+    const r = await s.undoLast();
+    expect(r?.conflict).toBe(true);
+    expect(r?.action).toBe("refused");
+    expect(r?.reason).toContain("modified after");
+    expect(await fs.readFile(f, "utf8")).toBe("user's later edit\n");
+
+    const forced = await s.undoLast({ force: true });
+    expect(forced?.action).toContain("restored");
+    expect(await fs.readFile(f, "utf8")).toBe("original\n");
+  });
+
+  it("refuses when a file the agent deleted was re-created afterward", async () => {
+    const s = store();
+    const f = path.join(work, "recreated.ts");
+    const entry = (await s.capture(f, "write_file"))!;
+    await fs.writeFile(f, "agent file\n", "utf8");
+    await fs.rm(f);
+    await s.finalize(entry); // file vanished: postExisted=false
+    await fs.writeFile(f, "someone else's file\n", "utf8");
+
+    const r = await s.undoLast();
+    expect(r?.conflict).toBe(true);
+    expect(r?.reason).toContain("re-created");
+    expect(await fs.readFile(f, "utf8")).toBe("someone else's file\n");
+  });
+
   it("capture is best-effort: a failing copy never throws", async () => {
     const s = new CheckpointStore("bad", path.join(dir, "nested", "does", "not", "matter"));
     // A directory cannot be copied as a file -> internal error swallowed.

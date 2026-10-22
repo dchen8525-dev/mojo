@@ -144,7 +144,7 @@ export class CheckpointStore {
     const entry = [...this.entries].reverse().find((e) => !e.restored);
     if (!entry) return null;
 
-    if (!opts.force && entry.postHash !== undefined) {
+    if (!opts.force && (entry.postHash !== undefined || entry.postExisted === false)) {
       const current = await hashFileIfExists(entry.file);
       if (entry.postExisted === false) {
         if (current !== null) {

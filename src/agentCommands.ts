@@ -68,7 +68,7 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       return {
         kind: "ok",
         text: [
-          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks [trust|revoke] · /sessions [--cwd <dir>] [--title <词>] [--tag <tag>] [N] · /search [-r] <term> · /resume <id> · /fork [N] [名称] · /rename <名称> · /tag [+<tag> | -<tag> | clear] · /export [md|json] [路径] · /todos · /undo [-y] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
+          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks [trust|revoke] · /sessions [--cwd <dir>] [--title <词>] [--tag <tag>] [N] · /search [-r] <term> · /resume <id> · /fork [N] [名称] · /rename <名称> · /tag [+<tag> | -<tag> | clear] · /export [md|json] [路径] · /todos · /undo [-y] [--force] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
           "file refs: @path/to/file inlines the file; Ctrl+V pastes a clipboard image",
           custom ? `custom commands: ${custom}` : "",
         ]
@@ -435,8 +435,18 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
         };
       }
       try {
-        const r = await agent.undoLastCheckpoint();
-        return { kind: "ok", text: r ? `undone: ${path.relative(cwd, r.file) || r.file} — ${r.action}` : "nothing to undo" };
+        const r = await agent.undoLastCheckpoint(rest.includes("--force"));
+        if (!r) return { kind: "ok", text: "nothing to undo" };
+        const rel = path.relative(cwd, r.file) || r.file;
+        if (r.conflict) {
+          return {
+            kind: "error",
+            text:
+              `undo refused: ${rel} ${r.reason}. The checkpoint was kept; review the file, ` +
+              `then run /undo -y --force to discard the later change.`,
+          };
+        }
+        return { kind: "ok", text: `undone: ${rel} — ${r.action}` };
       } catch (err) {
         return { kind: "error", text: `undo failed: ${err instanceof Error ? err.message : String(err)}` };
       }

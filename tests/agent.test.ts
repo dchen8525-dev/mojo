@@ -224,6 +224,36 @@ describe("Agent.chat tool scheduling", () => {
   });
 });
 
+describe("Agent.chat repetition detection", () => {
+  it("injects a system-reminder after the third identical call in a row", async () => {
+    h.turns = [
+      toolTurn([["t_parallel", { n: 7 }]]),
+      toolTurn([["t_parallel", { n: 7 }]]),
+      toolTurn([["t_parallel", { n: 7 }]]),
+      textTurn("done"),
+    ];
+    const out = await makeAgent().chat("loop on it");
+    expect(out).toBe("done");
+    const finalMessages = h.sentMessages[3];
+    const reminder = finalMessages
+      .map((m) => m.content)
+      .find((c) => typeof c === "string" && c.includes("RepetitionDetected"));
+    expect(reminder).toContain("identical input 3 times");
+    expect(reminder).toContain("t_parallel");
+  });
+
+  it("does not warn when the input changes each round", async () => {
+    h.turns = [
+      toolTurn([["t_parallel", { n: 1 }]]),
+      toolTurn([["t_parallel", { n: 2 }]]),
+      toolTurn([["t_parallel", { n: 3 }]]),
+      textTurn("done"),
+    ];
+    await makeAgent().chat("vary it");
+    expect(JSON.stringify(h.sentMessages)).not.toContain("RepetitionDetected");
+  });
+});
+
 describe("Agent.chat deferred tools / tool_search", () => {
   afterEach(() => {
     unregisterToolsByPrefix("t_deferred");
@@ -409,13 +439,38 @@ describe("Agent microcompact (prune-only pass at 0.70)", () => {
   });
 });
 
-describe("Agent system prompt skills", () => {
+describe("Agent system prompt assembly", () => {
   it("lists available skills for progressive disclosure", async () => {
     h.turns = [textTurn("ok")];
     const agent = makeAgent();
     await agent.chat("go");
     expect(h.sentSystems[0]).toContain("<available_skills>");
     expect(h.sentSystems[0]).toContain("- fake-skill: does fake things");
+  });
+
+  it("includes the turn-completion contract and tool-gated guidance", async () => {
+    h.turns = [textTurn("ok")];
+    await makeAgent().chat("go");
+    const sys = h.sentSystems[0];
+    expect(sys).toContain("Completing a turn:");
+    expect(sys).toContain("Shell (bash):");
+    expect(sys).toContain("Editing files:");
+    expect(sys).toContain("Subagents (task):");
+    expect(sys).toContain("<session_status>");
+    expect(sys).toContain("- Today:");
+  });
+});
+
+describe("Agent system prompt tool gating", () => {
+  it("omits guidance for tools the turn cannot call (plan mode)", async () => {
+    h.turns = [textTurn("planning")];
+    const agent = new Agent(process.cwd(), "test-session", { check: async () => true } as never);
+    agent.planMode = true;
+    await agent.chat("plan this");
+    const sys = h.sentSystems[0];
+    expect(sys).toContain("PLAN MODE is active");
+    expect(sys).not.toContain("Shell (bash):");
+    expect(sys).not.toContain("Editing files:");
   });
 });
 

@@ -75,40 +75,115 @@ export function toAnthropicTool(t: Tool): Anthropic.Messages.Tool {
   };
 }
 
-type PropSchema = { type?: string; description?: string };
+type PropSchema = {
+  type?: string;
+  description?: string;
+  enum?: unknown[];
+  items?: { type?: string };
+};
 interface ObjectSchema {
   type?: string;
   properties?: Record<string, PropSchema>;
   required?: string[];
 }
 
-/** Lightweight check of a model-supplied tool input against the tool's schema.
- * Handles only the subset mojo's tools actually use: object root, `required`
- * presence, and primitive `type` checking. Returns null when valid, otherwise
- * a short, actionable message the model can act on.
- */
-export function validateToolInput(schema: Anthropic.Messages.Tool["input_schema"], input: Record<string, unknown>): string | null {
-  const s = schema as ObjectSchema | undefined;
-  if (!s || !s.properties) return null; // no declared constraints to enforce
-  for (const key of s.required ?? []) {
-    if (input[key] === undefined || input[key] === null) {
-      return `Missing required parameter "${key}".`;
+function valueType(v: unknown): string {
+  if (Array.isArray(v)) return "array";
+  if (v === null) return "null";
+  return typeof v;
+}
+
+/** Short JSON preview so the model sees exactly what it sent. */
+function valuePreview(v: unknown): string {
+  const json = JSON.stringify(v);
+  if (json === undefined) return String(v);
+  return json.length > 80 ? `${json.slice(0, 77)}...` : json;
+}
+
+/** Edit distance, used only to suggest the intended key on a typo. */
+function editDistance(a: string, b: string): number {
+  const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let diag = prev[0];
+    prev[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = prev[j];
+      prev[j] = Math.min(prev[j] + 1, prev[j - 1] + 1, diag + (a[i - 1] === b[j - 1] ? 0 : 1));
+      diag = tmp;
     }
   }
+  return prev[b.length];
+}
+
+function closestKey(key: string, allowed: string[]): string | null {
+  if (key.length < 3) return null;
+  let best: string | null = null;
+  let bestDist = 4; // suggestions only for distance <= 3
+  for (const cand of allowed) {
+    const d = editDistance(key.toLowerCase(), cand.toLowerCase());
+    if (d < bestDist) {
+      best = cand;
+      bestDist = d;
+    }
+  }
+  return best;
+}
+
+function matchesType(v: unknown, want: string | undefined): boolean {
+  switch (want) {
+    case "string": return typeof v === "string";
+    case "boolean": return typeof v === "boolean";
+    case "number": return typeof v === "number";
+    case "integer": return Number.isInteger(v);
+    case "array": return Array.isArray(v);
+    case "object": return typeof v === "object" && v !== null && !Array.isArray(v);
+    default: return true;
+  }
+}
+
+/** Lightweight check of a model-supplied tool input against the tool's schema.
+ * Handles the subset mojo's tools actually use: object root, `required`
+ * presence, primitive `type`, `enum`, and homogeneous `items`. Returns null
+ * when valid, otherwise an actionable message naming the parameter, what was
+ * expected, and what was received.
+ */
+export function validateToolInput(schema: Anthropic.Messages.Tool["input_schema"], input: Record<string, unknown>): string | null {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return `Tool input must be a JSON object, got ${valueType(input)}.`;
+  }
+  const s = schema as ObjectSchema | undefined;
+  if (!s || !s.properties) return null; // no declared constraints to enforce
+  const allowed = Object.keys(s.properties);
+
+  for (const key of s.required ?? []) {
+    if (input[key] === undefined || input[key] === null) {
+      const unknown = Object.keys(input).filter((k) => !allowed.includes(k));
+      const hints: string[] = [];
+      for (const k of unknown.slice(0, 3)) {
+        const guess = closestKey(k, allowed);
+        hints.push(guess ? `"${k}" (did you mean "${guess}"?)` : `"${k}"`);
+      }
+      const unknownNote = hints.length
+        ? ` Unknown parameter${hints.length === 1 ? "" : "s"}: ${hints.join(", ")}.`
+        : "";
+      return `Missing required parameter "${key}".${unknownNote} Available parameters: ${allowed.join(", ")}.`;
+    }
+  }
+
   for (const [key, prop] of Object.entries(s.properties)) {
     const v = input[key];
     if (v === undefined || v === null) continue;
-    const want = prop.type;
-    const ok =
-      want === "string" ? typeof v === "string" :
-      want === "boolean" ? typeof v === "boolean" :
-      want === "number" ? typeof v === "number" :
-      want === "integer" ? Number.isInteger(v) :
-      want === "array" ? Array.isArray(v) :
-      want === "object" ? typeof v === "object" && !Array.isArray(v) :
-      true;
-    if (!ok) {
-      return `Parameter "${key}" must be ${want}, got ${Array.isArray(v) ? "array" : typeof v}.`;
+    if (!matchesType(v, prop.type)) {
+      return `Parameter "${key}" must be ${prop.type}, got ${valueType(v)} (${valuePreview(v)}).`;
+    }
+    if (prop.enum && !prop.enum.some((e) => e === v)) {
+      return `Parameter "${key}" must be one of: ${prop.enum.map((e) => JSON.stringify(e)).join(", ")}; got ${valuePreview(v)}.`;
+    }
+    if (prop.type === "array" && prop.items?.type && Array.isArray(v)) {
+      const bad = v.findIndex((item) => !matchesType(item, prop.items!.type));
+      if (bad >= 0) {
+        return `Parameter "${key}" must be an array of ${prop.items.type}; item ${bad} is ${valueType(v[bad])} (${valuePreview(v[bad])}).`;
+      }
     }
   }
   return null;

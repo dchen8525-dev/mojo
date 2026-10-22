@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import type { MessageParam } from "./types.js";
+import { atomicWriteFile } from "./atomicWrite.js";
 import { sanitizeTodos, type TodoItem } from "./tools/todo.js";
 
 const SESSION_DIR = path.join(os.homedir(), ".node-agent", "sessions");
@@ -65,44 +66,6 @@ function withFileLock<T>(file: string, fn: () => Promise<T>): Promise<T> {
 }
 
 /**
- * Replace a file via a sibling temp file + rename, so a crash mid-write leaves
- * the previous contents intact. rename() is atomic on POSIX; on Windows it
- * replaces the target too, but can transiently fail with EPERM/EBUSY while a
- * scanner or reader holds the file, hence the short retry loop.
- */
-async function atomicWrite(file: string, data: string): Promise<void> {
-  const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
-  try {
-    const handle = await fs.open(tmp, "w", 0o600);
-    try {
-      await handle.writeFile(data, "utf8");
-      // Some network/removable filesystems do not implement fsync; the
-      // rename below still prevents torn files, so do not fail the write.
-      await handle.sync().catch(() => {});
-    } finally {
-      await handle.close();
-    }
-    await renameWithRetry(tmp, file);
-  } catch (err) {
-    await fs.unlink(tmp).catch(() => {});
-    throw err;
-  }
-}
-
-async function renameWithRetry(from: string, to: string): Promise<void> {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      await fs.rename(from, to);
-      return;
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (attempt >= 4 || (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES")) throw err;
-      await new Promise((resolve) => setTimeout(resolve, 20 * (attempt + 1)));
-    }
-  }
-}
-
-/**
  * Parsed sessions keyed by file path, validated against mtime + size. The GUI
  * lists and searches sessions far more often than they change; re-parsing
  * every file on each call used to dominate those requests.
@@ -161,7 +124,7 @@ export async function rewriteMessages(id: string, messages: MessageParam[]) {
     if (!metaLine) return;
     const lines = messages.map((m) => JSON.stringify({ type: "message", message: m })).join("\n");
     const out = [metaLine, ...extras, ...(lines ? [lines] : [])];
-    await atomicWrite(file, out.join("\n") + "\n");
+    await atomicWriteFile(file, out.join("\n") + "\n", 0o600);
     invalidateSession(id);
   });
 }
@@ -211,7 +174,7 @@ async function updateMeta(id: string, mutate: (meta: SessionMeta) => void): Prom
     delete (meta as { updatedAt?: string }).updatedAt;
     mutate(meta);
     lines[idx] = JSON.stringify({ type: "meta", ...meta });
-    await atomicWrite(file, lines.join("\n"));
+    await atomicWriteFile(file, lines.join("\n"), 0o600);
     invalidateSession(id);
     return meta;
   });

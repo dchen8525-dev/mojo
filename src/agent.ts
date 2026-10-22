@@ -7,9 +7,11 @@ import { validateToolInput } from "./types.js";
 import { LLM, type Config, type StreamEvents } from "./llm.js";
 import { lookupModel } from "./llm/models.js";
 import type { SystemPrompt } from "./llm/types.js";
-import { getTool, tools, todoStore, isExposed } from "./tools/index.js";
+import { deferredTools, getTool, tools, todoStore, isExposed } from "./tools/index.js";
+import { TURN_COMPLETION, toolGuidance } from "./prompts.js";
 import { planWaves, runWave } from "./scheduler.js";
 import { systemReminder } from "./reminder.js";
+import { RepetitionTracker } from "./repetition.js";
 import { backgroundManager } from "./tools/background.js";
 import { subagentTasks } from "./taskRegistry.js";
 import { exitPlanTool } from "./tools/exitPlan.js";
@@ -83,8 +85,8 @@ export class Agent {
   private hooks?: HookManager;
   /** stdout of SessionStart hooks; injected into the system prompt for the whole session. */
   private sessionStartContext = "";
-  /** Built once per user turn; invalidated when plan mode changes. */
-  private systemPromptCache: SystemPrompt | null = null;
+  /** Built once per tool set; invalidated when plan mode changes. */
+  private systemPromptCache: { prompt: SystemPrompt; toolKey: string } | null = null;
   private plan = false;
   /** True between chat() entry and exit; steer() only queues while it holds. */
   private turnRunning = false;
@@ -241,10 +243,16 @@ export class Agent {
     if (hr.reason) events?.onHook?.("SessionStart", hr.reason);
   }
 
-  /** Per-turn cache: the tool loop calls this on every iteration. */
-  private async systemPrompt(): Promise<SystemPrompt> {
-    if (this.systemPromptCache === null) this.systemPromptCache = await this.buildSystemPrompt();
-    return this.systemPromptCache;
+  /**
+   * Cache keyed by the active tool names: tool_search can expose a deferred
+   * tool mid-turn, and the gated guidance must follow the tool list.
+   */
+  private async systemPrompt(toolNames: string[]): Promise<SystemPrompt> {
+    const toolKey = toolNames.join(",");
+    if (this.systemPromptCache?.toolKey !== toolKey) {
+      this.systemPromptCache = { prompt: await this.buildSystemPrompt(toolNames), toolKey };
+    }
+    return this.systemPromptCache.prompt;
   }
 
   /**
@@ -252,7 +260,7 @@ export class Agent {
    * and a volatile tail (date, git status) so provider prompt caching keeps
    * hitting across turns even though the workspace state changes.
    */
-  private async buildSystemPrompt(): Promise<SystemPrompt> {
+  private async buildSystemPrompt(toolNames: string[]): Promise<SystemPrompt> {
     let gitStatus = "(not a git repo)";
     try {
       gitStatus = execSync("git status --short --branch", {
@@ -265,6 +273,18 @@ export class Agent {
       if (gitStatus.length > 2000) gitStatus = gitStatus.slice(0, 2000) + "\n[...]";
     } catch {
       /* not a repo */
+    }
+    let recentCommits = "";
+    try {
+      recentCommits = execSync("git log -5 --oneline", {
+        cwd: this.cwd,
+        timeout: 3000,
+        stdio: ["ignore", "pipe", "ignore"],
+      })
+        .toString()
+        .trim() || "(no commits yet)";
+    } catch {
+      /* not a repo, or no commits */
     }
     let projectInstructions = "";
     for (const f of ["AGENTS.md", "CLAUDE.md"]) {
@@ -296,19 +316,16 @@ Environment:
 ${projectInstructions}${memory}${skills}${hookContext}
 Rules:
 1. Use tools to do the work; never pretend to have run something. If a tool fails, read the error, adjust, and retry - do not give up after one failure.
-2. Before editing a file, read it. edit_file works best with EXACT text copied from read_file output (the "N\\t" prefixes are line numbers, not content); whitespace differences are tolerated as a fallback but indentation may shift, so verify with the diff it returns.
-3. Do not use bash for things read_file/glob_files/grep can do. For long-running commands (dev servers, watchers) use bash with run_in_background and poll with bash_output; never block on them or use interactive editors/REPLs.
-4. write_file/edit_file results include <diagnostics> from the language server for the file you touched. Fix every error before declaring the task done; use get_diagnostics to re-check.
-5. Explore before acting when the task is unclear; act directly when it is not.
-6. Use todo_write for multi-step tasks; keep exactly one item in_progress.
-7. For open-ended codebase investigation (where is X defined, how does Y flow, survey this module), delegate to the task tool in research mode - it explores in its own context and reports back. For a well-scoped chunk of implementation you want done in parallel (fix a module, write tests for one file), delegate in worker mode. Read a known file directly instead of delegating single reads.
-8. When the user's request is done, stop calling tools and give a short summary. Do not invent extra work.
-9. Never commit, push, delete files, or touch credentials unless the user explicitly asks. When they do, use git_status to check state and git_commit / git_pr for those operations instead of raw bash git - they enforce branch and secret safety and show you what will change.
-10. Be concise in replies: results and decisions, not narration.${planRules}`;
+2. Explore before acting when the task is unclear; act directly when it is not.
+3. Use todo_write for multi-step tasks; keep exactly one item in_progress.
+4. Never commit, push, delete files, or touch credentials unless the user explicitly asks.
+5. Be concise in replies: results and decisions, not narration.${planRules}
+${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().length > 0 })}`;
     const volatile =
       `<session_status>\n` +
       `- Today: ${new Date().toISOString().slice(0, 10)}\n` +
       `- Git status:\n${gitStatus}\n` +
+      (recentCommits ? `- Recent commits:\n${recentCommits}\n` : "") +
       `</session_status>`;
     return { stable, volatile };
   }
@@ -485,6 +502,7 @@ Rules:
     let iterations = 0;
     let continuations = 0;
     const segments: string[] = [];
+    const repetitions = new RepetitionTracker();
 
     this.turnRunning = true;
     try {
@@ -514,7 +532,13 @@ Rules:
         const activeTools = this.planMode
           ? [...tools.filter((t) => t.isReadOnly), exitPlanTool]
           : tools.filter((t) => !t.deferred || isExposed(t.name));
-        const turn = await this.llm.send(this.messages, await this.systemPrompt(), activeTools, signal, events);
+        const turn = await this.llm.send(
+          this.messages,
+          await this.systemPrompt(activeTools.map((t) => t.name)),
+          activeTools,
+          signal,
+          events,
+        );
         this.tokens.setAnchor(sent, turn.inputTokens, turn.outputTokens);
         events?.onUsage?.(turn.inputTokens, turn.outputTokens);
         const spec = `${this.llm.provider}:${this.llm.model}`;
@@ -573,6 +597,7 @@ Rules:
         // Wave scheduling: consecutive parallel-safe tools run concurrently
         // (bounded by MAX_WAVE_CONCURRENCY); a mutating tool breaks the wave
         // and runs alone, never overlapping anything else.
+        const repeatHits = turn.toolUses.map((tu) => repetitions.observe(tu.name, tu.input));
         const results: ToolResultBlockParam[] = new Array(turn.toolUses.length);
         const waves = planWaves(
           turn.toolUses.map((tu) => tu.name),
@@ -586,6 +611,19 @@ Rules:
           );
         }
         this.messages.push({ role: "user", content: results });
+        for (let i = 0; i < repeatHits.length; i++) {
+          if (!repeatHits[i]) continue;
+          const tu = turn.toolUses[i];
+          this.messages.push({
+            role: "user",
+            content: systemReminder(
+              `You have called \`${tu.name}\` with identical input ${repeatHits[i]} times in a row this turn. ` +
+                "The result cannot have changed, so repeating the call will not help. Inspect the latest result, " +
+                "change the input or the approach, or tell the user what is blocking you.",
+              { event: "RepetitionDetected", tool: tu.name },
+            ),
+          });
+        }
       }
     } catch (err) {
       // Queued steering dies with a failed or aborted turn: never auto-replay

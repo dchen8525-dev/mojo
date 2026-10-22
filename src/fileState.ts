@@ -39,6 +39,11 @@ export class FileStateStore {
     return this.reads.has(this.key(absPath));
   }
 
+  /** Forget one path: its contents changed outside our own writes. */
+  invalidate(absPath: string) {
+    this.reads.delete(this.key(absPath));
+  }
+
   clear() {
     this.reads.clear();
   }

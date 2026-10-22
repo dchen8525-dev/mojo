@@ -318,6 +318,64 @@ describe("runAgentCommand", () => {
     expect(r.text).toContain("nothing to undo");
   });
 
+  it("/undo reports a conflict instead of claiming success", async () => {
+    const entry = {
+      id: 1,
+      file: "/tmp/repo/a.ts",
+      snapshot: "",
+      existed: true,
+      label: "edit_file",
+      ts: "2026-10-22T00:00:00.000Z",
+      restored: false,
+    };
+    const r = await runAgentCommand(
+      "/undo -y",
+      ctx({
+        agent: fakeAgent({
+          checkpointList: async () => [entry] as never,
+          undoLastCheckpoint: async () => ({
+            file: "/tmp/repo/a.ts",
+            action: "refused",
+            conflict: true,
+            reason: "the file was modified after the agent's edit",
+          }),
+        }),
+      }),
+    );
+    expect(r.kind).toBe("error");
+    expect(r.text).toContain("undo refused");
+    expect(r.text).toContain("modified after");
+    expect(r.text).toContain("--force");
+  });
+
+  it("/undo -y --force forwards force to the checkpoint store", async () => {
+    let forced: boolean | undefined;
+    const entry = {
+      id: 1,
+      file: "/tmp/repo/a.ts",
+      snapshot: "",
+      existed: true,
+      label: "edit_file",
+      ts: "2026-10-22T00:00:00.000Z",
+      restored: false,
+    };
+    const r = await runAgentCommand(
+      "/undo -y --force",
+      ctx({
+        agent: fakeAgent({
+          checkpointList: async () => [entry] as never,
+          undoLastCheckpoint: async (force = false) => {
+            forced = force;
+            return { file: "/tmp/repo/a.ts", action: "restored previous content" };
+          },
+        }),
+      }),
+    );
+    expect(r.kind).toBe("ok");
+    expect(r.text).toContain("undone");
+    expect(forced).toBe(true);
+  });
+
   it("/clear creates a new session", async () => {
     const agent = fakeAgent();
     const spy = vi.spyOn(agent, "resetSession");
