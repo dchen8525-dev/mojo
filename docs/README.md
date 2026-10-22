@@ -49,3 +49,4 @@
 | [media-budget.md](media-budget.md) | 2026-10-22 | 媒体预算：入站图片校验 + 驻留历史最旧优先裁剪 |
 | [workspace-rewind.md](workspace-rewind.md) | 2026-10-22 | 工作区回滚：检查点重放 + /rewind 预览/应用/强制 |
 | [session-fork-branches.md](session-fork-branches.md) | 2026-10-22 | 会话 fork 分支：血缘元数据 + 模型通知 + /sessions 呈现 |
+| [memory-write.md](memory-write.md) | 2026-10-22 | 记忆写入侧：save_memory 工具 + opt-in 自动提取 + /dream 整理 |

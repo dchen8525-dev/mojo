@@ -97,6 +97,10 @@ function fakeAgent(overrides: Partial<Agent> = {}): Agent {
     getMessages: () => [],
     debugMessages: () => [],
     fork: async () => null,
+    dreamPropose: async () => "proposal written",
+    dreamApply: async () => "applied",
+    hasProjectMemory: async () => true,
+    peekDream: () => ({ path: "/tmp/repo/.node-agent/memory.dream.md", lines: 12, preview: "## consolidated" }),
     ...overrides,
   } as unknown as Agent;
 }
@@ -489,6 +493,36 @@ describe("runAgentCommand", () => {
     const forced = await runAgentCommand("/rewind 1 -y --force", ctx({ agent }));
     expect(forced.kind).toBe("ok");
     expect(forced.text).toContain("rewound 1 file(s)");
+  });
+
+  it("/dream proposes, previews, and applies with -y", async () => {
+    const propose = await runAgentCommand("/dream", ctx());
+    expect(propose.kind).toBe("ok");
+    expect(propose.text).toContain("proposed consolidation");
+    expect(propose.text).toContain("## consolidated");
+    expect(propose.text).toContain("/dream -y");
+
+    const applied = await runAgentCommand("/dream -y", ctx());
+    expect(applied.kind).toBe("ok");
+    expect(applied.text).toContain("applied");
+  });
+
+  it("/dream refuses to apply without a pending proposal", async () => {
+    const r = await runAgentCommand("/dream -y", ctx({ agent: fakeAgent({ dreamApply: async () => null }) }));
+    expect(r.kind).toBe("error");
+    expect(r.text).toContain("no pending dream proposal");
+  });
+
+  it("/dream reports empty project memory", async () => {
+    const r = await runAgentCommand("/dream", ctx({ agent: fakeAgent({ hasProjectMemory: async () => false }) }));
+    expect(r.kind).toBe("error");
+    expect(r.text).toContain("project memory is empty");
+  });
+
+  it("/dream surfaces a failed proposal", async () => {
+    const r = await runAgentCommand("/dream", ctx({ agent: fakeAgent({ dreamPropose: async () => null }) }));
+    expect(r.kind).toBe("error");
+    expect(r.text).toContain("memory is unchanged");
   });
 
   it("/clear creates a new session", async () => {

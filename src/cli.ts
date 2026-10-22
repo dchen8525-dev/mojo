@@ -19,6 +19,7 @@ import { configureLsp, disposeLsp, loadLspConfig } from "./lsp.js";
 import { renderSessionMarkdown, createSession, loadSession, listSessions } from "./session.js";
 import { runAgentCommand, type CommandContext } from "./agentCommands.js";
 import { createNdjsonEvents } from "./headless.js";
+import { disableMemoryExtraction } from "./memoryWrite.js";
 import { CronScheduler } from "./cronScheduler.js";
 import {
   ansiEmphasize,
@@ -130,6 +131,8 @@ function warnUntrustedHooks(hooks: HookManager) {
 /* ---------------- plain-text mode (-p) ---------------- */
 
 async function runPrint(args: ReturnType<typeof parseArgs>) {
+  // Headless runs (cron, pipes) must never silently rewrite the memory file.
+  disableMemoryExtraction();
   const session = await resolveSession(args);
   const resolved = resolveTheme({ theme: args.theme, cwd: session.cwd });
   ANSI = ansiHelpers(resolved.theme);

@@ -13,6 +13,7 @@ import { webSearchTool, webFetchTool } from "./web.js";
 import { multiEditTool } from "./multiEdit.js";
 import { skillTool } from "./skill.js";
 import { toolSearchTool } from "./toolSearch.js";
+import { saveMemoryTool } from "../memoryWrite.js";
 
 export const tools: Tool[] = [
   readFileTool,
@@ -40,6 +41,7 @@ export const tools: Tool[] = [
   webFetchTool,
   skillTool,
   toolSearchTool,
+  saveMemoryTool,
 ];
 
 const byName = new Map(tools.map((t) => [t.name, t]));

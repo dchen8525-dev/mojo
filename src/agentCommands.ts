@@ -53,7 +53,7 @@ export interface CommandContext {
 /** Names of the built-in commands (for /help listings and the GUI palette). */
 export const BUILTIN_COMMANDS = [
   "help", "model", "auto", "yolo", "plan", "mcp", "lsp", "compact", "context", "review",
-  "permissions", "hooks", "sessions", "search", "resume", "fork", "rename", "tag", "export", "todos", "undo", "cost", "cron", "doctor", "clear", "quit",
+  "permissions", "hooks", "sessions", "search", "resume", "fork", "rename", "tag", "export", "todos", "undo", "cost", "cron", "dream", "doctor", "clear", "quit",
 ] as const;
 
 /**
@@ -74,7 +74,7 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       return {
         kind: "ok",
         text: [
-          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp [trust|revoke] · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks [trust|revoke] · /sessions [--cwd <dir>] [--title <词>] [--tag <tag>] [--fork-of <id>] [N] · /search [-r] <term> · /resume <id> · /fork [N] [名称] · /rename <名称> · /tag [+<tag> | -<tag> | clear] · /export [md|json] [路径] · /todos · /cron [add <分> <时> <日> <月> <周> <提示词> | on|off|run|rm <id>] · /doctor · /undo [-y] [--force] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
+          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp [trust|revoke] · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks [trust|revoke] · /sessions [--cwd <dir>] [--title <词>] [--tag <tag>] [--fork-of <id>] [N] · /search [-r] <term> · /resume <id> · /fork [N] [名称] · /rename <名称> · /tag [+<tag> | -<tag> | clear] · /export [md|json] [路径] · /todos · /cron [add <分> <时> <日> <月> <周> <提示词> | on|off|run|rm <id>] · /dream [-y] · /doctor · /undo [-y] [--force] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
           "file refs: @path/to/file inlines the file; Ctrl+V pastes a clipboard image",
           custom ? `custom commands: ${custom}` : "",
         ]
@@ -636,6 +636,28 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
           ` (kept ${kept}/${total} messages${kept < keep ? ", rounded back to a clean boundary" : ""})\n` +
           `now continuing in the fork; ${fromId} is unchanged — get back with /resume ${fromId}\n` +
           `list this branch with /sessions --fork-of ${fromId}`,
+      };
+    }
+    case "dream": {
+      // /dream — propose a consolidated rewrite of the project memory file;
+      // /dream -y applies the pending proposal (a .bak is kept).
+      const yes = rest.includes("-y") || rest.includes("--yes");
+      if (yes) {
+        const r = await agent.dreamApply();
+        if (!r) return { kind: "error", text: "no pending dream proposal (run /dream first)" };
+        return { kind: "ok", text: r };
+      }
+      if (!(await agent.hasProjectMemory())) return { kind: "error", text: "project memory is empty — nothing to consolidate" };
+      const p = await agent.dreamPropose();
+      if (!p) return { kind: "error", text: "dream failed (the model returned nothing usable); memory is unchanged" };
+      const peek = await agent.peekDream();
+      if (!peek) return { kind: "error", text: "dream failed: the proposal could not be read" };
+      return {
+        kind: "ok",
+        text:
+          `proposed consolidation (${peek.lines} lines) written to ${peek.path}:\n\n` +
+          peek.preview +
+          `\n\nrun /dream -y to apply (the current file is kept at memory.md.bak), or ignore it.`,
       };
     }
     case "cron": {

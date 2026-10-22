@@ -25,7 +25,20 @@ import { FileStateStore } from "./fileState.js";
 import { CheckpointStore } from "./checkpoint.js";
 import { CostTracker } from "./cost.js";
 import { logUsage } from "./usage.js";
-import { appendMemoryNote, recallMemory, renderMemory } from "./memory.js";
+import { appendMemoryNote, projectMemoryPath, recallMemory, renderMemory } from "./memory.js";
+import {
+  applyDream,
+  applyExtraction,
+  buildExtractionPrompt,
+  EXTRACTION_SYSTEM,
+  isMemoryExtractionDisabled,
+  listMemoryHeadings,
+  memoryExtractionEnabled,
+  parseExtractionReply,
+  peekDream,
+  proposeDream,
+  scheduleMemoryJob,
+} from "./memoryWrite.js";
 import { listSkills, renderSkillsBlock } from "./skills.js";
 import { buildReviewPrompt, collectReview, REVIEW_SYSTEM } from "./review.js";
 import { truncate } from "./tools/utils.js";
@@ -754,7 +767,67 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
     }
 
     await this.persistTurn();
+    this.scheduleMemoryExtraction(userText, finalText);
+    this.saveMemoryThisTurn = false;
     return finalText;
+  }
+
+  /** True when this turn already wrote memory via the save_memory tool. */
+  private saveMemoryThisTurn = false;
+
+  /**
+   * Post-turn memory extraction (opt-in via AGENT_MEMORY_EXTRACTION=1): one
+   * background LLM call decides whether the exchange contained a durable fact;
+   * the reply is applied by deterministic section upsert. Fire-and-forget —
+   * never blocks the next turn and never throws into it.
+   */
+  private scheduleMemoryExtraction(userText: string, assistantText: string): void {
+    if (!memoryExtractionEnabled() || isMemoryExtractionDisabled()) return;
+    if (this.saveMemoryThisTurn) return; // the model already curated this turn itself
+    if (userText.trim().split(/\s+/).filter(Boolean).length < 3 || !assistantText.trim()) return;
+    const self = this;
+    scheduleMemoryJob(async () => {
+      try {
+        const headings = await listMemoryHeadings(projectMemoryPath(self.cwd));
+        const res = await self.llm.send(
+          [{ role: "user", content: buildExtractionPrompt(userText, assistantText, headings) }],
+          EXTRACTION_SYSTEM,
+          [],
+          undefined,
+        );
+        self.costs.record(`${self.llm.provider}:${self.llm.model}`, {
+          input: res.inputTokens,
+          output: res.outputTokens,
+          cacheRead: res.cacheReadTokens,
+          cacheWrite: res.cacheWriteTokens,
+        });
+        const text = res.content
+          .filter((b) => b.type === "text")
+          .map((b) => String((b as { text?: string }).text ?? ""))
+          .join("\n");
+        const entries = parseExtractionReply(text);
+        if (entries.length) await applyExtraction(self.cwd, entries, new Date().toISOString().slice(0, 10));
+      } catch {
+        /* memory extraction is best-effort */
+      }
+    });
+  }
+
+  /** /dream: propose a consolidated rewrite of the project memory file. */
+  dreamPropose(): Promise<string | null> {
+    return proposeDream(this.cwd, this.llm);
+  }
+  /** /dream -y: apply the pending proposal (keeps a .bak of the current file). */
+  dreamApply(): Promise<string | null> {
+    return applyDream(this.cwd);
+  }
+  /** Whether the project memory file has any level-2 sections. */
+  async hasProjectMemory(): Promise<boolean> {
+    return (await listMemoryHeadings(projectMemoryPath(this.cwd))).length > 0;
+  }
+  /** Preview a pending /dream proposal, if any. */
+  peekDream() {
+    return peekDream(this.cwd);
   }
 
   /** Append everything not yet on disk; rewrite when history was compacted. */
@@ -779,6 +852,7 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
     const tool = getTool(tu.name) ?? (tu.name === exitPlanTool.name ? exitPlanTool : undefined);
     const preview = JSON.stringify(tu.input).slice(0, 160);
     events?.onToolStart?.(tu.id, tu.name, preview, tu.input as Record<string, unknown>);
+    if (tu.name === "save_memory") this.saveMemoryThisTurn = true;
     if (!tool) {
       return { type: "tool_result", tool_use_id: tu.id, content: `Unknown tool "${tu.name}".`, is_error: true };
     }
