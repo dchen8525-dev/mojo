@@ -1,10 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { createWriteStream, existsSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { atomicWriteFile } from "./atomicWrite.js";
 import {
   claimDueTasks,
   cronDir,
@@ -65,11 +65,14 @@ function isAlive(pid: number): boolean {
   }
 }
 
-async function readLease(file: string): Promise<{ pid?: number } | null> {
+async function readLease(file: string): Promise<{ pid?: number; token?: string } | null> {
   try {
     const raw = await fs.readFile(file, "utf8");
-    const parsed = JSON.parse(raw.replace(/^\uFEFF/, "")) as { pid?: unknown };
-    return { pid: typeof parsed.pid === "number" ? parsed.pid : undefined };
+    const parsed = JSON.parse(raw.replace(/^\uFEFF/, "")) as { pid?: unknown; token?: unknown };
+    return {
+      pid: typeof parsed.pid === "number" ? parsed.pid : undefined,
+      token: typeof parsed.token === "string" ? parsed.token : undefined,
+    };
   } catch {
     return null; // absent or unreadable — claimable
   }
@@ -126,6 +129,8 @@ export function createProcessRunner(opts: { home?: string; timeoutMs?: number } 
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const logFile = path.join(runsDir, `${task.id}-${stamp}.log`);
     const out = createWriteStream(logFile, { flags: "a", mode: 0o600 });
+    // An unwritable log must not crash the scheduler or abort the run.
+    out.on("error", () => {});
     out.write(`# ${new Date().toISOString()} ${task.name}\n# cron ${task.cron} · cwd ${task.cwd}\n# prompt: ${task.prompt}\n\n`);
 
     let child: ChildProcess;
@@ -196,6 +201,7 @@ export class CronScheduler {
   private readonly runner: CronRunner;
   private readonly log: (message: string) => void;
   private readonly onChange?: () => void;
+  private readonly token = randomUUID();
   private timer: NodeJS.Timeout | null = null;
   private started = false;
   private owner = false;
@@ -245,33 +251,50 @@ export class CronScheduler {
     }
     const file = cronLeasePath(this.home);
     const lease = await readLease(file);
-    if (lease?.pid === process.pid) await fs.unlink(file).catch(() => {});
+    if (lease?.token === this.token) await fs.unlink(file).catch(() => {});
   }
 
   private async ensureLease(): Promise<boolean> {
     const file = cronLeasePath(this.home);
-    const current = await readLease(file);
-    if (current?.pid === process.pid) {
-      this.owner = true;
-      return true;
-    }
-    if (current?.pid !== undefined && isAlive(current.pid)) {
-      this.owner = false;
-      return false;
-    }
     await fs.mkdir(path.dirname(file), { recursive: true });
-    const body = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() });
-    try {
-      await atomicWriteFile(file, `${body}\n`, 0o600);
-    } catch (err) {
-      this.owner = false;
-      this.log(`cron: cannot write scheduler lease: ${err instanceof Error ? err.message : String(err)}`);
-      return false;
+    // `wx` makes create-if-absent atomic: when several processes start at the
+    // same instant exactly one wins and the rest read its token and stand by.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const handle = await fs.open(file, "wx", 0o600);
+        try {
+          const body = JSON.stringify({ pid: process.pid, token: this.token, startedAt: new Date().toISOString() });
+          await handle.writeFile(`${body}\n`);
+        } finally {
+          await handle.close();
+        }
+        this.owner = true;
+        return true;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
+          this.owner = false;
+          this.log(`cron: cannot write scheduler lease: ${err instanceof Error ? err.message : String(err)}`);
+          return false;
+        }
+      }
+      const current = await readLease(file);
+      if (current?.token === this.token) {
+        this.owner = true;
+        return true;
+      }
+      if (current?.pid !== undefined && isAlive(current.pid)) {
+        this.owner = false;
+        return false;
+      }
+      // Dead or unreadable lease: remove that exact snapshot, then retry the
+      // exclusive create. Re-reading first avoids deleting a fresh lease that
+      // another process claimed after our first read.
+      const again = await readLease(file);
+      if (again?.pid !== current?.pid || again?.token !== current?.token) continue;
+      await fs.unlink(file).catch(() => {});
     }
-    // Another process may have claimed in the same instant; the last writer wins.
-    const check = await readLease(file);
-    this.owner = check?.pid === process.pid;
-    return this.owner;
+    this.owner = false;
+    return false;
   }
 
   /** One scheduler pass: acquire the lease, claim due tasks, run them serially. */

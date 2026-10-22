@@ -208,6 +208,19 @@ describe("cron task store", () => {
     expect(claimed[0].enabled).toBe(false);
     expect(claimed[0].lastStatus).toBe("error");
     expect(claimed[0].lastError).toMatch(/5 fields/);
+    expect(claimed[0].lastRunAt).toBeUndefined();
+    expect(claimed[0].runCount).toBe(0);
+  });
+
+  it("disables a due task whose nextRunAt is corrupt instead of wedging it", async () => {
+    await writeTasks([task({ nextRunAt: "not-a-date" })]);
+    const claimed = await claimDueTasks(new Date(), home);
+    expect(claimed).toHaveLength(1);
+    expect(claimed[0].enabled).toBe(false);
+    expect(claimed[0].lastStatus).toBe("error");
+    expect(claimed[0].lastError).toMatch(/invalid nextRunAt/);
+    expect(claimed[0].runCount).toBe(0);
+    expect(await claimDueTasks(new Date(), home)).toHaveLength(0);
   });
 
   it("manual start leaves nextRunAt untouched", async () => {

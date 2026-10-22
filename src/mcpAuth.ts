@@ -149,7 +149,13 @@ export class McpOAuthFlow {
       redirectToAuthorization: (authorizationUrl) => {
         flow.lastAuthUrl = authorizationUrl.href;
         flow.log(`mcp: ${opts.serverName} (${opts.serverUrl}) needs OAuth authorization — opening ${authorizationUrl.href}`);
-        flow.openUrl(authorizationUrl.href);
+        try {
+          flow.openUrl(authorizationUrl.href);
+        } catch (err) {
+          // Keep waiting: the user can still open the URL from the log or the
+          // timeout error, which includes it.
+          flow.log(`mcp: could not open a browser (${err instanceof Error ? err.message : String(err)}) — open the URL above manually`);
+        }
       },
     };
     server.on("request", (req, res) => flow.handle(req, res));

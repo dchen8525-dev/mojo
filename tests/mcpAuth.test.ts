@@ -125,4 +125,30 @@ describe("MCP OAuth loopback callback", () => {
       await fs.rm(dir, { recursive: true, force: true });
     }
   });
+
+  it("keeps waiting and logs the URL when the browser cannot be opened", async () => {
+    const dir = await tempDir();
+    const logs: string[] = [];
+    const flow = await McpOAuthFlow.start({
+      serverName: "demo",
+      serverUrl: "https://mcp.example/mcp",
+      authDir: dir,
+      openUrl: () => {
+        throw new Error("no browser here");
+      },
+      log: (message) => logs.push(message),
+      timeoutMs: 20,
+    });
+    try {
+      expect(() =>
+        flow.provider.redirectToAuthorization!(new URL("https://auth.example/authorize?client_id=c")),
+      ).not.toThrow();
+      expect(logs.join("\n")).toContain("no browser here");
+      const err = await flow.waitForCode().catch((e: Error) => e);
+      expect((err as Error).message).toContain("https://auth.example/authorize?client_id=c");
+    } finally {
+      await flow.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
 });

@@ -87,6 +87,27 @@ describe("CronScheduler", () => {
     }
   });
 
+  it("grants the lease to exactly one of two simultaneous schedulers", async () => {
+    const mk = () => new CronScheduler({ home, intervalMs: 60_000, log: () => {}, runner: async () => ({ ok: true }) });
+    const a = mk();
+    const b = mk();
+    try {
+      const [ownerA, ownerB] = await Promise.all([a.start(), b.start()]);
+      expect(Number(ownerA) + Number(ownerB)).toBe(1);
+      expect(a.isOwner).not.toBe(b.isOwner);
+      const lease = JSON.parse(await fs.readFile(cronLeasePath(home), "utf8")) as { token?: string };
+      expect(lease.token).toBeTruthy();
+      // Stopping the standby must leave the live owner's lease untouched.
+      await (ownerA ? b : a).stop();
+      const after = JSON.parse(await fs.readFile(cronLeasePath(home), "utf8")) as { token?: string };
+      expect(after.token).toBe(lease.token);
+    } finally {
+      await a.stop();
+      await b.stop();
+    }
+    await expect(fs.stat(cronLeasePath(home))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("takes over a lease left by a dead process", async () => {
     await createCronTask({ cron: "* * * * *", prompt: "tick", cwd: project }, home);
     const deadPid = 2147483647;

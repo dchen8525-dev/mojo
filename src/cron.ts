@@ -356,21 +356,35 @@ export async function claimDueTasks(now = new Date(), home = os.homedir()): Prom
     for (const task of tasks) {
       if (!task.enabled || task.lastStatus === "running") continue;
       const due = new Date(task.nextRunAt).getTime();
-      if (!Number.isFinite(due) || due > now.getTime()) continue;
-      task.lastRunAt = now.toISOString();
-      task.lastStatus = "running";
-      task.lastError = undefined;
-      task.runStartedAt = now.toISOString();
-      task.runCount += 1;
+      if (!Number.isFinite(due)) {
+        // A corrupt timestamp would otherwise leave the task silently stuck.
+        task.enabled = false;
+        task.lastStatus = "error";
+        task.lastError = `invalid nextRunAt "${task.nextRunAt}" — re-enable the task to reschedule`;
+        claimed.push(presentTask(task));
+        changed = true;
+        continue;
+      }
+      if (due > now.getTime()) continue;
+      let nextRunAt: string;
       try {
-        task.nextRunAt = nextCronTime(task.cron, now).toISOString();
+        nextRunAt = nextCronTime(task.cron, now).toISOString();
       } catch (err) {
         // A hand-edited expression that no longer parses must not wedge the
         // scheduler: disable the task and explain why.
         task.enabled = false;
         task.lastStatus = "error";
         task.lastError = err instanceof Error ? err.message : String(err);
+        claimed.push(presentTask(task));
+        changed = true;
+        continue;
       }
+      task.lastRunAt = now.toISOString();
+      task.lastStatus = "running";
+      task.lastError = undefined;
+      task.runStartedAt = now.toISOString();
+      task.runCount += 1;
+      task.nextRunAt = nextRunAt;
       claimed.push(presentTask(task));
       changed = true;
     }

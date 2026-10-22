@@ -9,7 +9,11 @@ export function openBrowser(url: string): void {
         ? ["open", [url]]
         : ["xdg-open", [url]];
   try {
-    spawn(cmd, args, { stdio: "ignore", detached: true }).unref();
+    const child = spawn(cmd, args, { stdio: "ignore", detached: true });
+    // A missing opener (e.g. xdg-open in a container) arrives as an async
+    // 'error' event; without a listener it would crash the process.
+    child.on("error", () => {});
+    child.unref();
   } catch {
     /* headless environment - the URL is printed to stderr anyway */
   }
