@@ -13,6 +13,15 @@ import { captureClipboardImage } from "../clipboard.js";
 import { backgroundManager } from "../tools/background.js";
 import { expandFileReferences, renderCommand, type SlashCommand } from "../commands.js";
 import { goalSummaryLine } from "../goal.js";
+import {
+  completeMention,
+  filterMentionPaths,
+  listWorkspacePaths,
+  MENTION_VISIBLE_COUNT,
+  resolveActiveMention,
+  visibleMentionWindow,
+  type MentionPath,
+} from "../mentions.js";
 
 interface ToolRow {
   id: string;
@@ -253,6 +262,28 @@ function TranscriptView({ items, expandedAll }: { items: TranscriptItem[]; expan
   );
 }
 
+/** Workspace path suggestions for an active @token in the prompt. */
+function MentionPicker({ mention }: { mention: { entries: MentionPath[]; sel: number } }) {
+  const theme = useTheme();
+  const window = visibleMentionWindow(mention.entries, mention.sel, MENTION_VISIBLE_COUNT);
+  return (
+    <Box flexDirection="column" borderStyle="single" borderColor={theme.border} paddingX={1} marginBottom={1}>
+      <Text bold dimColor>
+        File mentions ({window.selectedIndex + 1}/{mention.entries.length} · ↑/↓ select · Tab complete · Esc close)
+      </Text>
+      {window.entries.map((entry, i) => {
+        const active = i === window.selectedIndex;
+        return (
+          <Text key={entry.path} color={active ? theme.accent : undefined} dimColor={!active}>
+            {active ? "❯ " : "  "}
+            {entry.kind === "directory" ? `${entry.path}/` : entry.path}
+          </Text>
+        );
+      })}
+    </Box>
+  );
+}
+
 function HistoryPicker({ items, sel }: { items: string[]; sel: number }) {
   const theme = useTheme();
   const shown = items.slice(-8);
@@ -319,6 +350,14 @@ export function AgentApp({
   const historyRef = useRef<string[]>([]); // user prompts this session, newest last
   const historyOpenRef = useRef(false);
   historyOpenRef.current = historyOpen;
+  const [mention, setMention] = useState<{ entries: MentionPath[]; sel: number } | null>(null);
+  const mentionOpenRef = useRef(false);
+  mentionOpenRef.current = !!mention;
+  const mentionRef = useRef(mention);
+  mentionRef.current = mention;
+  const inputRef = useRef("");
+  inputRef.current = input;
+  const mentionDismissedRef = useRef<{ start: number; token: string } | undefined>(undefined);
 
   const abortRef = useRef<AbortController | null>(null);
   const streamRef = useRef("");
@@ -418,6 +457,47 @@ export function AgentApp({
     };
   }, []);
 
+  // @-mention suggestions: fetch workspace paths while the draft ends in @token.
+  useEffect(() => {
+    const active = resolveActiveMention(input);
+    const dismissed = mentionDismissedRef.current;
+    if (dismissed && (!active || dismissed.token !== active.token || dismissed.start !== active.start)) {
+      mentionDismissedRef.current = undefined;
+    }
+    if (!active || (mentionDismissedRef.current && mentionDismissedRef.current.token === active.token)) {
+      setMention(null);
+      return undefined;
+    }
+    const controller = new AbortController();
+    let cancelled = false;
+    void listWorkspacePaths(agent.cwd, { signal: controller.signal })
+      .then((entries) => {
+        if (cancelled) return;
+        const filtered = filterMentionPaths(entries, active.token);
+        setMention(filtered.length ? { entries: filtered, sel: 0 } : null);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [input, agent.cwd]);
+
+  // Complete the selected suggestion into the draft (reads refs, no deps).
+  const applyMentionCompletionRef = useRef<() => void>(() => {});
+  applyMentionCompletionRef.current = () => {
+    const current = mentionRef.current;
+    const text = inputRef.current;
+    const active = resolveActiveMention(text);
+    if (!current || !current.entries.length || !active) {
+      setMention(null);
+      return;
+    }
+    const entry = current.entries[Math.min(current.sel, current.entries.length - 1)]!;
+    setInput(completeMention(text, active, entry));
+    mentionDismissedRef.current = undefined;
+  };
+
   // Keyboard: Esc interrupts / denies; permission shortcuts when a prompt is up.
   useInput(
     useCallback(
@@ -478,6 +558,29 @@ export function AgentApp({
         if (key.ctrl && ch === "o") {
           setExpandedAll((v) => !v);
           return;
+        }
+        if (mentionOpenRef.current) {
+          const current = mentionRef.current;
+          if (key.upArrow || (key.ctrl && ch === "p")) {
+            if (current) setMention({ ...current, sel: Math.max(0, current.sel - 1) });
+            return;
+          }
+          if (key.downArrow || (key.ctrl && ch === "n")) {
+            if (current) {
+              setMention({ ...current, sel: Math.min(current.entries.length - 1, current.sel + 1) });
+            }
+            return;
+          }
+          if (key.tab) {
+            applyMentionCompletionRef.current();
+            return;
+          }
+          if (key.escape) {
+            const active = resolveActiveMention(inputRef.current);
+            if (active) mentionDismissedRef.current = { start: active.start, token: active.token };
+            setMention(null);
+            return;
+          }
         }
         if (historyOpenRef.current) {
           const list = historyRef.current;
@@ -747,6 +850,11 @@ export function AgentApp({
   const onSubmit = useCallback(
     async (value: string) => {
       const text = value.trim();
+      if (mentionOpenRef.current) {
+        // Enter with the mention panel open completes the path instead of sending.
+        applyMentionCompletionRef.current();
+        return;
+      }
       setInput("");
       const images = imagesRef.current;
       if (!text && !images.length) return;
@@ -837,6 +945,8 @@ export function AgentApp({
         <TodoPanel todos={todos} />
 
         {historyOpen && <HistoryPicker items={historyRef.current} sel={historySel} />}
+
+        {mention && <MentionPicker mention={mention} />}
 
         <Box>
           <Text color={theme.user} bold>

@@ -22,6 +22,7 @@ import { createNdjsonEvents } from "./headless.js";
 import { disableMemoryExtraction } from "./memoryWrite.js";
 import { disableSessionTitles } from "./sessionTitle.js";
 import { disableGoalAutopilot } from "./goal.js";
+import { scheduleRetentionCleanup } from "./retention.js";
 import { CronScheduler } from "./cronScheduler.js";
 import {
   ansiEmphasize,
@@ -140,6 +141,7 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
   // No host loop pumps continuations in print mode, so never promise any.
   disableGoalAutopilot();
   const session = await resolveSession(args);
+  scheduleRetentionCleanup({ keepIds: [session.id] });
   const resolved = resolveTheme({ theme: args.theme, cwd: session.cwd });
   ANSI = ansiHelpers(resolved.theme);
   const mcp = await setupMcp(args);
@@ -286,6 +288,7 @@ async function runExport(args: { exportId: string; exportFormat: "md" | "json" }
 
 async function runInteractive(args: ReturnType<typeof parseArgs>) {
   const session = await resolveSession(args);
+  scheduleRetentionCleanup({ keepIds: [session.id] });
   // Ask the terminal for its background before Ink takes over stdin.
   let resolved = await resolveThemeAsync({ theme: args.theme, cwd: session.cwd });
   let themeName: ThemeName = resolved.name;
@@ -439,6 +442,7 @@ async function runGui(args: ReturnType<typeof parseArgs>) {
 
   let resume = args.resume || undefined;
   if (!resume && args.cont) resume = (await listSessions())[0]?.id;
+  scheduleRetentionCleanup({ keepIds: resume ? [resume] : [] });
 
   const backend = await startGuiBackend({
     cwd: process.cwd(),
