@@ -37,7 +37,7 @@ const h = vi.hoisted(() => {
 vi.mock("../src/llm/anthropic.js", () => ({ AnthropicBackend: h.backend("anthropic") }));
 vi.mock("../src/llm/openai.js", () => ({ OpenAiBackend: h.backend("openai") }));
 
-const { LLM } = await import("../src/llm.js");
+const { LLM, isContextOverflowError } = await import("../src/llm.js");
 
 const messages: MessageParam[] = [{ role: "user", content: "hi" }];
 
@@ -536,5 +536,43 @@ describe("LLM retry and stream resume", () => {
     expect(err).toBeInstanceOf(CancelledStreamError);
     expect((err as InstanceType<typeof CancelledStreamError>).partialText).toBe("abc");
     expect(h.calls).toHaveLength(1);
+  });
+});
+
+describe("isContextOverflowError", () => {
+  it("recognizes context-overflow wording across providers", () => {
+    expect(
+      isContextOverflowError({
+        status: 400,
+        message: "prompt is too long: 213456 tokens > 200000 maximum",
+      }),
+    ).toBe(true);
+    expect(
+      isContextOverflowError({
+        status: 400,
+        message: "This model's maximum context length is 65536 tokens. However, you requested 70000 tokens.",
+      }),
+    ).toBe(true);
+    expect(
+      isContextOverflowError({
+        status: 400,
+        error: { code: "context_length_exceeded", message: "Please reduce the length of the messages." },
+      }),
+    ).toBe(true);
+    expect(
+      isContextOverflowError({
+        status: 400,
+        message: "The input token count (1200000) exceeds the maximum number of tokens allowed (1048576).",
+      }),
+    ).toBe(true);
+    expect(isContextOverflowError({ status: 413, message: "Request too large" })).toBe(true);
+  });
+
+  it("does not claim ordinary 400s or transient failures", () => {
+    expect(isContextOverflowError({ status: 400, message: "invalid tool schema" })).toBe(false);
+    expect(isContextOverflowError({ status: 429, message: "prompt is too long" })).toBe(false);
+    expect(isContextOverflowError({ status: 500, message: "context_length_exceeded" })).toBe(false);
+    expect(isContextOverflowError(new Error("ECONNRESET"))).toBe(false);
+    expect(isContextOverflowError(undefined)).toBe(false);
   });
 });

@@ -122,6 +122,38 @@ export function parseModelSpec(spec: string, currentProvider: Provider): Config 
 }
 
 /**
+ * True when the provider rejected a request because it exceeded the model's
+ * context window. Wording differs by provider ("prompt is too long",
+ * "context_length_exceeded", "maximum context length is N tokens", Gemini's
+ * "input token count … exceeds"), so match the common phrases. Only
+ * 400/413/422 qualify: other statuses belong to the transient retry path.
+ */
+export function isContextOverflowError(err: unknown): boolean {
+  const e = err as
+    | { status?: number; message?: string; error?: { message?: string; code?: string; type?: string } }
+    | null;
+  const status = e?.status;
+  if (status !== undefined && status !== 400 && status !== 413 && status !== 422) return false;
+  const nested = e?.error;
+  const text = `${e?.message ?? ""} ${nested?.message ?? ""} ${nested?.code ?? ""} ${nested?.type ?? ""}`.toLowerCase();
+  return (
+    /context[ _-]?length[ _-]?exceeded/.test(text) ||
+    /prompt is too long/.test(text) ||
+    /maximum context length/.test(text) ||
+    /context window (?:is )?(?:exceeded|too small)/.test(text) ||
+    /(?:exceed|longer than)[^.]*context (?:length|window)/.test(text) ||
+    /(?:input|prompt)[^.]*too (?:long|large)/.test(text) ||
+    /request too large/.test(text) ||
+    /too many tokens/.test(text) ||
+    /input token count[^.]*exceed/.test(text) ||
+    /reduce the length of (?:the )?(?:messages|prompt|input)/.test(text) ||
+    /exceeds? the (?:maximum|model'?s?)[^.]*tokens?/.test(text) ||
+    /token (?:limit|budget) exceeded/.test(text) ||
+    /conversation (?:is )?too long/.test(text)
+  );
+}
+
+/**
  * Provider-agnostic facade. Internally dispatches to an Anthropic or OpenAI
  * (Chat Completions) backend. The conversation is always kept in Anthropic
  * block format; the OpenAI backend converts on the wire.

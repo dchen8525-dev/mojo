@@ -14,7 +14,7 @@ import type {
 import { validateToolInput } from "./types.js";
 import { RuntimeCommandQueue, type RuntimeCommandImage } from "./runtimeQueue.js";
 import { enforceSessionMediaBudget, mediaLimits, validateImages } from "./mediaBudget.js";
-import { LLM, type Config, type StreamEvents } from "./llm.js";
+import { LLM, isContextOverflowError, type Config, type StreamEvents } from "./llm.js";
 import { CancelledStreamError, StreamRecoveryExhausted } from "./llm/types.js";
 import { lookupModel } from "./llm/models.js";
 import type { AssistantTurn, SystemPrompt } from "./llm/types.js";
@@ -39,6 +39,7 @@ import {
 import { buildReadStateReminder } from "./contextRestore.js";
 import { approvedPlanReminder, copyPlanFile, planVisibleIn, readPlanFile, writePlanFile } from "./planFile.js";
 import { RepetitionTracker } from "./repetition.js";
+import { nextToolBudgetWarning } from "./toolBudget.js";
 import { backgroundManager } from "./tools/background.js";
 import { disposeNodeReplSession } from "./tools/nodeRepl.js";
 import { subagentTasks } from "./taskRegistry.js";
@@ -553,13 +554,17 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
   }
 
   /** Force a compaction now (the /compact command). Returns false if history is too small. */
-  async compactNow(events?: AgentEvents, signal?: AbortSignal): Promise<boolean> {
+  async compactNow(
+    events?: AgentEvents,
+    signal?: AbortSignal,
+    trigger: "auto" | "manual" = "manual",
+  ): Promise<boolean> {
     if (this.messages.length < 6) return false;
-    // A manual compaction resets the auto-compact circuit breaker by design:
-    // the user explicitly asked to reclaim context.
+    // An explicit compaction resets the auto-compact circuit breaker by
+    // design: the user asked for it, or the provider just proved we are over.
     this.autoCompactFails = 0;
     this.autoCompactSuspended = false;
-    await this.compact(events, signal, "manual");
+    await this.compact(events, signal, trigger);
     return true;
   }
 
@@ -789,6 +794,13 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
     let continuations = 0;
     let compactWarned = false;
     let turnTokens = 0;
+    /** One provider-overflow compaction + retry per turn, so a bad request cannot loop. */
+    let reactiveCompactTried = false;
+    /** Empty completions retried once per turn; a second one fails the turn. */
+    let emptyRetries = 0;
+    /** Tool calls completed this turn (across all rounds) and budget warnings sent. */
+    let toolCalls = 0;
+    let toolBudgetWarned = 0;
     /** Why the turn ended early (goal autopilot pauses instead of continuing). */
     let turnStopped: string | null = null;
     const segments: string[] = [];
@@ -933,9 +945,48 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
           );
         } catch (err) {
           earlyAbort.abort();
+          // The provider can reject a request its own tokenizer considers too
+          // long even when the local estimate is under budget (tools, images
+          // and provider framing all cost extra). Compact once, then retry
+          // this round; if history did not shrink, surface the original error.
+          if (!reactiveCompactTried && isContextOverflowError(err) && !signal?.aborted) {
+            reactiveCompactTried = true;
+            earlyEpoch++;
+            const before = this.tokenEstimate();
+            let compacted = false;
+            try {
+              compacted = await this.compactNow(events, signal, "auto");
+            } catch {
+              compacted = false; // the provider's error is the one worth reporting
+            }
+            if (compacted && !signal?.aborted && this.tokenEstimate() < before) {
+              events?.onHook?.(
+                "compact",
+                "provider rejected the request as too long; compacted and retrying the same turn",
+              );
+              continue;
+            }
+          }
           throw err;
         } finally {
           signal?.removeEventListener("abort", forwardAbort);
+        }
+        // A completion with no text, no tool calls and no usage is a provider
+        // glitch rather than an answer; ask once more before failing the turn.
+        if (!turn.text.trim() && turn.toolUses.length === 0 && turn.inputTokens === 0 && turn.outputTokens === 0) {
+          if (emptyRetries === 0) {
+            emptyRetries++;
+            events?.onHook?.("empty", "the model returned an empty completion; retrying once");
+            this.messages.push({
+              role: "user",
+              content: systemReminder(
+                "Your previous response was empty. Continue the task now: make a tool call or give the user your final answer.",
+                { event: "EmptyCompletion" },
+              ),
+            });
+            continue;
+          }
+          throw new Error("the model returned an empty completion twice; check the provider and model settings");
         }
         this.tokens.setAnchor(sent, turn.inputTokens, turn.outputTokens);
         turnTokens += turn.inputTokens + turn.outputTokens;
@@ -1032,6 +1083,16 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
               { event: "RepetitionDetected", tool: tu.name },
             ),
           });
+        }
+        toolCalls += turn.toolUses.length;
+        let budgetWarning = nextToolBudgetWarning(toolCalls, toolBudgetWarned);
+        while (budgetWarning) {
+          this.messages.push({
+            role: "user",
+            content: systemReminder(budgetWarning.text, { event: "ToolBudgetWarning" }),
+          });
+          toolBudgetWarned = budgetWarning.warned;
+          budgetWarning = nextToolBudgetWarning(toolCalls, toolBudgetWarned);
         }
       }
     } catch (err) {
@@ -1586,7 +1647,8 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
         // Tools that ask permission for their own sub-operations may write even
         // when the outer tool is read-only (task's worker subagents), so never
         // apply the read-only shortcut to this callback.
-        askPermission: (desc, risk, preview) => this.permissions.check(desc, risk, false, preview),
+        askPermission: (desc, risk, preview, request) =>
+          this.permissions.check(desc, risk, false, preview, request),
         checkpoint: async (absPath, label) => {
           const entry = await this.checkpoints.capture(absPath, label);
           return entry ? { finalize: () => this.checkpoints.finalize(entry) } : undefined;

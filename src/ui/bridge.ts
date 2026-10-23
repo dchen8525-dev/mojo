@@ -1,3 +1,4 @@
+import type { PermissionAskMeta } from "../permissions.js";
 import type { Risk } from "../types.js";
 import type { Theme } from "./theme.js";
 
@@ -11,6 +12,7 @@ export interface UiBridge {
     description: string,
     risk: Risk,
     preview?: string,
+    meta?: PermissionAskMeta,
   ) => Promise<"yes" | "no" | "session" | "project" | "always" | "always_deny">;
   /** Swap the active palette (used by `/theme`); the UI re-renders in place. */
   setTheme?: (theme: Theme) => void;

@@ -9,8 +9,11 @@ const h = vi.hoisted(() => ({
   calls: 0,
 }));
 
-vi.mock("../src/llm.js", () => ({
-  LLM: class FakeLLM {
+vi.mock("../src/llm.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/llm.js")>();
+  return {
+    ...actual,
+    LLM: class FakeLLM {
     provider = "anthropic";
     model = "fake";
     contextWindow = 100_000;
@@ -35,7 +38,8 @@ vi.mock("../src/llm.js", () => ({
       return Promise.resolve<string[]>([]);
     }
   },
-}));
+  };
+});
 
 // Keep tests from writing real session files into ~/.node-agent/sessions.
 vi.mock("../src/session.js", () => {

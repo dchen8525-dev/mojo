@@ -10,6 +10,8 @@ const h = vi.hoisted(() => ({
     content: ContentBlock[];
     inputTokens: number;
     outputTokens: number;
+    /** Scripted failure: throw instead of returning this turn. */
+    error?: unknown;
   }>,
   calls: 0,
   model: "fake",
@@ -31,8 +33,11 @@ const h = vi.hoisted(() => ({
     | ((events: { onToolReady?: (tu: ToolUseBlock) => void } | undefined, toolUses: ToolUseBlock[]) => Promise<void>),
 }));
 
-vi.mock("../src/llm.js", () => ({
-  LLM: class FakeLLM {
+vi.mock("../src/llm.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/llm.js")>();
+  return {
+    ...actual,
+    LLM: class FakeLLM {
     provider = "anthropic";
     get model() {
       return h.model;
@@ -55,6 +60,7 @@ vi.mock("../src/llm.js", () => ({
       h.sentSystems.push(sys);
       const t = h.turns[h.calls++];
       if (!t) throw new Error("fake LLM ran out of scripted turns");
+      if (t.error) throw t.error;
       const toolUses = t.content.filter(
         (b): b is ToolUseBlock => (b as { type?: string }).type === "tool_use",
       );
@@ -80,7 +86,8 @@ vi.mock("../src/llm.js", () => ({
       return Promise.resolve<string[]>([]);
     }
   },
-}));
+  };
+});
 
 // Keep tests from writing real session files.
 vi.mock("../src/session.js", () => ({
@@ -1612,3 +1619,101 @@ describe("Agent session references", () => {
   });
 });
 
+
+describe("reactive compaction on provider context overflow", () => {
+  it("compacts once and retries the same round", async () => {
+    const agent = makeAgent(undefined, seedHistory(12));
+    const overflow = Object.assign(new Error("prompt is too long: 110000 tokens > 100000 maximum"), {
+      status: 400,
+    });
+    h.turns = [
+      { content: [], inputTokens: 0, outputTokens: 0, error: overflow },
+      textTurn("## Task\n- old work summarized"),
+      textTurn("done after compaction"),
+    ];
+    const hooks: string[] = [];
+    const out = await agent.chat("go", undefined, {
+      onHook: (event, message) => hooks.push(`${event}:${message}`),
+    });
+    expect(out).toContain("done after compaction");
+    expect(hooks.some((h) => h.includes("compacted and retrying the same turn"))).toBe(true);
+    // Overflow, summarizer, retried round.
+    expect(h.calls).toBe(3);
+    expect(String(h.sentMessages[1][0].content)).toContain("Summarize the agent transcript");
+    expect(String(agent.debugMessages()[0].content)).toContain("old work summarized");
+  });
+
+  it("does not compact for an ordinary 400", async () => {
+    const agent = makeAgent(undefined, seedHistory(12));
+    const bad = Object.assign(new Error("invalid request: unknown tool"), { status: 400 });
+    h.turns = [{ content: [], inputTokens: 0, outputTokens: 0, error: bad }];
+    await expect(agent.chat("go")).rejects.toThrow(/invalid request/);
+    expect(h.calls).toBe(1);
+  });
+
+  it("surfaces the original error when the history is too small to compact", async () => {
+    const agent = makeAgent();
+    const overflow = Object.assign(new Error("prompt is too long"), { status: 400 });
+    h.turns = [{ content: [], inputTokens: 0, outputTokens: 0, error: overflow }];
+    await expect(agent.chat("go")).rejects.toThrow(/prompt is too long/);
+    expect(h.calls).toBe(1);
+  });
+});
+
+describe("empty completion retry", () => {
+  const emptyTurn = { content: [], inputTokens: 0, outputTokens: 0 };
+
+  it("retries once with a nudge and finishes the turn", async () => {
+    h.turns = [emptyTurn, textTurn("done")];
+    const hooks: string[] = [];
+    const agent = makeAgent();
+    const out = await agent.chat("go", undefined, {
+      onHook: (event, message) => hooks.push(`${event}:${message}`),
+    });
+    expect(out).toBe("done");
+    expect(h.calls).toBe(2);
+    expect(hooks.some((h) => h.startsWith("empty:"))).toBe(true);
+    const second = JSON.stringify(h.sentMessages[1]);
+    expect(second).toContain("EmptyCompletion");
+    expect(second).toContain("previous response was empty");
+    // The empty assistant turn is not written into history.
+    expect(
+      agent.debugMessages().some((m) => m.role === "assistant" && Array.isArray(m.content) && m.content.length === 0),
+    ).toBe(false);
+  });
+
+  it("fails the turn when the retry is empty too", async () => {
+    h.turns = [emptyTurn, emptyTurn];
+    await expect(makeAgent().chat("go")).rejects.toThrow(/empty completion twice/);
+    expect(h.calls).toBe(2);
+  });
+});
+
+describe("tool-call budget warnings", () => {
+  function callsFrom(from: number, count: number): Array<[string, Record<string, unknown>]> {
+    return Array.from({ length: count }, (_, i) => ["t_ro_serial", { n: from + i }] as [string, Record<string, unknown>]);
+  }
+
+  it("warns at 50, 75 and 90 percent and stops at three warnings", async () => {
+    h.turns = [toolTurn(callsFrom(0, 95)), toolTurn(callsFrom(95, 10)), textTurn("done")];
+    const agent = makeAgent();
+    const out = await agent.chat("go");
+    expect(out).toBe("done");
+    expect(h.calls).toBe(3);
+    const history = JSON.stringify(agent.debugMessages());
+    expect(history.split("ToolBudgetWarning").length - 1).toBe(3);
+    expect(history).toContain("50% warning threshold");
+    expect(history).toContain("75% warning threshold");
+    expect(history).toContain("90% warning threshold");
+    // The second round pushed the total past 100, but the third threshold was
+    // already consumed, so no fourth reminder is added.
+    expect(history).not.toContain("100% warning threshold");
+  });
+
+  it("stays quiet on an ordinary tool round", async () => {
+    h.turns = [toolTurn([["t_ro_serial", { n: 1 }]]), textTurn("done")];
+    const agent = makeAgent();
+    await agent.chat("go");
+    expect(JSON.stringify(agent.debugMessages())).not.toContain("ToolBudgetWarning");
+  });
+});

@@ -61,11 +61,17 @@ export const writeFileTool: Tool = {
           previewLines.slice(0, 120).join("\n") + `\n[... preview truncated: ${previewLines.length - 120} more lines]`;
       }
 
+      const displayPath = relPath(ctx.cwd, abs);
       const ok = await ctx.askPermission(
-        `${existed ? "Overwrite" : "Create"} file ${relPath(ctx.cwd, abs)} ` +
+        `${existed ? "Overwrite" : "Create"} file ${displayPath} ` +
           `(${content.split("\n").length} lines, ${content.length} chars)`,
         "high",
         preview,
+        {
+          tool: "write_file",
+          values: [displayPath],
+          remember: `write_file(${displayPath.replace(/\\/g, "/")})`,
+        },
       );
       if (!ok) return { content: "The user rejected this edit. Ask before trying again.", isError: true };
 
@@ -161,11 +167,17 @@ export const editFileTool: Tool = {
       const updated = applyEdits(original, edits);
       const diff = renderDiff(original, edits);
 
+      const displayPath = relPath(ctx.cwd, abs);
       const ok = await ctx.askPermission(
-        `Edit ${relPath(ctx.cwd, abs)}: ${edits.length} replacement${edits.length === 1 ? "" : "s"}, ` +
+        `Edit ${displayPath}: ${edits.length} replacement${edits.length === 1 ? "" : "s"}, ` +
           `${diffStats(edits, original)}${note ? ` (${note})` : ""}`,
         "high",
         diff,
+        {
+          tool: "edit_file",
+          values: [displayPath],
+          remember: `edit_file(${displayPath.replace(/\\/g, "/")})`,
+        },
       );
       if (!ok) return { content: "The user rejected this edit. Ask before trying again.", isError: true };
 

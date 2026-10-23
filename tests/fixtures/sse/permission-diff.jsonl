@@ -4,7 +4,7 @@
 {"event":"tool_use_start","data":{"name":"write_file","id":"toolu_perm_1","round":1}}
 {"event":"usage","data":{"input":12,"output":3}}
 {"event":"tool_start","data":{"id":"toolu_perm_1","name":"write_file","inputPreview":"{\"path\":\"out.txt\",\"content\":\"line one\\nline two\\n\"}","input":{"path":"out.txt","content":"line one\nline two\n"}}}
-{"event":"permission_request","data":{"id":"<UUID>","description":"Create file out.txt (3 lines, 18 chars)","risk":"high","preview":"@@ -0,0 +1,3 @@\n+line one\n+line two\n+"}}
+{"event":"permission_request","data":{"id":"<UUID>","description":"Create file out.txt (3 lines, 18 chars)","risk":"high","preview":"@@ -0,0 +1,3 @@\n+line one\n+line two\n+","rule":"write_file(out.txt)"}}
 {"event":"tool_end","data":{"id":"toolu_perm_1","name":"write_file","ok":true,"preview":"Created out.txt (18 chars)","result":"Created out.txt (18 chars)"}}
 {"event":"round_start","data":{"round":2}}
 {"event":"text_delta","data":{"d":"File created."}}

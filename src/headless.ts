@@ -42,8 +42,18 @@ export interface NdjsonEvents {
   events: AgentEvents;
   /** Wraps the permission ask callback so every decision is observable. */
   wrapPermission: (
-    ask: (description: string, risk: Risk, preview?: string) => Promise<PermissionDecision>,
-  ) => (description: string, risk: Risk, preview?: string) => Promise<PermissionDecision>;
+    ask: (
+      description: string,
+      risk: Risk,
+      preview?: string,
+      meta?: { tool: string; rule: string },
+    ) => Promise<PermissionDecision>,
+  ) => (
+    description: string,
+    risk: Risk,
+    preview?: string,
+    meta?: { tool: string; rule: string },
+  ) => Promise<PermissionDecision>;
   /** The final result line; call once when the turn settles. */
   result: (subtype: "success" | "error" | "aborted", text: string, info: { durationMs: number; tokens: number; costUsd: number; provider: string; model: string }) => void;
 }
@@ -124,9 +134,14 @@ export function createNdjsonEvents(
     },
     wrapPermission:
       (ask) =>
-      async (description: string, risk: Risk, preview?: string) => {
-        const decision = await ask(description, risk, preview);
-        emit({ type: "permission", description, risk, decision });
+      async (
+        description: string,
+        risk: Risk,
+        preview?: string,
+        meta?: { tool: string; rule: string },
+      ) => {
+        const decision = await ask(description, risk, preview, meta);
+        emit({ type: "permission", description, risk, decision, ...(meta ? { rule: meta.rule } : {}) });
         return decision;
       },
     result: (subtype, text, info) => {

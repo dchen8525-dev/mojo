@@ -1863,6 +1863,14 @@ button {
   font-size: 16px;
 }
 
+.perm-rule {
+  padding: 0 20px 10px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--dim);
+  overflow-wrap: anywhere;
+}
+
 .badge {
   font-size: 10.5px;
   font-weight: 600;

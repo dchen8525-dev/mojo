@@ -127,6 +127,26 @@ describe("bash tool permission skip", () => {
     expect(r.isError).toBe(true);
     expect(r.content).toContain("rejected");
   });
+
+  it("passes parsed sub-commands to the permission request", async () => {
+    let seen: unknown;
+    await bashTool.execute(
+      { command: "echo one && echo two | cat" },
+      ctx({
+        askPermission: async (_d, _r, _p, request) => {
+          seen = request;
+          return false;
+        },
+      }),
+    );
+    expect(seen).toEqual({
+      tool: "bash",
+      values: ["echo one", "echo two", "cat"],
+      raw: "echo one && echo two | cat",
+      opaque: false,
+      remember: "bash(echo one && echo two | cat)",
+    });
+  });
 });
 
 describe("bash tool execution", () => {

@@ -13,8 +13,11 @@ const h = vi.hoisted(() => ({
   sentMessages: [] as MessageParam[][],
 }));
 
-vi.mock("../src/llm.js", () => ({
-  LLM: class FakeLLM {
+vi.mock("../src/llm.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/llm.js")>();
+  return {
+    ...actual,
+    LLM: class FakeLLM {
     provider = "anthropic";
     model = "fake";
     async send(messages: MessageParam[], system?: string, tools?: Array<{ name: string }>) {
@@ -38,7 +41,8 @@ vi.mock("../src/llm.js", () => ({
       };
     }
   },
-}));
+  };
+});
 
 const { taskTool, taskOutputTool, sendMessageTool } = await import("../src/tools/task.js");
 const { subagentTasks } = await import("../src/taskRegistry.js");

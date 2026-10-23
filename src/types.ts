@@ -59,13 +59,35 @@ export interface UserQuestionOutcome {
   unavailable?: boolean;
 }
 
+/**
+ * Structured permission context. Rules are keyed on tool name + the values the
+ * request touches, so an "always" answer cannot be widened by a description
+ * substring (e.g. a bash command that appends `; curl … | sh`).
+ */
+export interface PermissionRequest {
+  tool: string;
+  /** Values a rule must cover (bash: simple commands; write/edit: path). */
+  values: string[];
+  /** Full raw value (bash: the entire command) for exact whole-request rules. */
+  raw?: string;
+  /** True when the value could not be split safely; never auto-allow by prefix/glob. */
+  opaque?: boolean;
+  /** Rule text persisted by "always"; defaults to `tool(first value)`. */
+  remember?: string;
+}
+
 export interface ToolContext {
   cwd: string;
   /** Session that owns this tool call; used to route background-task notifications. */
   sessionId?: string;
   signal?: AbortSignal;
   /** Ask the user to approve an operation. Returns true if allowed. */
-  askPermission: (description: string, risk: Risk, preview?: string) => Promise<boolean>;
+  askPermission: (
+    description: string,
+    risk: Risk,
+    preview?: string,
+    request?: PermissionRequest,
+  ) => Promise<boolean>;
   /**
    * Ask the user a structured multiple-choice question (the ask_user tool).
    * Absent in headless/subagent contexts, where the tool degrades to an

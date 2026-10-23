@@ -393,7 +393,8 @@ async function runSubagent(
             // sessions and is always user-approved.
             askPermission:
               worker || tool.name === "save_memory"
-                ? (desc, risk, preview) => ctx.askPermission(`[subagent ${label}] ${desc}`, risk, preview)
+                ? (desc, risk, preview, request) =>
+                    ctx.askPermission(`[subagent ${label}] ${desc}`, risk, preview, request)
                 : async () => true,
           });
           results.push({ type: "tool_result" as const, tool_use_id: tu.id, content: r.content, is_error: r.isError });

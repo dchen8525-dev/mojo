@@ -57,3 +57,4 @@
 | [stream-recovery-state-machine.md](stream-recovery-state-machine.md) | 2026-10-23 | 流恢复状态机：文本续写 resume / 工具调用中断 restart + 预算退避 + 四端回滚 |
 | [persistent-node-repl.md](persistent-node-repl.md) | 2026-10-23 | 常驻 Node REPL：每会话独立进程 + 跨调用绑定 + 超时/中断重启 + 高风险审批 |
 | [session-goal-autopilot.md](session-goal-autopilot.md) | 2026-10-23 | 会话目标自动续跑：LLM 完成校验 + nextAction + 预算/续跑上限 + /goal + 三端事件 |
+| [structured-permissions-turn-resilience.md](structured-permissions-turn-resilience.md) | 2026-10-23 | 结构化权限规则 + 复合命令解析；超上下文反应式压缩；空补全重试 + 工具调用软预算告警 |

@@ -2,16 +2,29 @@ import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { Tool, ToolContext, ToolResult } from "../types.js";
+import type { PermissionRequest, Tool, ToolContext, ToolResult } from "../types.js";
 import { str, num, bool, truncate, describeError, hasOutsidePathArg } from "./utils.js";
 import { backgroundManager } from "./background.js";
 import { isFormatterCommand, syncBashFileState } from "./bashFileState.js";
 import { mergeShellSnapshotEnv, shellSnapshotEnv } from "../shellSnapshot.js";
 import { postProcessBashOutput } from "../bashHints.js";
+import { splitShellCommand } from "../permissionRules.js";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 /** Output beyond this is killed; the full capture is spilled to a file. */
 const HARD_OUTPUT_CAP = 200_000;
+
+/**
+ * Permission context for a shell command: the splitter names every simple
+ * command an "always" grant must cover. `remember` stores the exact whole
+ * command (never a prefix), so later appending `; …` cannot ride on it.
+ */
+function permissionRequestFor(command: string): PermissionRequest {
+  const raw = command.trim();
+  const split = splitShellCommand(command);
+  const values = split.segments.length ? split.segments : [raw];
+  return { tool: "bash", values, raw, opaque: split.opaque, remember: `bash(${raw})` };
+}
 
 /**
  * Commands that are destructive enough to always require explicit approval,
@@ -185,6 +198,8 @@ export const bashTool: Tool = {
           `${command.length > 200 ? command.slice(0, 200) + "..." : command}` +
           (dangerous ? "  [matches a dangerous pattern]" : ""),
         dangerous ? "high" : "medium",
+        undefined,
+        permissionRequestFor(command),
       ));
     if (!ok) return { content: "The user rejected this command. Do not retry it unchanged.", isError: true };
 

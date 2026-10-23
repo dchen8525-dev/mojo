@@ -157,11 +157,19 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
       rl.question(q, res);
     });
   if (interactive) rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-  const askPermission = async (desc: string, risk: Risk, preview?: string) => {
+  const askPermission = async (
+    desc: string,
+    risk: Risk,
+    preview?: string,
+    meta?: { tool: string; rule: string },
+  ) => {
     if (!interactive) return "no" as const;
     const tag = risk === "high" ? ANSI.error("[high]") : ANSI.warn("[write]");
     if (preview) console.log(ANSI.dim(preview.split("\n").map((l) => `  ${l}`).join("\n")));
-    const answer = (await ask(`${tag} ${ANSI.bold(desc)}\n  allow? [y]es / [n]o / [a]lways / [d]eny-always > `))
+    const saves = meta ? `\n  ${ANSI.dim(`allow/deny-always saves: ${meta.rule}`)}` : "";
+    const answer = (
+      await ask(`${tag} ${ANSI.bold(desc)}${saves}\n  allow? [y]es / [n]o / [a]lways / [d]eny-always > `)
+    )
       .trim()
       .toLowerCase();
     if (answer === "a" || answer === "always") return "always" as const;

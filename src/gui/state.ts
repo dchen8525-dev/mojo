@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Agent } from "../agent.js";
-import type { PermissionManager } from "../permissions.js";
+import type { PermissionAskMeta, PermissionManager } from "../permissions.js";
 import type { Risk, UserQuestion, UserQuestionAnswer, UserQuestionOutcome, UserQuestionRequest } from "../types.js";
 import type { SseHub } from "./sse.js";
 import type { UiSubCall, UiTurn } from "./transcript.js";
@@ -32,7 +32,10 @@ export class GuiRuntime {
   readonly subCalls = new Map<string, UiSubCall[]>();
   agent!: Agent;
   permissions!: PermissionManager;
-  private pending = new Map<string, { resolve: (d: PermissionDecision) => void; description: string; risk: Risk; preview?: string }>();
+  private pending = new Map<
+    string,
+    { resolve: (d: PermissionDecision) => void; description: string; risk: Risk; preview?: string; rule?: string }
+  >();
   private questions = new Map<
     string,
     {
@@ -74,21 +77,27 @@ export class GuiRuntime {
    * AskUser seam for the PermissionManager: broadcast a request, park its
    * resolver, and await the client's decision. Resolves "no" if flushed.
    */
-  askPermission = (description: string, risk: Risk, preview?: string): Promise<PermissionDecision> => {
+  askPermission = (
+    description: string,
+    risk: Risk,
+    preview?: string,
+    meta?: PermissionAskMeta,
+  ): Promise<PermissionDecision> => {
     const id = randomUUID();
     return new Promise<PermissionDecision>((resolve) => {
-      this.pending.set(id, { resolve, description, risk, preview });
-      this.hub.broadcast("permission_request", { id, description, risk, preview });
+      this.pending.set(id, { resolve, description, risk, preview, rule: meta?.rule });
+      this.hub.broadcast("permission_request", { id, description, risk, preview, rule: meta?.rule });
     });
   };
 
   /** Outstanding prompts, so a reconnecting client can re-show the modal. */
-  pendingPermissions(): Array<{ id: string; description: string; risk: Risk; preview?: string }> {
+  pendingPermissions(): Array<{ id: string; description: string; risk: Risk; preview?: string; rule?: string }> {
     return [...this.pending.entries()].map(([id, p]) => ({
       id,
       description: p.description,
       risk: p.risk,
       preview: p.preview,
+      rule: p.rule,
     }));
   }
 

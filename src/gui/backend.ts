@@ -222,7 +222,7 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
     plan: !!opts.plan,
     noMcp,
     noLsp,
-    askPermission: (desc, risk, preview) => runtime.askPermission(desc, risk, preview),
+    askPermission: (desc, risk, preview, meta) => runtime.askPermission(desc, risk, preview, meta),
   });
   runtime.attach(project.agent, project.permissions);
   await rememberRecentProject(cwd);
@@ -294,7 +294,7 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
         plan: keepPlan,
         noMcp,
         noLsp,
-        askPermission: (desc, risk, preview) => runtime.askPermission(desc, risk, preview),
+        askPermission: (desc, risk, preview, meta) => runtime.askPermission(desc, risk, preview, meta),
       });
       // Keep the same object identity: the HTTP handler holds this reference.
       Object.assign(project, next);

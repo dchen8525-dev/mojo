@@ -1247,6 +1247,9 @@ function showPermission() {
   $("#perm-risk").textContent = p.risk === "high" ? "高危" : p.risk === "medium" ? "写入" : "低风险";
   $("#perm-risk").className = "badge " + p.risk;
   $("#perm-desc").textContent = p.description;
+  const rule = $("#perm-rule");
+  rule.hidden = !p.rule;
+  rule.textContent = p.rule ? `允许/拒绝一次以外，将保存规则：${p.rule}` : "";
   const preview = $("#perm-preview");
   preview.replaceChildren();
   if (p.preview && looksLikeDiff(p.preview)) {

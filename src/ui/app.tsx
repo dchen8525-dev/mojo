@@ -33,6 +33,8 @@ interface PermissionRequest {
   description: string;
   risk: Risk;
   preview?: string;
+  /** Structured rule saved by "always"/"project"/"session" answers. */
+  rule?: string;
   resolve: (answer: "yes" | "no" | "session" | "project" | "always" | "always_deny") => void;
 }
 
@@ -163,6 +165,7 @@ function PermissionPrompt({ request, diffPage, diffSplit, termCols }: { request:
       </Text>
       <Text>{request.description}</Text>
       {request.preview && <DiffPreview diff={request.preview} page={diffPage} split={diffSplit} termCols={termCols} />}
+      {request.rule && <Text dimColor>always saves: {request.rule}</Text>}
       <Text dimColor>
         y = allow once · s = allow this session · p = allow for project · a = always allow · d = always deny · n / Esc =
         deny once · t = toggle split diff
@@ -400,10 +403,15 @@ export function AgentApp({
 
   // Register the permission handler for the UI.
   useEffect(() => {
-    bridge.askPermission = (description: string, risk: Risk, preview?: string) =>
+    bridge.askPermission = (
+      description: string,
+      risk: Risk,
+      preview?: string,
+      meta?: { tool: string; rule: string },
+    ) =>
       new Promise<"yes" | "no" | "session" | "project" | "always" | "always_deny">((resolve) => {
         setDiffPage(0);
-        setPermission({ description, risk, preview, resolve });
+        setPermission({ description, risk, preview, rule: meta?.rule, resolve });
       });
     return () => {
       delete bridge.askPermission;
