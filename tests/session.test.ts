@@ -15,6 +15,7 @@ vi.mock("node:os", async (importOriginal) => {
 });
 
 const session = await import("../src/session.js");
+const { createGoal } = await import("../src/goal.js");
 
 beforeAll(async () => {
   await fs.rm(fakeHome, { recursive: true, force: true });
@@ -568,6 +569,51 @@ describe("todo persistence", () => {
 
   it("returns false for a missing session", async () => {
     expect(await session.saveTodos("deadbeef", items)).toBe(false);
+  });
+});
+
+describe("goal persistence", () => {
+  const goal = createGoal("finish the migration", {
+    tokenBudget: 20_000,
+    maxContinuations: 5,
+    now: new Date("2026-10-23T00:00:00.000Z"),
+  })!;
+
+  it("saves the goal into the meta header and reloads it", async () => {
+    const { id } = await session.createSession("goals");
+    expect(await session.saveGoal(id, goal)).toBe(true);
+    const loaded = await session.loadSession(id);
+    expect(loaded?.meta.goal).toEqual(goal);
+
+    const updated = { ...goal, status: "paused" as const, tokensUsed: 1_200, note: "user paused" };
+    expect(await session.saveGoal(id, updated)).toBe(true);
+    expect((await session.loadSession(id))?.meta.goal).toEqual(updated);
+  });
+
+  it("clears the goal when passed null", async () => {
+    const { id } = await session.createSession("goals");
+    await session.saveGoal(id, goal);
+    expect(await session.saveGoal(id, null)).toBe(true);
+    expect((await session.loadSession(id))?.meta.goal).toBeUndefined();
+  });
+
+  it("drops a malformed goal instead of failing the load", async () => {
+    const { id } = await session.createSession("goals");
+    await session.saveGoal(id, { objective: "", status: "active" } as never);
+    expect((await session.loadSession(id))?.meta.goal).toBeUndefined();
+  });
+
+  it("carries an active goal into a fork", async () => {
+    const fork = await session.forkSession("D:\\proj", [{ role: "user", content: "hi" }], {
+      fromId: "abc123",
+      goal,
+    });
+    expect(fork.meta.goal).toEqual(goal);
+    expect((await session.loadSession(fork.id))?.meta.goal).toEqual(goal);
+  });
+
+  it("returns false for a missing session", async () => {
+    expect(await session.saveGoal("deadbeef", goal)).toBe(false);
   });
 });
 

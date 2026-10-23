@@ -91,6 +91,7 @@ const state = {
   perms: [], // queued permission requests
   asks: [], // queued ask_user question requests
   todos: [], // latest todo plan (drives the 待办 popover)
+  goal: null, // session goal / autopilot state (drives the 目标 popover)
   images: [], // staged image attachments for the next message
   steerMode: false, // while busy: inject into the running turn instead of queuing
 };
@@ -779,6 +780,8 @@ async function refreshState() {
   todoSyncEpoch++; // invalidate any todo-only refresh that started earlier
   state.todos = Array.isArray(s.todos) ? s.todos : [];
   renderTodos();
+  state.goal = s.goal ?? null;
+  renderGoal();
   // Re-show any prompts that arrived while we were disconnected.
   if (Array.isArray(s.pendingPermissions) && s.pendingPermissions.length) {
     const known = new Set(state.perms.map((p) => p.id));
@@ -1048,6 +1051,14 @@ function connectSSE() {
     // The first turn generated a display title for the sidebar.
     void loadSessions();
   });
+
+  on("goal_changed", (d) => {
+    state.goal = d.goal ?? null;
+    renderGoal();
+    if (d.note) appendItem(makeSystemItem(`[目标] ${d.note}`));
+  });
+
+  on("goal_checking", () => appendItem(makeSystemItem("[目标] 正在校验目标是否已完成…")));
 
   on("turn_end", () => {
     finalizeLive();
@@ -1699,6 +1710,8 @@ const BUILTIN_CMDS = [
   ["/export ", "导出会话 md|json"],
   ["/clear", "新建会话"],
   ["/todos", "查看待办"],
+  ["/goal ", "设置会话目标并自动续跑"],
+  ["/goal pause", "暂停目标自动续跑"],
   ["/permissions", "权限规则"],
   ["/hooks", "钩子列表"],
   ["/mcp", "MCP 状态"],
@@ -3166,6 +3179,7 @@ function setBackgroundOpen(open) {
   bgTimer = null;
   if (open) {
     setTodosOpen(false);
+    setGoalOpen(false);
     loadBackground(true);
     bgTimer = setInterval(() => loadBackground(true), 3000);
   }
@@ -3301,8 +3315,71 @@ function setTodosOpen(open) {
   renderTodos();
   $("#todo-pop").classList.toggle("hidden", !open);
   $("#todo-btn").setAttribute("aria-expanded", String(open));
-  if (open) setBackgroundOpen(false);
+  if (open) {
+    setBackgroundOpen(false);
+    setGoalOpen(false);
+  }
 }
+
+/* ---------------- session goal (autopilot) ---------------- */
+
+const GOAL_STATUS_LABELS = { active: "进行中", paused: "已暂停", completed: "已完成", cancelled: "已取消" };
+
+function renderGoal() {
+  const g = state.goal;
+  $("#goal-item").classList.toggle("hidden", !g);
+  if (!g) return;
+  const badge = $("#goal-count");
+  badge.textContent = g.status === "active" ? `${g.continuations}/${g.maxContinuations}` : g.status === "completed" ? "✓" : g.status === "paused" ? "Ⅱ" : "×";
+  badge.classList.remove("hidden");
+  $("#goal-state").textContent = GOAL_STATUS_LABELS[g.status] ?? g.status;
+
+  const body = $("#goal-body");
+  body.replaceChildren();
+  body.appendChild(el("div", "goal-objective", g.objective));
+  const meta = el("div", "goal-meta");
+  const tokens =
+    g.tokenBudget === null
+      ? `${Number(g.tokensUsed ?? 0).toLocaleString()} tokens`
+      : `${Number(g.tokensUsed ?? 0).toLocaleString()} / ${Number(g.tokenBudget).toLocaleString()} tokens`;
+  meta.appendChild(el("span", "", tokens));
+  meta.appendChild(el("span", "", `自动续跑 ${g.continuations}/${g.maxContinuations}`));
+  body.appendChild(meta);
+  if (g.nextAction) body.appendChild(el("div", "goal-next", `下一步：${g.nextAction}`));
+  if (g.note) body.appendChild(el("div", "goal-note", g.note));
+
+  $("#goal-pause").classList.toggle("hidden", g.status !== "active");
+  $("#goal-resume").classList.toggle("hidden", g.status !== "paused");
+}
+
+function setGoalOpen(open) {
+  renderGoal();
+  $("#goal-pop").classList.toggle("hidden", !open);
+  $("#goal-btn").setAttribute("aria-expanded", String(open));
+  if (open) {
+    setTodosOpen(false);
+    setBackgroundOpen(false);
+  }
+}
+
+function sendGoalCommand(cmd) {
+  setGoalOpen(false);
+  api("/api/chat", { text: `/goal ${cmd}` })
+    .then((r) => {
+      if (r.error === "busy") toast("智能体正忙", true);
+      else if (r.queued) toast("已排队，将在当前回合结束后执行");
+    })
+    .catch((err) => toast("操作失败: " + err.message, true));
+}
+
+$("#goal-btn").onclick = (e) => {
+  e.stopPropagation();
+  setGoalOpen($("#goal-pop").classList.contains("hidden"));
+};
+$("#goal-close").onclick = () => setGoalOpen(false);
+$("#goal-pause").onclick = () => sendGoalCommand("pause");
+$("#goal-resume").onclick = () => sendGoalCommand("resume");
+$("#goal-clear").onclick = () => sendGoalCommand("clear");
 
 $("#todo-btn").onclick = (e) => {
   e.stopPropagation();
@@ -3324,6 +3401,13 @@ document.addEventListener("click", (e) => {
     !e.target.closest("#todo-btn")
   ) {
     setTodosOpen(false);
+  }
+  if (
+    !$("#goal-pop").classList.contains("hidden") &&
+    !e.target.closest("#goal-pop") &&
+    !e.target.closest("#goal-btn")
+  ) {
+    setGoalOpen(false);
   }
 });
 
@@ -3398,6 +3482,9 @@ document.addEventListener("keydown", (e) => {
   } else if (e.key === "Escape" && !$("#todo-pop").classList.contains("hidden")) {
     e.preventDefault();
     setTodosOpen(false);
+  } else if (e.key === "Escape" && !$("#goal-pop").classList.contains("hidden")) {
+    e.preventDefault();
+    setGoalOpen(false);
   } else if (e.key === "Escape" && !findBar.classList.contains("hidden")) {
     e.preventDefault();
     setFindOpen(false);

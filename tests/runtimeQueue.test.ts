@@ -62,6 +62,18 @@ describe("RuntimeCommandQueue", () => {
     expect(q.list().find((c) => c.prompt === "p1")!.status).toBe("running");
   });
 
+  it("cancelBySource cancels only accepted commands from that source", () => {
+    const q = new RuntimeCommandQueue();
+    q.enqueue("send_prompt", "goal-1", "goal");
+    const goal2 = q.enqueue("send_prompt", "goal-2", "goal")!;
+    q.enqueue("send_prompt", "user", "gui");
+    q.take("send_prompt"); // goal-1 running, left alone
+    expect(q.cancelBySource("goal")).toBe(1);
+    expect(q.list().find((c) => c.id === goal2.id)!.status).toBe("cancelled");
+    expect(q.list().find((c) => c.prompt === "goal-1")!.status).toBe("running");
+    expect(q.list().find((c) => c.prompt === "user")!.status).toBe("accepted");
+  });
+
   it("rejects enqueue past the cap with null", () => {
     const q = new RuntimeCommandQueue();
     for (let i = 0; i < MAX_RUNTIME_COMMANDS; i++) {

@@ -166,6 +166,70 @@ describe("GUI interactions (happy-dom)", () => {
     });
   });
 
+  it("renders the session goal and drives pause from the popover", async () => {
+    const goal = {
+      objective: "发布 0.5.0",
+      status: "active",
+      tokenBudget: 20_000,
+      tokensUsed: 1_200,
+      continuations: 2,
+      maxContinuations: 6,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:05:00.000Z",
+      nextAction: "跑全量测试",
+    };
+    const { window, calls } = await boot({ state: { goal } });
+    const doc = window.document;
+
+    expect(doc.querySelector("#goal-item")?.classList.contains("hidden")).toBe(false);
+    expect(doc.querySelector("#goal-count")?.textContent).toBe("2/6");
+    expect(doc.querySelector("#goal-state")?.textContent).toBe("进行中");
+    expect(doc.querySelector("#goal-body")?.textContent).toContain("发布 0.5.0");
+    expect(doc.querySelector("#goal-body")?.textContent).toContain("跑全量测试");
+
+    (doc.querySelector("#goal-btn") as HTMLElement).click();
+    expect(doc.querySelector("#goal-pop")?.classList.contains("hidden")).toBe(false);
+    expect(doc.querySelector("#goal-resume")?.classList.contains("hidden")).toBe(true);
+
+    (doc.querySelector("#goal-pause") as HTMLElement).click();
+    const chat = calls.find((c) => c.url === "/api/chat");
+    expect(JSON.parse(String(chat?.init?.body))).toEqual({ text: "/goal pause" });
+    expect(doc.querySelector("#goal-pop")?.classList.contains("hidden")).toBe(true);
+  });
+
+  it("updates the goal chip from goal_changed and hides it when cleared", async () => {
+    const { window } = await boot();
+    const doc = window.document;
+    expect(doc.querySelector("#goal-item")?.classList.contains("hidden")).toBe(true);
+
+    const source = FakeEventSource.instances[0];
+    source.emit("goal_changed", {
+      goal: {
+        objective: "fix CI",
+        status: "paused",
+        tokenBudget: null,
+        tokensUsed: 400,
+        continuations: 1,
+        maxContinuations: 3,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:01:00.000Z",
+        note: "paused automatically: reached 1 automatic continuations",
+      },
+      note: "paused automatically: reached 1 automatic continuations",
+    });
+    await vi.waitFor(() => {
+      expect(doc.querySelector("#goal-item")?.classList.contains("hidden")).toBe(false);
+      expect(doc.querySelector("#goal-state")?.textContent).toBe("已暂停");
+      expect(doc.querySelector("#goal-count")?.textContent).toBe("Ⅱ");
+    });
+    expect(doc.querySelector("#transcript")?.textContent).toContain("paused automatically");
+
+    source.emit("goal_changed", { goal: null, note: "goal cleared" });
+    await vi.waitFor(() => {
+      expect(doc.querySelector("#goal-item")?.classList.contains("hidden")).toBe(true);
+    });
+  });
+
   it("opens help with ? and restores focus on Escape", async () => {
     const { window } = await boot();
     const doc = window.document;

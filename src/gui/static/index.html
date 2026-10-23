@@ -150,6 +150,27 @@
               </div>
             </div>
 
+            <div class="tb-item hidden" id="goal-item">
+              <button class="tb-btn" id="goal-btn" title="当前会话目标（自动续跑）" aria-controls="goal-pop" aria-expanded="false">
+                <span class="tb-ico">◎</span>
+                <span class="tb-label">目标</span>
+                <span class="bg-count hidden" id="goal-count"></span>
+              </button>
+              <div class="pop wide hidden" id="goal-pop">
+                <div class="bg-head">
+                  <span>会话目标</span>
+                  <span id="goal-state" class="todo-summary"></span>
+                  <button id="goal-close" class="modal-x" type="button" title="关闭" aria-label="关闭">×</button>
+                </div>
+                <div id="goal-body" class="goal-body"></div>
+                <div class="goal-actions">
+                  <button type="button" id="goal-pause">暂停</button>
+                  <button type="button" id="goal-resume">继续</button>
+                  <button type="button" id="goal-clear" class="danger">清除</button>
+                </div>
+              </div>
+            </div>
+
             <div class="tb-item">
               <button class="tb-btn" id="background-btn" title="仍在运行的后台命令（bash run_in_background）" aria-controls="background-pop" aria-expanded="false">
                 <span class="tb-ico">▤</span>

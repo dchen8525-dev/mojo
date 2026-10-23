@@ -15,6 +15,8 @@ import type { Risk } from "./types.js";
  *   {"type":"sub_tool","parent_id","name","input_preview","ok","preview","round"?}
  *   {"type":"tool_end","id","name","ok","preview"}   preview is truncated
  *   {"type":"session_title","title"}         first turn only, when generated
+ *   {"type":"goal_changed","goal","note"?}   session goal started/paused/completed
+ *   {"type":"goal_checking"}                 the verifier call is in flight
  *   {"type":"usage","input","output"}        per model response
  *   {"type":"compacting"} / {"type":"compacted","before","after"}
  *   {"type":"retry","attempt","max_attempts","delay_ms","reason","status"?}
@@ -75,6 +77,25 @@ export function createNdjsonEvents(
       onSubTool: (parentId, name, inputPreview, ok, preview, round) =>
         emit({ type: "sub_tool", parent_id: parentId, name, input_preview: inputPreview, ok, preview, ...(round ? { round } : {}) }),
       onSessionTitle: (title) => emit({ type: "session_title", title }),
+      onGoalChanged: (goal, note) =>
+        emit({
+          type: "goal_changed",
+          goal: goal
+            ? {
+                objective: goal.objective,
+                status: goal.status,
+                token_budget: goal.tokenBudget,
+                tokens_used: goal.tokensUsed,
+                continuations: goal.continuations,
+                max_continuations: goal.maxContinuations,
+                updated_at: goal.updatedAt,
+                ...(goal.nextAction ? { next_action: goal.nextAction } : {}),
+                ...(goal.note ? { note: goal.note } : {}),
+              }
+            : null,
+          ...(note ? { note } : {}),
+        }),
+      onGoalChecking: () => emit({ type: "goal_checking" }),
       onUsage: (input, output) => emit({ type: "usage", input, output }),
       onCompacting: () => emit({ type: "compacting" }),
       onCompacted: (before, after) => emit({ type: "compacted", before, after }),

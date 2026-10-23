@@ -484,6 +484,8 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
         hub.broadcast("sub_tool", { id: parentId, name, inputPreview, ok, preview, round });
       },
       onSessionTitle: (title) => hub.broadcast("session_title", { title }),
+      onGoalChanged: (goal, note) => hub.broadcast("goal_changed", { goal, note }),
+      onGoalChecking: () => hub.broadcast("goal_checking", {}),
       onUsage: (input, output) => hub.broadcast("usage", { input, output }),
       onCostWarning: (message) => hub.broadcast("cost_warning", { message }),
       onCompacting: () => hub.broadcast("compacting", {}),
@@ -584,8 +586,16 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
     return result;
   }
 
-  /** Mirror of the Ink onSubmit dispatch: custom command / slash command / prompt. */
-  async function handleChat(text: string, images?: import("../types.js").ImageBlockParam[]): Promise<void> {
+  /**
+   * Mirror of the Ink onSubmit dispatch: custom command / slash command / prompt.
+   * `opts.goalContinuation` marks a synthetic autopilot turn: it skips slash
+   * parsing and @ expansion and shows a compact label instead of the reminder.
+   */
+  async function handleChat(
+    text: string,
+    images?: import("../types.js").ImageBlockParam[],
+    turnOpts: { goalContinuation?: boolean; display?: string } = {},
+  ): Promise<void> {
     // Claim the single-turn slot before the first await. The route checks
     // `busy` and then fires this function without awaiting it, so a second
     // rapid POST would otherwise slip through while file references expand
@@ -598,9 +608,9 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
     try {
       const trimmed = text.trim();
       let promptText = trimmed;
-      let display = trimmed;
+      let display = turnOpts.display ?? trimmed;
 
-      if (trimmed.startsWith("/")) {
+      if (!turnOpts.goalContinuation && trimmed.startsWith("/")) {
         const [cmd] = trimmed.slice(1).split(/\s+/);
         const custom = project.customCommands.get(cmd);
         if (custom) {
@@ -615,16 +625,26 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
         }
       }
 
-      const expanded = await expandFileReferences(promptText, project.agent.cwd);
+      // A continuation prompt is synthetic: it must not pull in @ refs even if
+      // the objective happens to contain something that looks like one.
+      const expanded = turnOpts.goalContinuation
+        ? { text: promptText, files: [] as string[] }
+        : await expandFileReferences(promptText, project.agent.cwd);
       if (expanded.files.length) hub.broadcast("system", { text: `@ referenced: ${expanded.files.join(", ")}` });
 
       turnId = ++runtime.turnId;
       const turn: UiTurn = { turnId, text: "", thinking: "", tools: [] };
       runtime.liveTurn = turn;
-      hub.broadcast("turn_start", { turnId, user: display, images: images?.length ?? 0 });
+      hub.broadcast("turn_start", { turnId, user: display, images: images?.length ?? 0, goal: turnOpts.goalContinuation ? true : undefined });
 
       try {
-        const finalText = await project.agent.chat(expanded.text, controller.signal, buildEvents(turn), images);
+        const finalText = await project.agent.chat(
+          expanded.text,
+          controller.signal,
+          buildEvents(turn),
+          images,
+          turnOpts.goalContinuation ? { goalContinuation: true } : undefined,
+        );
         hub.broadcast("turn_end", { turnId, text: finalText });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -660,9 +680,18 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
         if (runtime.busy || runtime.commandBusy || runtime.switching) return;
         const cmd = project.agent.runtimeQueue.take("send_prompt");
         if (!cmd) return;
-        hub.broadcast("command_dequeued", { id: cmd.id, text: cmd.prompt });
+        const goalTurn = cmd.source === "goal";
+        const goal = goalTurn ? project.agent.currentGoal() : null;
+        hub.broadcast("command_dequeued", {
+          id: cmd.id,
+          text: goalTurn ? `goal continuation${goal ? `: ${goal.objective}` : ""}` : cmd.prompt,
+          source: cmd.source,
+        });
         try {
-          await handleChat(cmd.prompt, cmd.images as import("../types.js").ImageBlockParam[]);
+          await handleChat(cmd.prompt, cmd.images as import("../types.js").ImageBlockParam[], {
+            goalContinuation: goalTurn,
+            display: goalTurn ? `自动续跑 · ${goal?.objective ?? "会话目标"}` : undefined,
+          });
           project.agent.runtimeQueue.complete(cmd.id);
         } catch (err) {
           project.agent.runtimeQueue.complete(cmd.id, err instanceof Error ? err.message : String(err));
@@ -686,6 +715,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       busy: runtime.busy || runtime.commandBusy,
       switching: runtime.switching,
       todos: project.agent.currentTodos(),
+      goal: project.agent.currentGoal(),
       cost: project.agent.costs.format(),
       /** Still-running background shells (shown in the composer toolbar). */
       backgroundTasks: backgroundManager.list().filter((t) => !t.done).length,

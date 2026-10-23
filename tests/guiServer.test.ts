@@ -14,6 +14,7 @@ import { rememberRecentProject } from "../src/gui/recentProjects.js";
 import { backgroundManager } from "../src/tools/background.js";
 import type { McpServerStatus } from "../src/mcp.js";
 import type { ProfileInput, PublicProfile } from "../src/llmProfiles.js";
+import type { SessionGoal } from "../src/goal.js";
 
 const TOKEN = "testtoken123";
 
@@ -28,6 +29,7 @@ function fakeAgent(overrides: Partial<Agent> = {}): Agent {
     costs: { format: () => "$0.00 total" },
     tokenEstimate: () => 1000,
     currentTodos: () => [],
+    currentGoal: () => null,
     getMessages: () => [],
     switchModel: (s: string) => ({ provider: "anthropic", model: s }),
     listModels: async () => ["m1"],
@@ -36,6 +38,19 @@ function fakeAgent(overrides: Partial<Agent> = {}): Agent {
     runtimeQueue: new RuntimeCommandQueue(),
     ...overrides,
   } as unknown as Agent;
+}
+
+function goalFixture(): SessionGoal {
+  return {
+    objective: "ship it",
+    status: "active",
+    tokenBudget: 10_000,
+    tokensUsed: 500,
+    continuations: 2,
+    maxContinuations: 6,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:05:00.000Z",
+  };
 }
 
 function fakePermissions(): PermissionManager {
@@ -206,6 +221,61 @@ describe("gui server", () => {
       expect(r.json.model).toBe("glm-5.3-flash");
       expect(Array.isArray(r.json.transcript)).toBe(true);
     });
+  });
+
+  it("exposes the session goal in /api/state", async () => {
+    await withServer(
+      async (gui) => {
+        const r = await req(gui.port, "/api/state", { token: TOKEN });
+        expect(r.json.goal).toMatchObject({ objective: "ship it", status: "active", continuations: 2 });
+      },
+      { currentGoal: () => goalFixture() },
+    );
+  });
+
+  it("broadcasts goal state and verifier activity", async () => {
+    await withServer(
+      async (gui) => {
+        const sse = collectSse(gui.port, 4);
+        await sse.ready;
+        await req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "hi" } });
+        const events = await sse.done;
+        expect(events.map((e) => e.event)).toEqual(["turn_start", "goal_changed", "goal_checking", "turn_end"]);
+        expect(events[1].data.goal).toMatchObject({ objective: "ship it", status: "active" });
+        expect(events[1].data.note).toBe("goal set");
+      },
+      {
+        currentGoal: () => goalFixture(),
+        chat: async (_text, _signal, events) => {
+          events?.onGoalChanged?.(goalFixture(), "goal set");
+          events?.onGoalChecking?.();
+          return "done";
+        },
+      },
+    );
+  });
+
+  it("pumps a queued goal continuation as a synthetic turn", async () => {
+    const queue = new RuntimeCommandQueue();
+    const calls: Array<{ text: string; opts?: { goalContinuation?: boolean } }> = [];
+    await withServer(
+      async (gui) => {
+        queue.enqueue("send_prompt", '<system-reminder event="GoalContinuation">continue</system-reminder>', "goal");
+        await req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "hi" } });
+        await vi.waitFor(() => expect(calls).toHaveLength(2));
+        expect(calls[0].opts).toBeUndefined();
+        expect(calls[1].opts).toEqual({ goalContinuation: true });
+        expect(queue.list().find((c) => c.source === "goal")!.status).toBe("done");
+      },
+      {
+        runtimeQueue: queue,
+        currentGoal: () => goalFixture(),
+        chat: async (text, _signal, _events, _images, opts) => {
+          calls.push({ text, opts });
+          return "done";
+        },
+      },
+    );
   });
 
   it("accepts the query token only on the SSE endpoint", async () => {

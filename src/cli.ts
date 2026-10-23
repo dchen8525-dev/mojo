@@ -21,6 +21,7 @@ import { runAgentCommand, type CommandContext } from "./agentCommands.js";
 import { createNdjsonEvents } from "./headless.js";
 import { disableMemoryExtraction } from "./memoryWrite.js";
 import { disableSessionTitles } from "./sessionTitle.js";
+import { disableGoalAutopilot } from "./goal.js";
 import { CronScheduler } from "./cronScheduler.js";
 import {
   ansiEmphasize,
@@ -136,6 +137,8 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
   disableMemoryExtraction();
   // ...and should not spend an extra model call just to name the session.
   disableSessionTitles();
+  // No host loop pumps continuations in print mode, so never promise any.
+  disableGoalAutopilot();
   const session = await resolveSession(args);
   const resolved = resolveTheme({ theme: args.theme, cwd: session.cwd });
   ANSI = ansiHelpers(resolved.theme);

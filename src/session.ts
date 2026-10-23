@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import type { MessageParam } from "./types.js";
 import { atomicWriteFile } from "./atomicWrite.js";
 import { sanitizeTodos, type TodoItem } from "./tools/todo.js";
+import { sanitizeGoal, type SessionGoal } from "./goal.js";
 import { systemReminder } from "./reminder.js";
 import { queryTerms } from "./memory.js";
 
@@ -32,6 +33,8 @@ export interface SessionMeta {
   forkPoint?: number;
   /** Latest todo plan, so the GUI panel survives a restart or session switch. */
   todos?: TodoItem[];
+  /** Persisted autopilot goal (objective, budget, continuation progress). */
+  goal?: SessionGoal;
 }
 
 export interface SessionSubCall {
@@ -248,6 +251,23 @@ export async function saveTodos(id: string, todos: TodoItem[]): Promise<boolean>
 }
 
 /**
+ * Persist the session goal in the meta header (null clears it). Returns false
+ * when the session does not exist.
+ */
+export async function saveGoal(id: string, goal: SessionGoal | null): Promise<boolean> {
+  const clean = goal ? sanitizeGoal(goal) : null;
+  try {
+    const meta = await updateMeta(id, (m) => {
+      if (clean) m.goal = clean;
+      else delete m.goal;
+    });
+    return meta !== null;
+  } catch {
+    return false; // a failed metadata write must not fail the turn
+  }
+}
+
+/**
  * Set (or clear, with an empty title) a session's display name by rewriting
  * its meta header line. Returns false when the session does not exist.
  */
@@ -305,12 +325,13 @@ export async function tagSession(id: string, tags: string[]): Promise<string[] |
 export async function forkSession(
   cwd: string,
   messages: MessageParam[],
-  opts: { title?: string; fromId?: string; todos?: TodoItem[] } = {},
+  opts: { title?: string; fromId?: string; todos?: TodoItem[]; goal?: SessionGoal | null } = {},
 ): Promise<{ id: string; meta: SessionMeta; messages: MessageParam[] }> {
   const { id } = await createSession(cwd);
   const clean = opts.title?.trim().slice(0, 80);
   const todos = sanitizeTodos(opts.todos ?? []) ?? [];
-  if (clean || opts.fromId || todos.length) {
+  const goal = opts.goal ? sanitizeGoal(opts.goal) : null;
+  if (clean || opts.fromId || todos.length || goal) {
     // Rewrite the meta header once, carrying all fields, before any appends.
     await updateMeta(id, (meta) => {
       if (clean) {
@@ -322,6 +343,7 @@ export async function forkSession(
         meta.forkPoint = messages.length;
       }
       if (todos.length) meta.todos = todos;
+      if (goal) meta.goal = goal;
     });
   }
   // The fork notice tells the model the inherited prefix is context, not
@@ -348,6 +370,7 @@ export async function forkSession(
       ...(clean ? { title: clean, titleSource: "custom" as const } : {}),
       ...(opts.fromId ? { forkedFrom: opts.fromId, forkPoint: messages.length } : {}),
       ...(todos.length ? { todos } : {}),
+      ...(goal ? { goal } : {}),
     },
     messages: written,
   };
@@ -442,6 +465,7 @@ async function parseSessionFile(full: string): Promise<ParsedSession | null> {
       if (obj.type === "meta") {
         if (typeof obj.cwd !== "string" || typeof obj.startedAt !== "string") continue;
         const todos = sanitizeTodos(obj.todos);
+        const goal = sanitizeGoal(obj.goal);
         meta = {
           id: fileId,
           cwd: obj.cwd,
@@ -457,6 +481,7 @@ async function parseSessionFile(full: string): Promise<ParsedSession | null> {
           ...(typeof obj.forkedFrom === "string" && obj.forkedFrom ? { forkedFrom: obj.forkedFrom } : {}),
           ...(Number.isFinite(obj.forkPoint) && obj.forkPoint >= 0 ? { forkPoint: obj.forkPoint } : {}),
           ...(todos?.length ? { todos } : {}),
+          ...(goal ? { goal } : {}),
         };
       } else if (obj.type === "model" && meta && typeof obj.model === "string") {
         meta.model = obj.model; // last marker wins

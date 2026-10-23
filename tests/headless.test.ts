@@ -60,6 +60,21 @@ describe("headless NDJSON contract", () => {
     });
     h.events.onCostWarning?.("over budget");
     h.events.onHook?.("PostToolUse", "done");
+    h.events.onGoalChanged?.(
+      {
+        objective: "ship the release",
+        status: "active",
+        tokenBudget: 50_000,
+        tokensUsed: 1_200,
+        continuations: 2,
+        maxContinuations: 6,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:10:00.000Z",
+        nextAction: "run the tests",
+      },
+      "continuing toward the goal (2/6)",
+    );
+    h.events.onGoalChecking?.();
     h.events.onPlanApproved?.();
 
     const parsed = lines.map((l) => JSON.parse(l));
@@ -81,6 +96,8 @@ describe("headless NDJSON contract", () => {
       "stream_recovery",
       "cost_warning",
       "hook",
+      "goal_changed",
+      "goal_checking",
       "plan_approved",
     ]);
     expect(parsed[5]).toMatchObject({ type: "tool_start", id: "t1", name: "bash", input_preview: "npm test", input: { command: "npm test" } });
@@ -100,6 +117,28 @@ describe("headless NDJSON contract", () => {
       delay_ms: 500,
       reason: "connection",
     });
+    expect(parsed[17]).toMatchObject({
+      type: "goal_changed",
+      note: "continuing toward the goal (2/6)",
+      goal: {
+        objective: "ship the release",
+        status: "active",
+        token_budget: 50_000,
+        tokens_used: 1_200,
+        continuations: 2,
+        max_continuations: 6,
+        next_action: "run the tests",
+      },
+    });
+    expect(parsed[18]).toMatchObject({ type: "goal_checking" });
+  });
+
+  it("emits null for a cleared goal", () => {
+    const { lines, write } = collect();
+    const h = createNdjsonEvents({ sessionId: "s", cwd: "c", permissionMode: "default", planMode: false }, write);
+    h.events.onGoalChanged?.(null, "goal cleared");
+    const e = JSON.parse(lines[0]);
+    expect(e).toEqual({ ts: expect.any(String), type: "goal_changed", goal: null, note: "goal cleared" });
   });
 
   it("wraps permission asks so decisions are observable", async () => {

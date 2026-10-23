@@ -12,6 +12,7 @@ import { clipCell, GUTTER, looksLikeDiff, splitColumnWidth, splitDiffRows } from
 import { captureClipboardImage } from "../clipboard.js";
 import { backgroundManager } from "../tools/background.js";
 import { expandFileReferences, renderCommand, type SlashCommand } from "../commands.js";
+import { goalSummaryLine } from "../goal.js";
 
 interface ToolRow {
   id: string;
@@ -330,6 +331,8 @@ export function AgentApp({
   const pastingRef = useRef(false);
   const themeRef = useRef(theme);
   themeRef.current = theme;
+  const pumpRef = useRef<() => void>(() => {});
+  const pumpingRef = useRef(false);
 
   /** Answer the current question (or skip it and every later one). */
   const finishAsk = useCallback((skipRest: boolean) => {
@@ -537,7 +540,12 @@ export function AgentApp({
   }, [stdout]);
 
   const runTurn = useCallback(
-    async (text: string, display: string, images: ImageBlockParam[]) => {
+    async (
+      text: string,
+      display: string,
+      images: ImageBlockParam[],
+      opts: { goalContinuation?: boolean } = {},
+    ) => {
       setError("");
       setBusy(true);
       setStreamText("");
@@ -546,7 +554,7 @@ export function AgentApp({
       setPendingImages([]);
       setDiffPage(0);
       // Remember plain user prompts (not slash commands) for the Esc history picker.
-      if (!display.startsWith("/") && display.trim()) {
+      if (!opts.goalContinuation && !display.startsWith("/") && display.trim()) {
         const h = historyRef.current;
         if (h[h.length - 1] !== display) h.push(display);
       }
@@ -625,6 +633,13 @@ export function AgentApp({
           }
         },
         onHook: (event, message) => setItems((prev) => [...prev, { kind: "system", text: `[hook ${event}] ${message}` }]),
+        onGoalChanged: (goal, note) =>
+          setItems((prev) => [
+            ...prev,
+            { kind: "system", text: `[goal] ${note ?? "updated"}${goal ? ` · ${goalSummaryLine(goal)}` : ""}` },
+          ]),
+        onGoalChecking: () =>
+          setItems((prev) => [...prev, { kind: "system", text: "[goal] verifying whether the objective is complete…" }]),
         onPlanApproved: () => {
           setItems((prev) => [...prev, { kind: "system", text: "plan approved — switching to execution mode" }]);
           setPlanMode(false);
@@ -659,7 +674,13 @@ export function AgentApp({
       };
 
       try {
-        const finalText = await agent.chat(text, controller.signal, events, images);
+        const finalText = await agent.chat(
+          text,
+          controller.signal,
+          events,
+          images,
+          opts.goalContinuation ? { goalContinuation: true } : undefined,
+        );
         streamRef.current = "";
         setItems((prev) => (finalText ? [...prev, { kind: "assistant", text: finalText }] : prev));
         setStreamText("");
@@ -674,11 +695,46 @@ export function AgentApp({
       } finally {
         abortRef.current = null;
         setBusy(false);
+        // Mirror the state update synchronously so the pump can claim the next
+        // queued turn before React re-renders.
+        busyRef.current = false;
         refreshTodos();
+        pumpRef.current();
       }
     },
     [agent, refreshTodos],
   );
+
+  /**
+   * Drain queued send_prompt commands (goal continuations) as follow-up turns.
+   * Re-entrant calls collapse into the outer loop; a real user turn set busy
+   * first wins because the pump only starts when the UI is idle.
+   */
+  const pumpQueue = useCallback(async () => {
+    if (pumpingRef.current) return;
+    pumpingRef.current = true;
+    try {
+      for (;;) {
+        if (busyRef.current) return;
+        const cmd = agent.runtimeQueue.take("send_prompt");
+        if (!cmd) return;
+        const goalTurn = cmd.source === "goal";
+        const goal = goalTurn ? agent.currentGoal() : null;
+        const label = goalTurn ? `↻ ${goal ? goalSummaryLine(goal) : "goal continuation"}` : cmd.prompt;
+        try {
+          await runTurn(cmd.prompt, label, (cmd.images ?? []) as ImageBlockParam[], { goalContinuation: goalTurn });
+          agent.runtimeQueue.complete(cmd.id);
+        } catch (err) {
+          agent.runtimeQueue.complete(cmd.id, err instanceof Error ? err.message : String(err));
+        }
+      }
+    } finally {
+      pumpingRef.current = false;
+    }
+  }, [agent, runTurn]);
+  pumpRef.current = () => {
+    void pumpQueue();
+  };
 
   const onSubmit = useCallback(
     async (value: string) => {
@@ -710,6 +766,8 @@ export function AgentApp({
         setPlanMode(agent.planMode);
         if (result) setItems((prev) => [...prev, { kind: "system", text: result }]);
         refreshTodos();
+        // /goal start|resume leaves a continuation queued; run it right away.
+        pumpRef.current();
         return;
       }
       const expanded = await expandFileReferences(text, agent.cwd);

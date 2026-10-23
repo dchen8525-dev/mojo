@@ -104,6 +104,23 @@ export class RuntimeCommandQueue {
     return n;
   }
 
+  /**
+   * Cancel accepted commands from one source (e.g. "goal" continuations when
+   * the user speaks up). Running commands are left alone: their turn owns them.
+   */
+  cancelBySource(source: string, type?: RuntimeCommandType): number {
+    let n = 0;
+    for (const cmd of this.items) {
+      if (cmd.status !== "accepted" || cmd.source !== source) continue;
+      if (type && cmd.type !== type) continue;
+      cmd.status = "cancelled";
+      cmd.finishedAt = Date.now();
+      n++;
+    }
+    if (n) this.onChange?.();
+    return n;
+  }
+
   /** Keep total size bounded: live commands first, then the newest settled ones. */
   private prune(): void {
     if (this.items.length <= MAX_RUNTIME_COMMANDS) return;

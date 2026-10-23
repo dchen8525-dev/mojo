@@ -52,7 +52,7 @@ export interface CommandContext {
 
 /** Names of the built-in commands (for /help listings and the GUI palette). */
 export const BUILTIN_COMMANDS = [
-  "help", "model", "auto", "yolo", "plan", "mcp", "lsp", "compact", "context", "review",
+  "help", "model", "auto", "yolo", "plan", "goal", "mcp", "lsp", "compact", "context", "review",
   "permissions", "hooks", "sessions", "search", "resume", "fork", "rename", "tag", "export", "todos", "undo", "cost", "cron", "dream", "doctor", "clear", "quit",
 ] as const;
 
@@ -74,7 +74,7 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       return {
         kind: "ok",
         text: [
-          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp [trust|revoke] · /lsp · /compact · /context · /review [base] [focus] · /permissions [clear] · /hooks [trust|revoke] · /sessions [--cwd <dir>] [--title <词>] [--tag <tag>] [--fork-of <id>] [N] · /search [-r] <term> · /resume <id> · /fork [N] [名称] · /rename <名称> · /tag [+<tag> | -<tag> | clear] · /export [md|json] [路径] · /todos · /cron [add <分> <时> <日> <月> <周> <提示词> | on|off|run|rm <id>] · /dream [-y] · /doctor · /undo [-y] [--force] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
+          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /goal [<目标> [--budget <tokens>] [--max <n>] | pause|resume|done|clear|budget <tokens|off>|max <n>] · /mcp [trust|revoke] · /lsp · /compact · /context · /review [base] [focus] · /permissions [clear] · /hooks [trust|revoke] · /sessions [--cwd <dir>] [--title <词>] [--tag <tag>] [--fork-of <id>] [N] · /search [-r] <term> · /resume <id> · /fork [N] [名称] · /rename <名称> · /tag [+<tag> | -<tag> | clear] · /export [md|json] [路径] · /todos · /cron [add <分> <时> <日> <月> <周> <提示词> | on|off|run|rm <id>] · /dream [-y] · /doctor · /undo [-y] [--force] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
           "file refs: @path/to/file inlines the file; Ctrl+V pastes a clipboard image",
           custom ? `custom commands: ${custom}` : "",
         ]
@@ -339,6 +339,52 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
           ? "PLAN mode ON — the agent only explores with read-only tools, then presents a plan via exit_plan for your approval (which also switches back to normal mode)"
           : "plan mode off — normal execution",
       };
+    }
+    case "goal": {
+      const { parseGoalCommand, formatGoal } = await import("./goal.js");
+      const parsed = parseGoalCommand(rest);
+      switch (parsed.action) {
+        case "error":
+          return { kind: "error", text: parsed.message };
+        case "status":
+          return { kind: "ok", text: formatGoal(agent.currentGoal()) };
+        case "set": {
+          const goal = await agent.setGoal(parsed.objective, {
+            tokenBudget: parsed.tokenBudget,
+            maxContinuations: parsed.maxContinuations,
+          });
+          return {
+            kind: "ok",
+            text: `${formatGoal(goal)}\n/goal pause stops the autonomous loop; /goal clear forgets it`,
+          };
+        }
+        case "pause":
+          await agent.pauseGoal();
+          return { kind: "ok", text: formatGoal(agent.currentGoal()) };
+        case "resume": {
+          const goal = await agent.resumeGoal();
+          if (!goal) return { kind: "error", text: "no goal to resume (start one with /goal <objective>)" };
+          return { kind: "ok", text: formatGoal(goal) };
+        }
+        case "complete": {
+          const goal = await agent.completeGoal();
+          if (!goal) return { kind: "error", text: "no goal to complete" };
+          return { kind: "ok", text: formatGoal(goal) };
+        }
+        case "clear":
+          await agent.clearGoal();
+          return { kind: "ok", text: "goal cleared for this session" };
+        case "budget": {
+          const goal = await agent.setGoalBudget(parsed.tokenBudget);
+          if (!goal) return { kind: "error", text: "no goal set (start one with /goal <objective>)" };
+          return { kind: "ok", text: formatGoal(goal) };
+        }
+        case "max": {
+          const goal = await agent.setGoalMaxContinuations(parsed.maxContinuations);
+          if (!goal) return { kind: "error", text: "no goal set (start one with /goal <objective>)" };
+          return { kind: "ok", text: formatGoal(goal) };
+        }
+      }
     }
     case "sessions": {
       // /sessions [--cwd <dir>] [--title <kw>] [--tag <tag>] [--fork-of <id>] [N]

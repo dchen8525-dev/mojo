@@ -19,9 +19,10 @@ const h = vi.hoisted(() => ({
   recalled: "",
   appended: [] as MessageParam[],
   savedTodos: [] as Array<{ id: string; todos: unknown }>,
+  savedGoals: [] as Array<{ id: string; goal: unknown }>,
   generatedTitles: [] as Array<{ id: string; title: string }>,
   /** What the mocked loadSession returns (null = no stored session). */
-  sessionMeta: null as null | { meta: { title?: string } },
+  sessionMeta: null as null | { meta: Record<string, unknown> },
   /** Test hook, invoked at the start of every fake send(). */
   onSend: null as null | (() => void),
   /** Test hook, awaited near the end of every fake send() (simulates streaming). */
@@ -102,6 +103,10 @@ vi.mock("../src/session.js", () => ({
     h.savedTodos.push({ id, todos });
     return true;
   },
+  saveGoal: async (id: string, goal: unknown) => {
+    h.savedGoals.push({ id, goal });
+    return true;
+  },
   loadSession: async () => h.sessionMeta,
   setGeneratedTitle: async (id: string, title: string) => {
     h.generatedTitles.push({ id, title });
@@ -138,6 +143,7 @@ const { registerTool, unregisterToolsByPrefix, todoStore } = await import("../sr
 const { subagentTasks } = await import("../src/taskRegistry.js");
 const { HookManager } = await import("../src/hooks.js");
 const { enableSessionTitlesForTests, disableSessionTitles } = await import("../src/sessionTitle.js");
+const { setGoalAutopilotForTests, sanitizeGoal } = await import("../src/goal.js");
 
 const permissions = { check: async () => true } as never;
 
@@ -227,6 +233,8 @@ beforeEach(() => {
   h.sentSystems = [];
   h.recalled = "";
   h.appended = [];
+  h.savedTodos = [];
+  h.savedGoals = [];
   h.generatedTitles = [];
   h.sessionMeta = null;
   h.onSend = null;
@@ -631,6 +639,206 @@ describe("Agent.chat token accounting", () => {
     await agent.chat("go");
     // Second turn re-anchored exactly; nothing appended since.
     expect(agent.tokenEstimate()).toBe(4105);
+  });
+});
+
+describe("Agent goal autopilot", () => {
+  beforeEach(() => setGoalAutopilotForTests(true));
+  afterEach(() => setGoalAutopilotForTests(false));
+
+  const verdict = (done: boolean, nextAction = "") =>
+    textTurn(JSON.stringify({ done, nextAction, reason: done ? "all checks passed" : "work remains" }), 40, 5);
+
+  it("sets a goal, persists it and enqueues the first continuation", async () => {
+    const agent = makeAgent();
+    const goal = await agent.setGoal("make the test suite pass", { tokenBudget: 5_000 });
+    expect(goal).toMatchObject({
+      objective: "make the test suite pass",
+      status: "active",
+      tokenBudget: 5_000,
+      continuations: 1,
+    });
+    expect(h.savedGoals.at(-1)).toMatchObject({
+      id: "test-session",
+      goal: { objective: "make the test suite pass", status: "active", continuations: 1 },
+    });
+    const queued = agent.runtimeQueue.list().filter((c) => c.source === "goal");
+    expect(queued).toHaveLength(1);
+    expect(queued[0].prompt).toContain("Automatic goal continuation");
+    expect(queued[0].prompt).toContain("make the test suite pass");
+  });
+
+  it("injects the goal into the prompt and completes when the verifier says done", async () => {
+    const agent = makeAgent();
+    await agent.setGoal("finish the migration");
+    const cmd = agent.runtimeQueue.take("send_prompt")!;
+    h.recalled = "RECALLED CONTEXT";
+    const checking: string[] = [];
+    const changes: string[] = [];
+    h.turns = [textTurn("migration finished", 100, 20), verdict(true)];
+    await agent.chat(cmd.prompt, undefined, {
+      onGoalChecking: () => checking.push("check"),
+      onGoalChanged: (goal, note) => changes.push(`${goal?.status}:${note ?? ""}`),
+    }, undefined, { goalContinuation: true });
+
+    expect(h.sentSystems[0]).toContain('<goal_state status="active">');
+    expect(h.sentSystems[0]).toContain("finish the migration");
+    // Continuation turns are synthetic: no memory recall / user hooks.
+    expect(JSON.stringify(h.sentMessages[0])).not.toContain("RECALLED CONTEXT");
+    expect(checking).toEqual(["check"]);
+    expect(agent.currentGoal()).toMatchObject({ status: "completed", note: "all checks passed" });
+    expect(changes.some((c) => c.startsWith("completed:goal completed"))).toBe(true);
+    expect(agent.runtimeQueue.list().some((c) => c.source === "goal" && c.status === "accepted")).toBe(false);
+  });
+
+  it("queues the verifier's next action while under the continuation cap", async () => {
+    const agent = makeAgent();
+    await agent.setGoal("fix the build", { maxContinuations: 3 });
+    const first = agent.runtimeQueue.take("send_prompt")!;
+    h.turns = [textTurn("partial fix", 100, 10), verdict(false, "rerun the compiler")];
+    await agent.chat(first.prompt, undefined, undefined, undefined, { goalContinuation: true });
+
+    const next = agent.runtimeQueue.list().find((c) => c.source === "goal" && c.status === "accepted")!;
+    expect(next).toBeDefined();
+    expect(next.prompt).toContain("rerun the compiler");
+    expect(agent.currentGoal()).toMatchObject({ status: "active", continuations: 2, nextAction: "rerun the compiler" });
+  });
+
+  it("pauses at the continuation cap instead of looping forever", async () => {
+    const agent = makeAgent();
+    await agent.setGoal("polish the docs", { maxContinuations: 2 });
+    let cmd = agent.runtimeQueue.take("send_prompt")!;
+    h.turns = [textTurn("step one", 100, 10), verdict(false, "keep going")];
+    await agent.chat(cmd.prompt, undefined, undefined, undefined, { goalContinuation: true });
+    expect(agent.currentGoal()?.continuations).toBe(2);
+
+    cmd = agent.runtimeQueue.take("send_prompt")!;
+    h.turns.push(textTurn("step two", 100, 10));
+    await agent.chat(cmd.prompt, undefined, undefined, undefined, { goalContinuation: true });
+    expect(agent.currentGoal()).toMatchObject({ status: "paused" });
+    expect(agent.currentGoal()?.note).toContain("2 automatic continuations");
+  });
+
+  it("pauses instead of autopiloting while plan mode is on", async () => {
+    const blocked = makeAgent();
+    blocked.planMode = true;
+    expect(await blocked.setGoal("review the migration")).toMatchObject({
+      status: "paused",
+      note: "paused automatically: plan mode is on",
+    });
+    expect(blocked.runtimeQueue.list().some((c) => c.source === "goal")).toBe(false);
+
+    const agent = makeAgent();
+    await agent.setGoal("review the second migration");
+    const cmd = agent.runtimeQueue.take("send_prompt")!;
+    agent.planMode = true;
+    h.turns = [textTurn("proposed a plan", 100, 10)];
+    await agent.chat(cmd.prompt, undefined, undefined, undefined, { goalContinuation: true });
+    expect(h.calls).toBe(1); // no verifier call once plan mode stops autopilot
+    expect(agent.currentGoal()).toMatchObject({
+      status: "paused",
+      note: "paused automatically: plan mode is on",
+    });
+  });
+
+  it("pauses when the token budget is exhausted before another verifier call", async () => {
+    const agent = makeAgent();
+    await agent.setGoal("optimize the query", { tokenBudget: 50 });
+    const cmd = agent.runtimeQueue.take("send_prompt")!;
+    h.turns = [textTurn("working", 100, 20)];
+    await agent.chat(cmd.prompt, undefined, undefined, undefined, { goalContinuation: true });
+    expect(h.calls).toBe(1); // no verifier call after the budget pause
+    expect(agent.currentGoal()).toMatchObject({ status: "paused" });
+    expect(agent.currentGoal()?.note).toContain("token budget exhausted");
+    expect(agent.currentGoal()?.tokensUsed).toBe(120);
+  });
+
+  it("pauses when the verifier cannot be parsed", async () => {
+    const agent = makeAgent();
+    await agent.setGoal("make CI green");
+    const cmd = agent.runtimeQueue.take("send_prompt")!;
+    h.turns = [textTurn("tried", 10, 2), textTurn("not json", 10, 2)];
+    await agent.chat(cmd.prompt, undefined, undefined, undefined, { goalContinuation: true });
+    expect(agent.currentGoal()).toMatchObject({ status: "paused" });
+    expect(agent.currentGoal()?.note).toContain("no usable verdict");
+    expect(h.calls).toBe(2);
+  });
+
+  it("pauses on abort and cancels queued continuations", async () => {
+    const agent = makeAgent();
+    await agent.setGoal("refactor the parser");
+    agent.runtimeQueue.take("send_prompt");
+    const queued = agent.runtimeQueue.enqueue("send_prompt", "another", "goal")!;
+    const ctrl = new AbortController();
+    ctrl.abort();
+    await expect(
+      agent.chat("continue", ctrl.signal, undefined, undefined, { goalContinuation: true }),
+    ).rejects.toThrow("aborted");
+    expect(agent.currentGoal()).toMatchObject({ status: "paused" });
+    expect(agent.currentGoal()?.note).toContain("interrupted");
+    expect(agent.runtimeQueue.list().find((c) => c.id === queued.id)!.status).toBe("cancelled");
+  });
+
+  it("lets real user input cancel a queued goal continuation", async () => {
+    const agent = makeAgent();
+    await agent.setGoal("rewrite the docs");
+    const queued = agent.runtimeQueue.list().find((c) => c.source === "goal")!;
+    setGoalAutopilotForTests(false);
+    h.turns = [textTurn("ok")];
+    await agent.chat("stop and answer this question instead");
+    expect(agent.runtimeQueue.list().find((c) => c.id === queued.id)!.status).toBe("cancelled");
+    expect(agent.currentGoal()?.status).toBe("active");
+  });
+
+  it("pause/resume/complete/clear drive the persisted state machine", async () => {
+    const agent = makeAgent();
+    await agent.setGoal("ship the feature");
+    await agent.pauseGoal("waiting on review");
+    expect(agent.currentGoal()).toMatchObject({ status: "paused", note: "waiting on review" });
+    expect(agent.runtimeQueue.list().some((c) => c.source === "goal" && c.status === "accepted")).toBe(false);
+
+    await agent.resumeGoal();
+    expect(agent.currentGoal()?.status).toBe("active");
+    expect(agent.runtimeQueue.list().some((c) => c.source === "goal" && c.status === "accepted")).toBe(true);
+
+    await agent.completeGoal("done by hand");
+    expect(agent.currentGoal()).toMatchObject({ status: "completed", note: "done by hand" });
+
+    expect(await agent.clearGoal()).toBe(true);
+    expect(agent.currentGoal()).toBeNull();
+    expect(h.savedGoals.at(-1)?.goal).toBeNull();
+  });
+
+  it("adjusts budget and continuation limits, pausing when already over", async () => {
+    const agent = makeAgent();
+    await agent.setGoal("keep the lights on", { tokenBudget: 100 });
+    await agent.setGoalBudget(10);
+    expect(agent.currentGoal()?.tokenBudget).toBe(10);
+    // Kickoff continuation counts as 1; lowering the cap below that pauses.
+    await agent.setGoalMaxContinuations(1);
+    expect(agent.currentGoal()?.status).toBe("paused");
+    expect(agent.currentGoal()?.note).toContain("1 automatic continuations");
+  });
+
+  it("loads a persisted goal on session start", async () => {
+    h.sessionMeta = {
+      meta: {
+        goal: sanitizeGoal({
+          objective: "resume the old goal",
+          status: "active",
+          continuations: 2,
+          maxContinuations: 6,
+        }),
+      },
+    };
+    const agent = makeAgent();
+    await agent.startSession("resume");
+    expect(agent.currentGoal()).toMatchObject({
+      objective: "resume the old goal",
+      status: "active",
+      continuations: 2,
+      maxContinuations: 6,
+    });
   });
 });
 

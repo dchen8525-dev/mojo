@@ -65,6 +65,9 @@ export class GuiRuntime {
   attach(agent: Agent, permissions: PermissionManager): void {
     this.agent = agent;
     this.permissions = permissions;
+    // Goal changes made by slash commands happen outside a turn, where no
+    // per-turn event channel exists; the agent falls back to this property.
+    agent.onGoalChanged = (goal, note) => this.hub.broadcast("goal_changed", { goal, note });
   }
 
   /**

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { runAgentCommand, type CommandContext } from "../src/agentCommands.js";
 import type { Agent } from "../src/agent.js";
 import type { PermissionManager } from "../src/permissions.js";
+import { createGoal, type SessionGoal } from "../src/goal.js";
 
 // Keep tests from touching real session files.
 const searchLedger: { hits: unknown[] } = { hits: [] };
@@ -160,6 +161,53 @@ function ctx(overrides: Partial<CommandContext> = {}): CommandContext {
   };
 }
 
+/** Minimal in-memory goal state machine for /goal command tests. */
+function goalAgent() {
+  let goal: SessionGoal | null = null;
+  const agent = fakeAgent({
+    currentGoal: () => goal,
+    setGoal: async (objective: string, opts: { tokenBudget?: number | null; maxContinuations?: number } = {}) => {
+      goal = createGoal(objective, opts);
+      return goal;
+    },
+    pauseGoal: async (note = "paused by user") => {
+      if (goal) {
+        goal.status = "paused";
+        goal.note = note;
+      }
+      return goal;
+    },
+    resumeGoal: async () => {
+      if (goal && goal.status === "paused") {
+        goal.status = "active";
+        delete goal.note;
+      }
+      return goal;
+    },
+    completeGoal: async (note = "completed by user") => {
+      if (goal) {
+        goal.status = "completed";
+        goal.note = note;
+      }
+      return goal;
+    },
+    clearGoal: async () => {
+      const had = goal !== null;
+      goal = null;
+      return had;
+    },
+    setGoalBudget: async (tokenBudget: number | null) => {
+      if (goal) goal.tokenBudget = tokenBudget;
+      return goal;
+    },
+    setGoalMaxContinuations: async (n: number) => {
+      if (goal) goal.maxContinuations = n;
+      return goal;
+    },
+  } as never);
+  return { agent, current: () => goal };
+}
+
 describe("runAgentCommand", () => {
   it("returns help text without ANSI codes", async () => {
     const r = await runAgentCommand("/help", ctx());
@@ -213,6 +261,63 @@ describe("runAgentCommand", () => {
     expect(agent.planMode).toBe(true);
     await runAgentCommand("/plan off", ctx({ agent }));
     expect(agent.planMode).toBe(false);
+  });
+
+  it("/goal starts a goal with budget and continuation limits", async () => {
+    const { agent, current } = goalAgent();
+    const r = await runAgentCommand("/goal ship the release --budget 50000 --max 4", ctx({ agent }));
+    expect(r.kind).toBe("ok");
+    expect(r.text).toContain("goal [active] ship the release");
+    expect(r.text).toContain("50,000");
+    expect(r.text).toContain("4");
+    expect(current()).toMatchObject({ objective: "ship the release", tokenBudget: 50_000, maxContinuations: 4 });
+  });
+
+  it("/goal reports status, pause, resume, completion and clear", async () => {
+    const { agent, current } = goalAgent();
+    const empty = await runAgentCommand("/goal", ctx({ agent }));
+    expect(empty.text).toContain("no goal set");
+
+    await runAgentCommand("/goal tidy the docs", ctx({ agent }));
+    const paused = await runAgentCommand("/goal pause", ctx({ agent }));
+    expect(paused.text).toContain("[paused]");
+    expect(current()?.note).toBe("paused by user");
+
+    const resumed = await runAgentCommand("/goal continue", ctx({ agent }));
+    expect(resumed.text).toContain("[active]");
+
+    const done = await runAgentCommand("/goal done", ctx({ agent }));
+    expect(done.text).toContain("[completed]");
+
+    const cleared = await runAgentCommand("/goal clear", ctx({ agent }));
+    expect(cleared.text).toContain("cleared");
+    expect(current()).toBeNull();
+  });
+
+  it("/goal adjusts budget and the continuation cap", async () => {
+    const { agent, current } = goalAgent();
+    await runAgentCommand("/goal watch the logs", ctx({ agent }));
+    const budget = await runAgentCommand("/goal budget 2500", ctx({ agent }));
+    expect(budget.kind).toBe("ok");
+    expect(current()?.tokenBudget).toBe(2500);
+    const off = await runAgentCommand("/goal budget off", ctx({ agent }));
+    expect(off.kind).toBe("ok");
+    expect(current()?.tokenBudget).toBeNull();
+    const max = await runAgentCommand("/goal max 7", ctx({ agent }));
+    expect(max.kind).toBe("ok");
+    expect(current()?.maxContinuations).toBe(7);
+  });
+
+  it("/goal rejects invalid input without touching the goal", async () => {
+    const { agent, current } = goalAgent();
+    expect((await runAgentCommand("/goal pause", ctx({ agent }))).kind).toBe("ok"); // no goal yet: no-op
+    expect((await runAgentCommand("/goal --budget nope goal", ctx({ agent }))).kind).toBe("error");
+    expect((await runAgentCommand("/goal max 0", ctx({ agent }))).kind).toBe("error");
+    expect(current()).toBeNull();
+    await runAgentCommand("/goal keep going", ctx({ agent }));
+    const badBudget = await runAgentCommand("/goal budget nope", ctx({ agent }));
+    expect(badBudget.kind).toBe("error");
+    expect((await runAgentCommand("/goal max 99", ctx({ agent }))).kind).toBe("error");
   });
 
   it("/mcp with no manager reports disabled", async () => {
