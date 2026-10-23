@@ -23,6 +23,8 @@ const h = vi.hoisted(() => ({
   appended: [] as MessageParam[],
   savedTodos: [] as Array<{ id: string; todos: unknown }>,
   savedGoals: [] as Array<{ id: string; goal: unknown }>,
+  savedUsages: [] as Array<{ id: string; usage: unknown }>,
+  savedExposed: [] as Array<{ id: string; names: unknown }>,
   generatedTitles: [] as Array<{ id: string; title: string }>,
   /** What the mocked loadSession returns (null = no stored session). */
   sessionMeta: null as null | { meta: Record<string, unknown> },
@@ -117,6 +119,14 @@ vi.mock("../src/session.js", () => ({
     h.savedGoals.push({ id, goal });
     return true;
   },
+  saveUsage: async (id: string, usage: unknown) => {
+    h.savedUsages.push({ id, usage });
+    return true;
+  },
+  saveExposedTools: async (id: string, names: unknown) => {
+    h.savedExposed.push({ id, names });
+    return true;
+  },
   loadSession: async () => h.sessionMeta,
   setGeneratedTitle: async (id: string, title: string) => {
     h.generatedTitles.push({ id, title });
@@ -149,7 +159,8 @@ vi.mock("../src/skills.js", async (importOriginal) => {
 });
 
 const { Agent } = await import("../src/agent.js");
-const { registerTool, unregisterToolsByPrefix, todoStore } = await import("../src/tools/index.js");
+const { registerTool, unregisterToolsByPrefix, todoStore, isExposed, deferredTools } = await import("../src/tools/index.js");
+const { estimateMessagesTokens } = await import("../src/tokens.js");
 const { subagentTasks } = await import("../src/taskRegistry.js");
 const { HookManager } = await import("../src/hooks.js");
 const { enableSessionTitlesForTests, disableSessionTitles } = await import("../src/sessionTitle.js");
@@ -246,6 +257,8 @@ beforeEach(() => {
   h.appended = [];
   h.savedTodos = [];
   h.savedGoals = [];
+  h.savedUsages = [];
+  h.savedExposed = [];
   h.generatedTitles = [];
   h.sessionMeta = null;
   h.onSend = null;
@@ -1721,5 +1734,71 @@ describe("tool-call budget warnings", () => {
     const agent = makeAgent();
     await agent.chat("go");
     expect(JSON.stringify(agent.debugMessages())).not.toContain("ToolBudgetWarning");
+  });
+});
+
+describe("batch 38: session meta (usage anchor + exposed tools)", () => {
+  function deferredTool(name: string) {
+    registerTool({
+      name,
+      description: "batch 38 deferred test tool",
+      isReadOnly: true,
+      deferred: true,
+      inputSchema: { type: "object", properties: {} },
+      async execute() {
+        return { content: "ran" };
+      },
+    });
+  }
+
+  afterEach(() => {
+    unregisterToolsByPrefix("exp38_");
+  });
+
+  it("persists the provider usage anchor at turn end", async () => {
+    h.turns = [textTurn("done", 500, 20)];
+    const agent = makeAgent();
+    await agent.chat("hi");
+    // anchor covers [user, assistant]: messagesSent + 1, input + output tokens
+    expect(h.savedUsages.at(-1)?.usage).toEqual({ messages: 2, tokens: 520 });
+    expect(agent.tokenEstimate()).toBe(520);
+  });
+
+  it("restores the usage anchor on /resume and rejects stale counts", async () => {
+    const history: MessageParam[] = [
+      { role: "user", content: "q1" },
+      { role: "assistant", content: "a1" },
+    ];
+    h.sessionMeta = { meta: { usage: { messages: 2, tokens: 4321 } } };
+    const agent = makeAgent();
+    await agent.resetSession("test-session", history);
+    expect(agent.tokenEstimate()).toBe(4321); // exact anchor, not an estimate
+
+    // A stale anchor (history compacted after the save) must not stick.
+    h.sessionMeta = { meta: { usage: { messages: 50, tokens: 999_999 } } };
+    await agent.resetSession("test-session", history);
+    expect(agent.tokenEstimate()).toBe(estimateMessagesTokens(history));
+  });
+
+  it("persists tool_search exposures at turn end", async () => {
+    deferredTool("exp38_beta");
+    h.turns = [
+      toolTurn([["tool_search", { query: "select:exp38_beta" }]]),
+      textTurn("ok"),
+    ];
+    const agent = makeAgent();
+    await agent.chat("expose it");
+    const names = h.savedExposed.at(-1)?.names;
+    expect(Array.isArray(names) && (names as string[]).includes("exp38_beta")).toBe(true);
+  });
+
+  it("re-exposes stored tool names on /resume, ignoring unknown ones", async () => {
+    deferredTool("exp38_alpha");
+    h.sessionMeta = { meta: { exposedTools: ["exp38_alpha", "gone38_tool"] } };
+    const agent = makeAgent();
+    await agent.resetSession("test-session", []);
+    expect(isExposed("exp38_alpha")).toBe(true);
+    expect(deferredTools().map((t) => t.name)).not.toContain("exp38_alpha");
+    expect(isExposed("gone38_tool")).toBe(false);
   });
 });

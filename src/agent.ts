@@ -18,7 +18,7 @@ import { LLM, isContextOverflowError, type Config, type StreamEvents } from "./l
 import { CancelledStreamError, StreamRecoveryExhausted } from "./llm/types.js";
 import { lookupModel } from "./llm/models.js";
 import type { AssistantTurn, SystemPrompt } from "./llm/types.js";
-import { deferredTools, getTool, tools, todoStore, isExposed } from "./tools/index.js";
+import { deferredTools, exposedToolNames, exposeTool, getTool, tools, todoStore, isExposed } from "./tools/index.js";
 import { COMMUNICATION, TURN_COMPLETION, toolGuidance } from "./prompts.js";
 import { auxiliarySendOptions } from "./auxiliary.js";
 import { planWaves, runWave } from "./scheduler.js";
@@ -77,8 +77,10 @@ import {
   forkSession,
   loadSession,
   rewriteMessages,
+  saveExposedTools,
   saveGoal,
   saveTodos,
+  saveUsage,
   setGeneratedTitle,
 } from "./session.js";
 import { sessionReferenceIds } from "./sessionRefs.js";
@@ -192,6 +194,8 @@ export class Agent {
   private messages: MessageParam[] = [];
   private persisted = 0;
   private lastPersistedModel = "";
+  private lastPersistedUsage: { messages: number; tokens: number } | null = null;
+  private lastPersistedExposed: string[] = [];
   private tokens = new TokenCounter();
   private checkpoints: CheckpointStore;
   /** Files this session's model has read; gates write_file/edit_file freshness. */
@@ -392,7 +396,7 @@ export class Agent {
     todoStore.items = [...todos];
     // Goal state belongs to the session file; queued continuations from the
     // previous session must never leak into the new one.
-    await this.loadGoal();
+    await this.loadSessionMeta();
     if (!this.hooks) return;
     const hr = await this.hooks.run("SessionStart", { cwd: this.cwd, session_id: this.sessionId, source }, undefined);
     if (hr.context) this.sessionStartContext = hr.context.trim();
@@ -1162,14 +1166,32 @@ ${COMMUNICATION}${toolGuidance(toolNames, { hasDeferred: deferredTools().length 
     return this.goal ? { ...this.goal } : null;
   }
 
-  /** Load the goal stored in the session header; queued continuations are dropped. */
-  private async loadGoal(): Promise<void> {
+  /** Load the goal stored in the session header and restore the usage anchor; queued continuations are dropped. */
+  private async loadSessionMeta(): Promise<void> {
     this.runtimeQueue.cancelBySource("goal");
     this.goal = null;
+    this.lastPersistedUsage = null;
+    this.lastPersistedExposed = exposedToolNames();
     if (!this.sessionId) return;
     try {
       const parsed = await loadSession(this.sessionId);
       this.goal = sanitizeGoal(parsed?.meta.goal);
+      // A stale anchor (history compacted or trimmed after the save) is
+      // rejected by the count check; a fresh character estimate is then used.
+      const u = parsed?.meta.usage;
+      if (u && u.messages <= this.messages.length) {
+        this.tokens.restoreAnchor(u.messages, u.tokens);
+        this.lastPersistedUsage = { messages: u.messages, tokens: u.tokens };
+      }
+      // Re-expose tools tool_search had exposed before the restart; unknown
+      // names (tool gone, server disconnected) are silently skipped.
+      const stored = parsed?.meta.exposedTools;
+      if (Array.isArray(stored)) {
+        for (const n of stored) {
+          if (typeof n === "string" && !isExposed(n)) exposeTool(n);
+        }
+        this.lastPersistedExposed = exposedToolNames();
+      }
     } catch {
       this.goal = null; // a corrupt session must not crash a resume
     }
@@ -1562,6 +1584,24 @@ ${COMMUNICATION}${toolGuidance(toolNames, { hasDeferred: deferredTools().length 
     if (rewrote || spec !== this.lastPersistedModel) {
       await appendModel(this.sessionId, spec);
       this.lastPersistedModel = spec;
+    }
+    const snap = this.tokens.snapshot();
+    if (snap) {
+      const usage = { messages: snap.count, tokens: snap.tokens };
+      const last = this.lastPersistedUsage;
+      if (!last || last.messages !== usage.messages || last.tokens !== usage.tokens) {
+        await saveUsage(this.sessionId, usage);
+        this.lastPersistedUsage = usage;
+      }
+    }
+    const exposed = exposedToolNames();
+    const prev = this.lastPersistedExposed;
+    if (
+      exposed.length !== prev.length ||
+      exposed.some((n) => !prev.includes(n))
+    ) {
+      await saveExposedTools(this.sessionId, exposed);
+      this.lastPersistedExposed = exposed;
     }
   }
 

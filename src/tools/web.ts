@@ -205,6 +205,83 @@ async function httpGet(
   }
 }
 
+/**
+ * In-memory TTL+LRU cache for web_fetch results so re-reading a page in the
+ * same session does not re-download it. TTL defaults to 15 minutes
+ * (AGENT_WEBFETCH_CACHE_TTL_MS overrides), the store holds at most
+ * CACHE_MAX_BYTES total (single entries larger than the budget are never
+ * cached), and AGENT_WEBFETCH_CACHE=0 disables caching entirely. Only
+ * successful responses are cached; errors are always re-fetched. web_search
+ * is never cached.
+ */
+type FetchCacheEntry = {
+  status: number;
+  body: string;
+  contentType: string;
+  finalUrl: string;
+  expiresAt: number;
+  bytes: number;
+};
+
+const fetchCache = new Map<string, FetchCacheEntry>();
+const CACHE_TTL_MS = 15 * 60_000;
+const CACHE_MAX_BYTES = 8_000_000;
+
+function cacheEnabled(): boolean {
+  return process.env.AGENT_WEBFETCH_CACHE !== "0";
+}
+
+function cacheTtlMs(): number {
+  const raw = Number(process.env.AGENT_WEBFETCH_CACHE_TTL_MS);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : CACHE_TTL_MS;
+}
+
+/** Drop expired entries, then evict least-recently-used until under budget. */
+function pruneFetchCache(): void {
+  const now = Date.now();
+  for (const [key, entry] of fetchCache) {
+    if (entry.expiresAt <= now) fetchCache.delete(key);
+  }
+  let total = 0;
+  for (const entry of fetchCache.values()) total += entry.bytes;
+  while (total > CACHE_MAX_BYTES) {
+    const oldest = fetchCache.keys().next().value;
+    if (oldest === undefined) break;
+    total -= fetchCache.get(oldest)!.bytes;
+    fetchCache.delete(oldest);
+  }
+}
+
+function cachedFetch(url: string): FetchCacheEntry | null {
+  if (!cacheEnabled()) return null;
+  const entry = fetchCache.get(url);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    fetchCache.delete(url);
+    return null;
+  }
+  fetchCache.delete(url);
+  fetchCache.set(url, entry); // refresh LRU order
+  return entry;
+}
+
+function storeFetch(
+  url: string,
+  res: { status: number; body: string; contentType: string; finalUrl: string },
+): void {
+  if (!cacheEnabled() || res.status >= 400) return;
+  const bytes = Buffer.byteLength(res.body, "utf8");
+  if (bytes > CACHE_MAX_BYTES) return;
+  fetchCache.delete(url);
+  fetchCache.set(url, { ...res, expiresAt: Date.now() + cacheTtlMs(), bytes });
+  pruneFetchCache();
+}
+
+/** Test hook: drop every cached fetch result. */
+export function clearWebFetchCacheForTests(): void {
+  fetchCache.clear();
+}
+
 function decodeEntities(s: string): string {
   return s
     .replace(/&amp;/g, "&")
@@ -352,7 +429,9 @@ export const webFetchTool: Tool = {
   description:
     "Fetch a URL and return its readable text (HTML is stripped to plain text). Use for " +
     "documentation pages, READMEs, error explanations, and API references. Output is " +
-    "truncated if large. Only public http(s) URLs are allowed: localhost, private, " +
+    "truncated if large. Successful fetches are cached for a few minutes (a re-read of the " +
+    "same URL returns the cached copy, marked \"(cached)\"); set AGENT_WEBFETCH_CACHE=0 to " +
+    "always re-fetch. Only public http(s) URLs are allowed: localhost, private, " +
     "link-local, and cloud-metadata addresses are refused.",
   isReadOnly: true,
   parallelSafe: true,
@@ -368,7 +447,19 @@ export const webFetchTool: Tool = {
     const url = str(input, "url");
     const maxChars = Math.min(100_000, Math.max(1_000, num(input, "max_chars") ?? 20_000));
     try {
-      const { status, body, contentType, finalUrl } = await httpGet(url, ctx.signal);
+      const hit = cachedFetch(url);
+      let status: number;
+      let body: string;
+      let contentType: string;
+      let finalUrl: string;
+      let cached = false;
+      if (hit && !ctx.signal?.aborted) {
+        ({ status, body, contentType, finalUrl } = hit);
+        cached = true;
+      } else {
+        ({ status, body, contentType, finalUrl } = await httpGet(url, ctx.signal));
+        storeFetch(url, { status, body, contentType, finalUrl });
+      }
       if (status >= 400) return { content: `Fetch failed: HTTP ${status} for ${finalUrl}`, isError: true };
       let text: string;
       if (/json/i.test(contentType)) text = body;
@@ -376,7 +467,9 @@ export const webFetchTool: Tool = {
       else text = body; // plain text or unknown
       if (!text.trim()) return { content: `Fetched ${finalUrl} but it had no readable text.`, isError: true };
       const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(body)?.[1];
-      const header = title ? `# ${htmlToText(title).trim()}\nSource: ${finalUrl}\n\n` : `Source: ${finalUrl}\n\n`;
+      const header = title
+        ? `# ${htmlToText(title).trim()}\nSource: ${finalUrl}${cached ? " (cached)" : ""}\n\n`
+        : `Source: ${finalUrl}${cached ? " (cached)" : ""}\n\n`;
       return { content: truncate(header + text, maxChars) };
     } catch (err) {
       return { content: `Fetch error: ${describeError(err)}`, isError: true };

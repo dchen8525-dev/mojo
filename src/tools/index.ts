@@ -72,6 +72,11 @@ export function isExposed(name: string): boolean {
   return exposedDeferred.has(name);
 }
 
+/** Names currently exposed via tool_search (for session-meta persistence). */
+export function exposedToolNames(): string[] {
+  return [...exposedDeferred];
+}
+
 export function deferredTools(): Tool[] {
   return tools.filter((t) => t.deferred && !exposedDeferred.has(t.name));
 }

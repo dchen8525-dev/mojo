@@ -161,4 +161,35 @@ describe("TokenCounter", () => {
     c.invalidate();
     expect(c.count(messages)).toBe(estimateMessagesTokens(messages));
   });
+
+  it("snapshot() reports the live anchor or null", () => {
+    const c = new TokenCounter();
+    expect(c.snapshot()).toBeNull();
+    c.setAnchor(2, 500, 50);
+    expect(c.snapshot()).toEqual({ count: 3, tokens: 550 });
+    c.invalidate();
+    expect(c.snapshot()).toBeNull();
+  });
+
+  it("restoreAnchor() re-attaches a persisted anchor", () => {
+    const c = new TokenCounter();
+    const messages = [msg("one")]; // anchor covers message 0 + its reply
+    c.restoreAnchor(1, 4321);
+    expect(c.anchored).toBe(true);
+    expect(c.count(messages)).toBe(4321);
+    expect(c.snapshot()).toEqual({ count: 1, tokens: 4321 });
+    // Invalid inputs are ignored, not fatal.
+    c.restoreAnchor(0, 100);
+    c.restoreAnchor(-3, 100);
+    c.restoreAnchor(1, 0);
+    expect(c.snapshot()).toEqual({ count: 1, tokens: 4321 });
+  });
+
+  it("a restored anchor that is longer than the history is rejected by count()", () => {
+    const c = new TokenCounter();
+    c.restoreAnchor(10, 90_000); // e.g. history compacted after the save
+    const short = [msg("one"), msg("two")];
+    expect(c.count(short)).toBe(estimateMessagesTokens(short));
+    expect(c.anchored).toBe(false);
+  });
 });

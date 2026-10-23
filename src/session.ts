@@ -35,6 +35,17 @@ export interface SessionMeta {
   todos?: TodoItem[];
   /** Persisted autopilot goal (objective, budget, continuation progress). */
   goal?: SessionGoal;
+  /**
+   * Last provider-reported usage anchor: the first `messages` messages cost
+   * `tokens` exactly. Restored on /resume so autocompact and /context use the
+   * real footprint instead of a fresh character estimate.
+   */
+  usage?: { messages: number; tokens: number };
+  /**
+   * Deferred tool names exposed via tool_search in this session. Re-exposed on
+   * /resume so a restarted CLI does not force the model to rediscover them.
+   */
+  exposedTools?: string[];
 }
 
 export interface SessionSubCall {
@@ -268,6 +279,52 @@ export async function saveGoal(id: string, goal: SessionGoal | null): Promise<bo
 }
 
 /**
+ * Persist the usage anchor (null clears it). Best-effort: a failed write must
+ * never fail the turn, matching saveGoal.
+ */
+export async function saveUsage(
+  id: string,
+  usage: { messages: number; tokens: number } | null,
+): Promise<boolean> {
+  let clean: { messages: number; tokens: number } | null = null;
+  if (usage) {
+    const messages = Math.floor(Number(usage.messages));
+    const tokens = Math.floor(Number(usage.tokens));
+    if (Number.isFinite(messages) && messages > 0 && messages <= 1_000_000 && Number.isFinite(tokens) && tokens > 0) {
+      clean = { messages, tokens };
+    }
+  }
+  try {
+    const meta = await updateMeta(id, (m) => {
+      if (clean) m.usage = clean;
+      else delete m.usage;
+    });
+    return meta !== null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Persist the deferred tool names tool_search has exposed (empty list clears).
+ * Names are trimmed, capped at 80 chars and 100 per session; whether a name is
+ * actually a live deferred tool is re-checked on restore. Returns false when
+ * the session does not exist.
+ */
+export async function saveExposedTools(id: string, names: string[]): Promise<boolean> {
+  const clean = [...new Set(names.map((n) => n.trim().slice(0, 80)).filter(Boolean))].slice(0, 100);
+  try {
+    const meta = await updateMeta(id, (m) => {
+      if (clean.length) m.exposedTools = clean;
+      else delete m.exposedTools;
+    });
+    return meta !== null;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Set (or clear, with an empty title) a session's display name by rewriting
  * its meta header line. Returns false when the session does not exist.
  */
@@ -466,6 +523,20 @@ async function parseSessionFile(full: string): Promise<ParsedSession | null> {
         if (typeof obj.cwd !== "string" || typeof obj.startedAt !== "string") continue;
         const todos = sanitizeTodos(obj.todos);
         const goal = sanitizeGoal(obj.goal);
+        const u = obj.usage as { messages?: unknown; tokens?: unknown } | undefined;
+        const usage =
+          u && Number.isFinite(u.messages) && (u.messages as number) > 0 && Number.isFinite(u.tokens) && (u.tokens as number) > 0
+            ? { messages: Math.floor(u.messages as number), tokens: Math.floor(u.tokens as number) }
+            : null;
+        const exposedTools: string[] | null = Array.isArray(obj.exposedTools)
+          ? [
+              ...new Set(
+                (obj.exposedTools as unknown[])
+                  .filter((n): n is string => typeof n === "string" && !!n.trim())
+                  .map((n) => n.trim().slice(0, 80)),
+              ),
+            ].slice(0, 100)
+          : null;
         meta = {
           id: fileId,
           cwd: obj.cwd,
@@ -482,6 +553,8 @@ async function parseSessionFile(full: string): Promise<ParsedSession | null> {
           ...(Number.isFinite(obj.forkPoint) && obj.forkPoint >= 0 ? { forkPoint: obj.forkPoint } : {}),
           ...(todos?.length ? { todos } : {}),
           ...(goal ? { goal } : {}),
+          ...(usage ? { usage } : {}),
+          ...(exposedTools?.length ? { exposedTools } : {}),
         };
       } else if (obj.type === "model" && meta && typeof obj.model === "string") {
         meta.model = obj.model; // last marker wins

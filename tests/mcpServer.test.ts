@@ -52,6 +52,12 @@ vi.mock("../src/session.js", () => {
     appendMessages: async () => {},
     appendModel: async () => {},
     rewriteMessages: async () => {},
+    loadSession: async () => null,
+    saveTodos: async () => true,
+    saveGoal: async () => true,
+    saveUsage: async () => true,
+    saveExposedTools: async () => true,
+    setGeneratedTitle: async () => true,
   };
 });
 

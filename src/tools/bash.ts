@@ -51,8 +51,47 @@ const DANGEROUS_PATTERNS: RegExp[] = [
   /\bnpm\s+publish\b|\bcargo\s+publish\b/i,
 ];
 
+/**
+ * Windows destructive deletes that a generic regex misses:
+ * - CMD's `rd`/`rmdir` with `/S` deletes a whole tree; without /S it only
+ *   removes empty directories. A bare `/?` help invocation is not a delete.
+ * - `robocopy /MIR` or `/PURGE` mirrors the source onto the destination and
+ *   deletes everything in the destination that does not match - destructive
+ *   whenever real source+dest paths are given (>= 2) and /L (list-only) is
+ *   absent. /XF /XD exclusion lists consume words until the next /flag.
+ */
+export function isWindowsDestructiveDelete(cmd: string): boolean {
+  const tokens = cmd.trim().toLowerCase().split(/\s+/);
+  const name = tokens[0];
+  if (name === "rd" || name === "rmdir") {
+    const rest = tokens.slice(1);
+    if (!rest.length) return false;
+    if (rest.every((t) => t === "/?")) return false; // help, not a delete
+    return rest.some((t) => t.startsWith("/") && t.split("/").includes("s"));
+  }
+  if (name === "robocopy") {
+    const args = tokens.slice(1);
+    if (args.length < 2) return false;
+    let paths = 0;
+    let deletion = false;
+    let listOnly = false;
+    let excluding = false; // inside an /XF /XD word list
+    for (const t of args) {
+      if (!t.startsWith("/")) {
+        if (!excluding) paths++;
+        continue;
+      }
+      excluding = t === "/xf" || t === "/xd";
+      if (t === "/mir" || t === "/purge") deletion = true;
+      else if (t === "/l") listOnly = true;
+    }
+    return paths >= 2 && deletion && !listOnly;
+  }
+  return false;
+}
+
 export function isDangerousCommand(cmd: string): boolean {
-  return DANGEROUS_PATTERNS.some((re) => re.test(cmd));
+  return DANGEROUS_PATTERNS.some((re) => re.test(cmd)) || isWindowsDestructiveDelete(cmd);
 }
 
 /** git subcommands that cannot mutate anything. */

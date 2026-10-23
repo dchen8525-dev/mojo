@@ -66,6 +66,37 @@ describe("isDangerousCommand (cross-shell patterns)", () => {
   });
 });
 
+describe("isDangerousCommand (windows tree deletes)", () => {
+  it("flags CMD recursive directory removal", () => {
+    expect(isDangerousCommand("rd /S /Q C:\\proj\\build")).toBe(true);
+    expect(isDangerousCommand("rmdir /S node_modules")).toBe(true);
+    expect(isDangerousCommand("rd /s /q build")).toBe(true);
+    expect(isDangerousCommand("rd build")).toBe(false); // no /S: empty dirs only
+    expect(isDangerousCommand("rd /?")).toBe(false); // help, not a delete
+    expect(isDangerousCommand("rmdir /Q /?")).toBe(false);
+  });
+
+  it("flags robocopy mirror and purge modes", () => {
+    expect(isDangerousCommand("robocopy C:\\src C:\\dst /MIR")).toBe(true);
+    expect(isDangerousCommand("robocopy C:\\src C:\\dst /E /PURGE")).toBe(true);
+    expect(isDangerousCommand("robocopy src dst /MIR /R:2 /W:1")).toBe(true);
+    expect(isDangerousCommand("robocopy src dst /L /MIR")).toBe(false); // list-only
+    expect(isDangerousCommand("robocopy src dst /E")).toBe(false); // no delete mode
+    expect(isDangerousCommand("robocopy src /MIR")).toBe(false); // no destination
+  });
+
+  it("robocopy /XF /XD lists do not count as paths", () => {
+    // 2 real paths + an exclusion list: still a mirror delete.
+    expect(isDangerousCommand("robocopy C:\\src C:\\dst /MIR /XF *.log temp.tmp")).toBe(true);
+    expect(isDangerousCommand("robocopy C:\\src C:\\dst /MIR /XD node_modules .git")).toBe(true);
+  });
+
+  it("keeps windows deletes out of the read-only class", () => {
+    expect(isReadOnlyCommand("rd /S /Q build")).toBe(false);
+    expect(isReadOnlyCommand("robocopy src dst /MIR")).toBe(false);
+  });
+});
+
 describe("isReadOnlyCommand", () => {
   it("allows known read-only programs and git subcommands", () => {
     expect(isReadOnlyCommand("git status")).toBe(true);

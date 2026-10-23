@@ -183,6 +183,18 @@ export class TokenCounter {
     this.anchorCount = 0;
   }
 
+  /** The live anchor, or null when the count is a pure estimate. */
+  snapshot(): { count: number; tokens: number } | null {
+    return this.anchorCount > 0 ? { count: this.anchorCount, tokens: this.anchorTokens } : null;
+  }
+
+  /** Re-attach an anchor persisted by a previous process (session resume). */
+  restoreAnchor(count: number, tokens: number): void {
+    if (count <= 0 || tokens <= 0) return;
+    this.anchorCount = count;
+    this.anchorTokens = tokens;
+  }
+
   /**
    * Record the provider's exact count for `messagesSent` as they were sent.
    * The anchor covers the assistant reply that is about to be appended, so

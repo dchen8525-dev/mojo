@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   assertPublicUrl,
+  clearWebFetchCacheForTests,
   htmlToText,
   isBlockedAddress,
   parseBing,
@@ -9,6 +10,12 @@ import {
   webSearchTool,
 } from "../src/tools/web.js";
 import type { ToolContext } from "../src/types.js";
+
+// The fetch cache is module-global; drop it before every test so cached
+// responses from one test never leak into another.
+beforeEach(() => {
+  clearWebFetchCacheForTests();
+});
 
 // Keep SSRF validation hermetic: every name resolves to a public address,
 // except *.internal.example which stands in for a private network target.
@@ -340,6 +347,110 @@ describe("SSRF guard", () => {
       expect(r.content).toContain("too many redirects");
     } finally {
       globalThis.fetch = orig;
+    }
+  });
+});
+
+describe("web_fetch cache", () => {
+  afterEach(() => {
+    delete process.env.AGENT_WEBFETCH_CACHE;
+    delete process.env.AGENT_WEBFETCH_CACHE_TTL_MS;
+  });
+
+  function mockFetch(count: { n: number }, body = "cache me") {
+    const orig = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => {
+      count.n++;
+      return new Response(`<html><head><title>C</title></head><body>${body}</body></html>`, {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      });
+    }) as never;
+    return () => {
+      globalThis.fetch = orig;
+    };
+  }
+
+  it("serves a repeated URL from cache and marks the hit", async () => {
+    const count = { n: 0 };
+    const restore = mockFetch(count);
+    try {
+      const r1 = await webFetchTool.execute({ url: "https://example.com/cache-hit" }, ctx);
+      const r2 = await webFetchTool.execute({ url: "https://example.com/cache-hit" }, ctx);
+      expect(count.n).toBe(1);
+      expect(r1.content).not.toContain("(cached)");
+      expect(r2.content).toContain("Source: https://example.com/cache-hit (cached)");
+      expect(r2.content).toContain("cache me");
+    } finally {
+      restore();
+    }
+  });
+
+  it("does not cache HTTP errors", async () => {
+    const count = { n: 0 };
+    const orig = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => {
+      count.n++;
+      return new Response("boom", { status: 500 });
+    }) as never;
+    try {
+      await webFetchTool.execute({ url: "https://example.com/cache-err" }, ctx);
+      const r2 = await webFetchTool.execute({ url: "https://example.com/cache-err" }, ctx);
+      expect(count.n).toBe(2);
+      expect(r2.isError).toBe(true);
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+
+  it("AGENT_WEBFETCH_CACHE=0 disables caching", async () => {
+    process.env.AGENT_WEBFETCH_CACHE = "0";
+    const count = { n: 0 };
+    const restore = mockFetch(count);
+    try {
+      await webFetchTool.execute({ url: "https://example.com/cache-off" }, ctx);
+      const r2 = await webFetchTool.execute({ url: "https://example.com/cache-off" }, ctx);
+      expect(count.n).toBe(2);
+      expect(r2.content).not.toContain("(cached)");
+    } finally {
+      restore();
+    }
+  });
+
+  it("expired entries are re-fetched (TTL)", async () => {
+    process.env.AGENT_WEBFETCH_CACHE_TTL_MS = "1";
+    const count = { n: 0 };
+    const restore = mockFetch(count);
+    try {
+      await webFetchTool.execute({ url: "https://example.com/cache-ttl" }, ctx);
+      await new Promise((r) => setTimeout(r, 10));
+      const r2 = await webFetchTool.execute({ url: "https://example.com/cache-ttl" }, ctx);
+      expect(count.n).toBe(2);
+      expect(r2.content).not.toContain("(cached)");
+    } finally {
+      restore();
+    }
+  });
+
+  it("evicts least-recently-used entries beyond the byte budget", async () => {
+    const count = { n: 0 };
+    // Each body is capped by MAX_BODY_BYTES (~1 MB); nine of them (~9 MB) push
+    // the 8 MB store over budget, evicting the oldest entries.
+    const restore = mockFetch(count, "y".repeat(1_000_000));
+    const urls = Array.from({ length: 9 }, (_, i) => `https://example.com/big-${i}`);
+    try {
+      for (const url of urls) {
+        await webFetchTool.execute({ url, max_chars: 1_000 }, ctx);
+      }
+      const first = await webFetchTool.execute({ url: urls[0], max_chars: 1_000 }, ctx);
+      // The first URL was evicted, so this is a fresh network call...
+      expect(count.n).toBe(10);
+      expect(first.content).not.toContain("(cached)");
+      // ...and the most recent URL is still cached.
+      await webFetchTool.execute({ url: urls[8], max_chars: 1_000 }, ctx);
+      expect(count.n).toBe(10);
+    } finally {
+      restore();
     }
   });
 });

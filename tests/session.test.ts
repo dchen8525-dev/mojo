@@ -617,6 +617,42 @@ describe("goal persistence", () => {
   });
 });
 
+describe("usage & exposed-tools persistence", () => {
+  it("saves and reloads the usage anchor", async () => {
+    const { id } = await session.createSession("usage");
+    expect(await session.saveUsage(id, { messages: 7, tokens: 12_345 })).toBe(true);
+    expect((await session.loadSession(id))?.meta.usage).toEqual({ messages: 7, tokens: 12_345 });
+    expect(await session.saveUsage(id, null)).toBe(true);
+    expect((await session.loadSession(id))?.meta.usage).toBeUndefined();
+  });
+
+  it("drops invalid usage values instead of storing them", async () => {
+    const { id } = await session.createSession("usage");
+    for (const bad of [
+      { messages: 0, tokens: 100 },
+      { messages: -3, tokens: 100 },
+      { messages: Number.NaN, tokens: 100 },
+      { messages: 5, tokens: 0 },
+    ]) {
+      expect(await session.saveUsage(id, bad)).toBe(true);
+      expect((await session.loadSession(id))?.meta.usage).toBeUndefined();
+    }
+  });
+
+  it("returns false for a missing session", async () => {
+    expect(await session.saveUsage("deadbeef", { messages: 1, tokens: 1 })).toBe(false);
+  });
+
+  it("saves, dedupes and clears exposed tool names", async () => {
+    const { id } = await session.createSession("exposed");
+    expect(await session.saveExposedTools(id, [" mcp_a ", "mcp_a", ""])).toBe(true);
+    expect((await session.loadSession(id))?.meta.exposedTools).toEqual(["mcp_a"]);
+    expect(await session.saveExposedTools(id, [])).toBe(true);
+    expect((await session.loadSession(id))?.meta.exposedTools).toBeUndefined();
+    expect(await session.saveExposedTools("deadbeef", ["x"])).toBe(false);
+  });
+});
+
 describe("session titles", () => {
   it("stores a generated title once and never overwrites it", async () => {
     const { id } = await session.createSession("titles");
