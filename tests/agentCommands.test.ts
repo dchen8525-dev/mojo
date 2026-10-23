@@ -76,6 +76,36 @@ vi.mock("../src/cron.js", async () => {
   };
 });
 
+const sampleBreakdown = {
+  window: 200_000,
+  input: 18_400,
+  history: 9_370,
+  anchored: true,
+  system: 2_910,
+  systemStable: 2_600,
+  systemVolatile: 310,
+  tools: 6_120,
+  toolCount: 17,
+  planMode: false,
+  messageCount: 42,
+  historyDetail: {
+    total: 9_370,
+    userText: 1_200,
+    assistantText: 2_100,
+    thinking: 0,
+    toolUse: 900,
+    toolResult: 4_900,
+    images: 0,
+    other: 270,
+  },
+  outputReserve: 16_384,
+  projected: 34_784,
+  compactAt: 150_000,
+  microcompactAt: 140_000,
+  compactRatio: 0.75,
+  microcompactRatio: 0.7,
+};
+
 function fakeAgent(overrides: Partial<Agent> = {}): Agent {
   const costs = { budgetUsd: null as number | null, format: () => "$0.00 total" };
   return {
@@ -88,6 +118,7 @@ function fakeAgent(overrides: Partial<Agent> = {}): Agent {
     switchModel: (spec: string) => ({ provider: "anthropic", model: spec }),
     listModels: async () => ["m1", "m2"],
     tokenEstimate: () => 1234,
+    contextBreakdown: async () => ({ ...sampleBreakdown }),
     compactNow: async () => false,
     review: async () => "review output",
     currentTodos: () => [],
@@ -735,5 +766,40 @@ describe("/doctor", () => {
   it("flags a model override on the doctor model line", async () => {
     const r = await runAgentCommand("/doctor", ctx({ agent: fakeAgent({ provider: "openai", model: "gpt-4o" } as never) }));
     expect(r.text).toContain("openai:gpt-4o");
+  });
+});
+
+describe("/context", () => {
+  it("shows the usage breakdown and both thresholds", async () => {
+    const r = await runAgentCommand("/context", ctx());
+    expect(r.kind).toBe("ok");
+    expect(r.text).toContain("context window 200,000 tokens");
+    expect(r.text).toContain("system prompt");
+    expect(r.text).toContain("stable 2,600 + volatile 310");
+    expect(r.text).toContain("17 tool(s)");
+    expect(r.text).toContain("42 message(s)");
+    expect(r.text).toContain("input total");
+    expect(r.text).toContain("output reserve");
+    expect(r.text).toContain("projected");
+    expect(r.text).toContain("compact at 150,000 (75%)");
+    expect(r.text).toContain("microcompact prune at 140,000 (70%)");
+    expect(r.text).not.toContain("auto-compact will run first");
+  });
+
+  it("warns when the projection crosses the compact threshold", async () => {
+    const r = await runAgentCommand(
+      "/context",
+      ctx({ agent: fakeAgent({ contextBreakdown: async () => ({ ...sampleBreakdown, projected: 160_000 }) } as never) }),
+    );
+    expect(r.kind).toBe("ok");
+    expect(r.text).toContain("auto-compact will run first");
+  });
+
+  it("notes plan mode and the read-only tool set", async () => {
+    const r = await runAgentCommand(
+      "/context",
+      ctx({ agent: fakeAgent({ contextBreakdown: async () => ({ ...sampleBreakdown, planMode: true }) } as never) }),
+    );
+    expect(r.text).toContain("plan mode (read-only tool set)");
   });
 });

@@ -34,6 +34,12 @@ export interface StreamEvents {
   /** Reasoning/thinking tokens streamed before (or between) visible output. */
   onThinkingDelta?: (delta: string) => void;
   onToolUseStart?: (name: string, id: string) => void;
+  /**
+   * A tool call whose arguments are fully received, still inside the model
+   * stream. Safe to *start* only for side-effect-free tools; the final
+   * response may still change (e.g. a truncated batch is dropped).
+   */
+  onToolReady?: (tool: ToolUseBlock) => void;
   /** A transient failure is about to be retried after `delayMs`. */
   onRetry?: (info: RetryInfo) => void;
 }

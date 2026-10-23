@@ -24,6 +24,10 @@ const h = vi.hoisted(() => ({
   sessionMeta: null as null | { meta: { title?: string } },
   /** Test hook, invoked at the start of every fake send(). */
   onSend: null as null | (() => void),
+  /** Test hook, awaited near the end of every fake send() (simulates streaming). */
+  onStream: null as
+    | null
+    | ((events: { onToolReady?: (tu: ToolUseBlock) => void } | undefined, toolUses: ToolUseBlock[]) => Promise<void>),
 }));
 
 vi.mock("../src/llm.js", () => ({
@@ -35,7 +39,13 @@ vi.mock("../src/llm.js", () => ({
     get contextWindow() {
       return 100_000;
     }
-    async send(messages: MessageParam[], system?: string | { stable: string; volatile?: string }, toolList?: Array<{ name: string }>) {
+    async send(
+      messages: MessageParam[],
+      system?: string | { stable: string; volatile?: string },
+      toolList?: Array<{ name: string }>,
+      _signal?: AbortSignal,
+      events?: { onToolReady?: (tu: ToolUseBlock) => void },
+    ) {
       h.onSend?.();
       h.sentMessages.push(structuredClone(messages));
       h.sentTools.push((toolList ?? []).map((t) => t.name));
@@ -51,6 +61,8 @@ vi.mock("../src/llm.js", () => ({
         .filter((b) => (b as { type?: string }).type === "text")
         .map((b) => (b as { text: string }).text)
         .join("");
+      // Emit early tool-readiness mid-"stream" and let the test observe it.
+      await h.onStream?.(events, toolUses);
       return {
         text,
         toolUses,
@@ -194,6 +206,16 @@ beforeAll(() => {
       return { content: `S${input.n}` };
     },
   });
+  registerTool({
+    name: "t_ro_serial",
+    description: "test",
+    isReadOnly: true,
+    inputSchema: { type: "object", properties: {} },
+    async execute(input) {
+      toolEvents.push(`r-run ${input.n}`);
+      return { content: `R${input.n}` };
+    },
+  });
 });
 
 beforeEach(() => {
@@ -208,6 +230,7 @@ beforeEach(() => {
   h.generatedTitles = [];
   h.sessionMeta = null;
   h.onSend = null;
+  h.onStream = null;
   toolEvents.length = 0;
 });
 
@@ -343,6 +366,94 @@ describe("Agent.chat tool scheduling", () => {
     const results = lastSentContent() as Array<{ tool_use_id: string; content: string }>;
     expect(results.map((r) => r.tool_use_id)).toEqual(["tu0", "tu1", "tu2"]);
     expect(results.map((r) => r.content)).toEqual(["P1", "S9", "P2"]);
+  });
+});
+
+describe("Agent.chat early read-only execution", () => {
+  it("starts parallel-safe read-only tools before the response finishes", async () => {
+    let eventsAtSendReturn: string[] = [];
+    h.onStream = async (events, toolUses) => {
+      if (!toolUses.length) return; // final text round
+      for (const tu of toolUses) events?.onToolReady?.(tu);
+      // Longer than the tool's 60ms: it must finish while send() still runs.
+      await new Promise((r) => setTimeout(r, 120));
+      eventsAtSendReturn = [...toolEvents];
+    };
+    h.turns = [toolTurn([["t_parallel", { n: 7 }]]), textTurn("done")];
+    await makeAgent().chat("go");
+    expect(eventsAtSendReturn).toEqual(["p-start 7", "p-end 7"]);
+    // The early result was consumed, not executed a second time by the waves.
+    expect(toolEvents.filter((e) => e === "p-start 7")).toHaveLength(1);
+    const results = lastSentContent() as Array<{ content: string }>;
+    expect(results.map((r) => r.content)).toEqual(["P7"]);
+  });
+
+  it("leaves mutating and non-parallel-safe tools to the normal waves", async () => {
+    let eventsAtSendReturn: string[] = [];
+    h.onStream = async (events, toolUses) => {
+      if (!toolUses.length) return; // final text round
+      for (const tu of toolUses) events?.onToolReady?.(tu);
+      await new Promise((r) => setTimeout(r, 20));
+      eventsAtSendReturn = [...toolEvents];
+    };
+    h.turns = [
+      toolTurn([
+        ["t_serial", { n: 1 }],
+        ["t_ro_serial", { n: 2 }],
+      ]),
+      textTurn("done"),
+    ];
+    await makeAgent().chat("go");
+    expect(eventsAtSendReturn).toEqual([]);
+    expect(toolEvents).toEqual(["s-run 1", "r-run 2"]);
+  });
+
+  it("keeps the call order when early and normal tools are mixed", async () => {
+    h.onStream = async (events, toolUses) => {
+      if (!toolUses.length) return; // final text round
+      events?.onToolReady?.(toolUses[1]);
+      await new Promise((r) => setTimeout(r, 100));
+    };
+    h.turns = [
+      toolTurn([
+        ["t_serial", { n: 1 }],
+        ["t_parallel", { n: 2 }],
+      ]),
+      textTurn("done"),
+    ];
+    await makeAgent().chat("go");
+    const results = lastSentContent() as Array<{ tool_use_id: string; content: string }>;
+    expect(results.map((r) => r.tool_use_id)).toEqual(["tu0", "tu1"]);
+    expect(results.map((r) => r.content)).toEqual(["S1", "P2"]);
+  });
+});
+
+describe("Agent.contextBreakdown", () => {
+  it("splits an unanchored footprint into system, tools, and history", async () => {
+    const b = await makeAgent().contextBreakdown();
+    expect(b.window).toBe(100_000);
+    expect(b.anchored).toBe(false);
+    expect(b.systemStable).toBeGreaterThan(0);
+    expect(b.toolCount).toBeGreaterThan(0);
+    expect(b.tools).toBeGreaterThan(0);
+    expect(b.input).toBe(b.system + b.tools + b.history);
+    expect(b.projected).toBe(b.input + b.outputReserve);
+    expect(b.compactAt).toBe(75_000);
+    expect(b.microcompactAt).toBe(70_000);
+    expect(b.historyDetail.total).toBe(0);
+  });
+
+  it("uses the provider anchor after a turn and keeps the parts additive", async () => {
+    h.turns = [textTurn("ok", 50_000, 20)];
+    const agent = makeAgent();
+    await agent.chat("hello");
+    const b = await agent.contextBreakdown();
+    expect(b.anchored).toBe(true);
+    expect(b.input).toBe(agent.tokenEstimate());
+    expect(b.input).toBe(b.system + b.tools + b.history);
+    expect(b.history).toBeGreaterThan(0);
+    expect(b.projected).toBe(b.input + b.outputReserve);
+    expect(b.historyDetail.total).toBeGreaterThan(0);
   });
 });
 

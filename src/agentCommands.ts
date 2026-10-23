@@ -74,7 +74,7 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       return {
         kind: "ok",
         text: [
-          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp [trust|revoke] · /lsp · /compact · /review [base] [focus] · /permissions [clear] · /hooks [trust|revoke] · /sessions [--cwd <dir>] [--title <词>] [--tag <tag>] [--fork-of <id>] [N] · /search [-r] <term> · /resume <id> · /fork [N] [名称] · /rename <名称> · /tag [+<tag> | -<tag> | clear] · /export [md|json] [路径] · /todos · /cron [add <分> <时> <日> <月> <周> <提示词> | on|off|run|rm <id>] · /dream [-y] · /doctor · /undo [-y] [--force] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
+          "/help · /model [name|provider:name|sonnet|opus|haiku|gpt] · /auto [on|off] · /yolo · /plan [on|off] · /mcp [trust|revoke] · /lsp · /compact · /context · /review [base] [focus] · /permissions [clear] · /hooks [trust|revoke] · /sessions [--cwd <dir>] [--title <词>] [--tag <tag>] [--fork-of <id>] [N] · /search [-r] <term> · /resume <id> · /fork [N] [名称] · /rename <名称> · /tag [+<tag> | -<tag> | clear] · /export [md|json] [路径] · /todos · /cron [add <分> <时> <日> <月> <周> <提示词> | on|off|run|rm <id>] · /dream [-y] · /doctor · /undo [-y] [--force] · /cost [usd | all | by session|model|day | export [path]] · /clear · /quit",
           "file refs: @path/to/file inlines the file; Ctrl+V pastes a clipboard image",
           custom ? `custom commands: ${custom}` : "",
         ]
@@ -283,17 +283,26 @@ export async function runAgentCommand(line: string, ctx: CommandContext): Promis
       }
     }
     case "context": {
-      const used = agent.tokenEstimate();
-      const window = agent.contextWindow;
-      const pct = (used / window) * 100;
-      return {
-        kind: "ok",
-        text:
-          `context: ${used.toLocaleString()} / ${window.toLocaleString()} tokens (${pct.toFixed(1)}%)\n` +
-          `${agent.debugMessages().length} messages loaded\n` +
-          `— tokens include the API's exact input count as an anchor plus a CJK-aware estimate of anything not yet billed\n` +
-          `— at ~${(COMPACT_RATIO * 100).toFixed(0)}% of the window the agent auto-compacts; /compact forces it early`,
-      };
+      const b = await agent.contextBreakdown();
+      const fmt = (n: number) => n.toLocaleString();
+      const pct = (n: number) => `${((n / b.window) * 100).toFixed(1)}%`;
+      const d = b.historyDetail;
+      const free = Math.max(0, b.window - b.projected);
+      const lines = [
+        `context window ${fmt(b.window)} tokens${b.planMode ? " · plan mode (read-only tool set)" : ""}`,
+        `  system prompt  ${fmt(b.system).padStart(9)}  ${pct(b.system).padStart(6)}  stable ${fmt(b.systemStable)} + volatile ${fmt(b.systemVolatile)}`,
+        `  tool schemas   ${fmt(b.tools).padStart(9)}  ${pct(b.tools).padStart(6)}  ${b.toolCount} tool(s)`,
+        `  messages       ${fmt(b.history).padStart(9)}  ${pct(b.history).padStart(6)}  ${b.messageCount} message(s)`,
+        `    ≈ user ${fmt(d.userText)} · assistant ${fmt(d.assistantText)} · thinking ${fmt(d.thinking)} · tool calls ${fmt(d.toolUse)} · tool results ${fmt(d.toolResult)} · images ${fmt(d.images)}`,
+        `  input total    ${fmt(b.input).padStart(9)}  ${pct(b.input).padStart(6)}  ${b.anchored ? "provider count + tail estimate" : "estimate (no provider count yet)"}`,
+        `  output reserve ${fmt(b.outputReserve).padStart(9)}  ${pct(b.outputReserve).padStart(6)}`,
+        `  projected      ${fmt(b.projected).padStart(9)}  ${pct(b.projected).padStart(6)}  input + reserve`,
+        `  free           ${fmt(free).padStart(9)}  ${pct(free).padStart(6)}`,
+        `compact at ${fmt(b.compactAt)} (${(b.compactRatio * 100).toFixed(0)}%) · microcompact prune at ${fmt(b.microcompactAt)} (${(b.microcompactRatio * 100).toFixed(0)}%)`,
+        b.projected > b.compactAt ? "⚠ the next request is projected past the compact threshold — auto-compact will run first" : "",
+        "message categories are estimates; input total uses the provider's exact count when available.",
+      ].filter(Boolean);
+      return { kind: "ok", text: lines.join("\n") };
     }
     case "permissions": {
       if (rest[0] === "clear") {

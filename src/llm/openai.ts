@@ -4,6 +4,7 @@ import type { AssistantTurn, LLMBackend, Provider, StreamEvents, SystemPrompt } 
 import { StreamInterrupted, normalizeSystem } from "./types.js";
 import { lookupModel } from "./models.js";
 import { withIdleTimeout } from "./idle.js";
+import { readyToolCall } from "./toolStream.js";
 
 type ChatContentPart =
   | { type: "text"; text: string }
@@ -224,6 +225,8 @@ export class OpenAiBackend implements LLMBackend {
     let cacheReadTokens = 0;
     let finishReason: string | null = null;
     const toolCalls: PartialToolCall[] = [];
+    // Calls already announced via onToolReady (never announced twice).
+    const readyEmitted = new Set<number>();
 
     try {
       for await (const chunk of withIdleTimeout(stream, idleMs, () => ac.abort())) {
@@ -236,7 +239,18 @@ export class OpenAiBackend implements LLMBackend {
         // chain of thought on a separate field; forward it so the UI can show it.
         const reasoning = (delta as { reasoning_content?: string } | undefined)?.reasoning_content;
         if (reasoning) events?.onThinkingDelta?.(reasoning);
-        for (const tc of delta?.tool_calls ?? []) mergeToolCallDelta(toolCalls, tc);
+        for (const tc of delta?.tool_calls ?? []) {
+          mergeToolCallDelta(toolCalls, tc);
+          // Parallel calls stream one after another; a new index means every
+          // earlier call's arguments are complete and can start early.
+          if (typeof tc.index !== "number") continue;
+          for (const call of toolCalls) {
+            if (call.index >= tc.index || readyEmitted.has(call.index)) continue;
+            readyEmitted.add(call.index);
+            const ready = readyToolCall(call);
+            if (ready) events?.onToolReady?.(ready);
+          }
+        }
         if (chunk.choices[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
         if (chunk.usage) {
           inputTokens = chunk.usage.prompt_tokens ?? inputTokens;

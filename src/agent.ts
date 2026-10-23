@@ -9,7 +9,7 @@ import { enforceSessionMediaBudget, mediaLimits, validateImages } from "./mediaB
 import { LLM, type Config, type StreamEvents } from "./llm.js";
 import { CancelledStreamError } from "./llm/types.js";
 import { lookupModel } from "./llm/models.js";
-import type { SystemPrompt } from "./llm/types.js";
+import type { AssistantTurn, SystemPrompt } from "./llm/types.js";
 import { deferredTools, getTool, tools, todoStore, isExposed } from "./tools/index.js";
 import { TURN_COMPLETION, toolGuidance } from "./prompts.js";
 import { planWaves, runWave } from "./scheduler.js";
@@ -22,7 +22,7 @@ import { subagentTasks } from "./taskRegistry.js";
 import { exitPlanTool } from "./tools/exitPlan.js";
 import type { PermissionManager } from "./permissions.js";
 import type { HookManager } from "./hooks.js";
-import { TokenCounter } from "./tokens.js";
+import { TokenCounter, estimateHistoryBreakdown, estimateTextTokens, estimateToolTokens, type HistoryBreakdown } from "./tokens.js";
 import { FileStateStore } from "./fileState.js";
 import { CheckpointStore } from "./checkpoint.js";
 import { CostTracker } from "./cost.js";
@@ -113,6 +113,31 @@ export interface AgentEvents extends StreamEvents {
   onPlanApproved?: () => void;
   /** The auto-titler named this session (fires after the first turn, in the background). */
   onSessionTitle?: (title: string) => void;
+}
+
+/** Cost composition of the next request, as shown by /context. */
+export interface ContextBreakdown {
+  window: number;
+  /** Estimated input footprint of the next request (system + tools + history). */
+  input: number;
+  /** Message-history share of `input` (residual when the provider anchor covers everything). */
+  history: number;
+  /** True when a provider-reported input count anchors the total. */
+  anchored: boolean;
+  system: number;
+  systemStable: number;
+  systemVolatile: number;
+  tools: number;
+  toolCount: number;
+  planMode: boolean;
+  messageCount: number;
+  historyDetail: HistoryBreakdown;
+  outputReserve: number;
+  projected: number;
+  compactAt: number;
+  microcompactAt: number;
+  compactRatio: number;
+  microcompactRatio: number;
 }
 
 export class Agent {
@@ -419,6 +444,55 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
     return this.llm.contextWindow;
   }
 
+  /** The tool list the model sees this round (plan mode narrows to read-only). */
+  private activeTools(): typeof tools {
+    return this.planMode
+      ? [...tools.filter((t) => t.isReadOnly), exitPlanTool]
+      : tools.filter((t) => !t.deferred || isExposed(t.name));
+  }
+
+  /**
+   * /context: split the next request's footprint into its parts. The
+   * provider's input count is authoritative but indistinguishable by section,
+   * so prompt/tools/history are CJK-aware estimates (the message categories
+   * are estimates too and may not sum exactly to the history row).
+   */
+  async contextBreakdown(): Promise<ContextBreakdown> {
+    const active = this.activeTools();
+    const prompt = await this.systemPrompt(active.map((t) => t.name));
+    const systemStable = estimateTextTokens(prompt.stable);
+    const systemVolatile = estimateTextTokens(prompt.volatile ?? "");
+    const system = systemStable + systemVolatile;
+    const toolTokens = estimateToolTokens(active);
+    const counted = this.tokenEstimate();
+    const anchored = this.tokens.anchored;
+    // The API input count already includes system + tools; only a pure
+    // history estimate (fresh or just-compacted) needs them added on top.
+    const input = anchored ? counted : counted + system + toolTokens;
+    const history = anchored ? Math.max(0, input - system - toolTokens) : counted;
+    const outputReserve = this.outputReserve();
+    return {
+      window: this.contextWindow,
+      input,
+      history,
+      anchored,
+      system,
+      systemStable,
+      systemVolatile,
+      tools: toolTokens,
+      toolCount: active.length,
+      planMode: this.planMode,
+      messageCount: this.messages.length,
+      historyDetail: estimateHistoryBreakdown(this.messages),
+      outputReserve,
+      projected: input + outputReserve,
+      compactAt: Math.floor(this.contextWindow * COMPACT_RATIO),
+      microcompactAt: Math.floor(this.contextWindow * MICROCOMPACT_RATIO),
+      compactRatio: COMPACT_RATIO,
+      microcompactRatio: MICROCOMPACT_RATIO,
+    };
+  }
+
   /** Best-effort: learn the context window from the endpoint (cached per model). */
   async refreshModelMeta(force = false): Promise<void> {
     await this.llm.refreshModelMeta(force);
@@ -701,16 +775,48 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
         if (enforceSessionMediaBudget(this.messages, mediaLimits()) > 0) this.tokens.invalidate();
         // Deferred tools (bulky MCP servers) stay out of the tool list until
         // tool_search exposes them; the search tool itself is always visible.
-        const activeTools = this.planMode
-          ? [...tools.filter((t) => t.isReadOnly), exitPlanTool]
-          : tools.filter((t) => !t.deferred || isExposed(t.name));
-        const turn = await this.llm.send(
-          this.messages,
-          await this.systemPrompt(activeTools.map((t) => t.name)),
-          activeTools,
-          signal,
-          events,
-        );
+        const activeTools = this.activeTools();
+        // Read-only, parallel-safe calls may start the moment their arguments
+        // are complete, without waiting for the whole response. They are
+        // matched back by id below; everything else runs in the normal waves.
+        const earlyRuns = new Map<string, Promise<ToolResultBlockParam>>();
+        const earlyAbort = new AbortController();
+        const forwardAbort = () => earlyAbort.abort();
+        if (signal?.aborted) earlyAbort.abort();
+        else signal?.addEventListener("abort", forwardAbort, { once: true });
+        let turn: AssistantTurn;
+        try {
+          turn = await this.llm.send(
+            this.messages,
+            await this.systemPrompt(activeTools.map((t) => t.name)),
+            activeTools,
+            signal,
+            {
+              ...events,
+              onToolReady: (tu) => {
+                const tool = getTool(tu.name);
+                if (!tool || !tool.isReadOnly || !tool.parallelSafe || !tu.id) return;
+                if (earlyAbort.signal.aborted || earlyRuns.has(tu.id)) return;
+                earlyRuns.set(
+                  tu.id,
+                  this.runTool(tu, earlyAbort.signal, events).catch(
+                    (err): ToolResultBlockParam => ({
+                      type: "tool_result",
+                      tool_use_id: tu.id,
+                      content: `Tool crashed: ${err instanceof Error ? err.message : String(err)}`,
+                      is_error: true,
+                    }),
+                  ),
+                );
+              },
+            },
+          );
+        } catch (err) {
+          earlyAbort.abort();
+          throw err;
+        } finally {
+          signal?.removeEventListener("abort", forwardAbort);
+        }
         this.tokens.setAnchor(sent, turn.inputTokens, turn.outputTokens);
         events?.onUsage?.(turn.inputTokens, turn.outputTokens);
         const spec = `${this.llm.provider}:${this.llm.model}`;
@@ -771,14 +877,23 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
         // and runs alone, never overlapping anything else.
         const repeatHits = turn.toolUses.map((tu) => repetitions.observe(tu.name, tu.input));
         const results: ToolResultBlockParam[] = new Array(turn.toolUses.length);
+        // Calls announced mid-stream are already running (or done); keep their
+        // results in place and schedule only the rest.
+        const pending: Array<{ tu: ToolUseBlock; index: number }> = [];
+        for (let i = 0; i < turn.toolUses.length; i++) {
+          const early = earlyRuns.get(turn.toolUses[i].id);
+          if (early) results[i] = await early;
+          else pending.push({ tu: turn.toolUses[i], index: i });
+        }
         const waves = planWaves(
-          turn.toolUses.map((tu) => tu.name),
+          pending.map((p) => p.tu.name),
           (name) => !!getTool(name)?.parallelSafe,
         );
         for (const wave of waves) {
           await runWave(
-            wave.map((i) => async () => {
-              results[i] = await this.runTool(turn.toolUses[i], signal, events);
+            wave.map((w) => async () => {
+              const { tu, index } = pending[w];
+              results[index] = await this.runTool(tu, signal, events);
             }),
           );
         }

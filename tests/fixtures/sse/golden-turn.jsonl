@@ -2,8 +2,8 @@
 {"event":"round_start","data":{"round":1}}
 {"event":"text_delta","data":{"d":"Let me look at the notes. "}}
 {"event":"tool_use_start","data":{"name":"read_file","id":"toolu_golden_1","round":1}}
-{"event":"usage","data":{"input":12,"output":3}}
 {"event":"tool_start","data":{"id":"toolu_golden_1","name":"read_file","inputPreview":"{\"path\":\"notes.txt\"}","input":{"path":"notes.txt"}}}
+{"event":"usage","data":{"input":12,"output":3}}
 {"event":"tool_end","data":{"id":"toolu_golden_1","name":"read_file","ok":true,"preview":"notes.txt\n1\tgolden content\n2\t","result":"notes.txt\n1\tgolden content\n2\t"}}
 {"event":"round_start","data":{"round":2}}
 {"event":"text_delta","data":{"d":"The notes say: golden content."}}

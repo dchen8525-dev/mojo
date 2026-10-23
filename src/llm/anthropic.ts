@@ -5,6 +5,7 @@ import type { AssistantTurn, LLMBackend, Provider, StreamEvents, SystemPrompt } 
 import { StreamInterrupted, normalizeSystem } from "./types.js";
 import { lookupModel } from "./models.js";
 import { withIdleTimeout } from "./idle.js";
+import { ToolBlockAccumulator } from "./toolStream.js";
 
 const CACHE_CONTROL = { type: "ephemeral" as const };
 
@@ -92,12 +93,21 @@ export class AnthropicBackend implements LLMBackend {
     let cacheReadTokens = 0;
     let cacheWriteTokens = 0;
     let toolStarted = false;
+    // Announces each tool call at content_block_stop, before the stream ends.
+    const readyTools = new ToolBlockAccumulator(events);
 
     try {
       for await (const event of withIdleTimeout(stream, idleMs, () => ac.abort())) {
         if (event.type === "content_block_start" && event.content_block.type === "tool_use") {
           toolStarted = true;
+          readyTools.start(event.index, event.content_block);
           events?.onToolUseStart?.(event.content_block.name, event.content_block.id);
+        }
+        if (event.type === "content_block_delta" && event.delta.type === "input_json_delta") {
+          readyTools.append(event.index, event.delta.partial_json);
+        }
+        if (event.type === "content_block_stop") {
+          readyTools.stop(event.index);
         }
         if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
           text += event.delta.text;

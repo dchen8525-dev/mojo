@@ -1,4 +1,4 @@
-import type { MessageParam } from "./types.js";
+import type { MessageParam, Tool } from "./types.js";
 
 /**
  * Token accounting.
@@ -74,6 +74,96 @@ export function estimateMessagesTokens(messages: MessageParam[]): number {
   return n;
 }
 
+/** Same units as the request body: name, description and the JSON schema. */
+export function estimateToolTokens(tools: readonly Tool[]): number {
+  let n = 0;
+  for (const tool of tools) {
+    n += 12 + estimateTextTokens(tool.name) + estimateTextTokens(tool.description ?? "");
+    try {
+      n += estimateTextTokens(JSON.stringify(tool.inputSchema ?? {}));
+    } catch {
+      n += 64;
+    }
+  }
+  return n;
+}
+
+export interface HistoryBreakdown {
+  total: number;
+  userText: number;
+  assistantText: number;
+  thinking: number;
+  toolUse: number;
+  toolResult: number;
+  images: number;
+  other: number;
+}
+
+/**
+ * Per-category estimate of the history (what /context shows under the
+ * anchored footprint). Category sums are estimates and need not equal the
+ * provider's exact input count.
+ */
+export function estimateHistoryBreakdown(messages: MessageParam[]): HistoryBreakdown {
+  const out: HistoryBreakdown = {
+    total: 0,
+    userText: 0,
+    assistantText: 0,
+    thinking: 0,
+    toolUse: 0,
+    toolResult: 0,
+    images: 0,
+    other: 0,
+  };
+  const add = (key: keyof Omit<HistoryBreakdown, "total">, n: number) => {
+    out[key] += n;
+    out.total += n;
+  };
+  for (const m of messages) {
+    add("other", 4); // per-message framing
+    const content = m.content as unknown;
+    if (typeof content === "string") {
+      add(m.role === "assistant" ? "assistantText" : "userText", estimateTextTokens(content));
+      continue;
+    }
+    for (const block of content as Array<Record<string, unknown>>) {
+      switch (block.type) {
+        case "text":
+          add(m.role === "assistant" ? "assistantText" : "userText", estimateTextTokens(String(block.text ?? "")));
+          break;
+        case "thinking":
+          add("thinking", estimateTextTokens(String(block.thinking ?? "")));
+          break;
+        case "tool_use":
+          add("toolUse", estimateTextTokens(String(block.name ?? "")) + 12);
+          try {
+            add("toolUse", estimateTextTokens(JSON.stringify(block.input ?? {})));
+          } catch {
+            add("toolUse", 32);
+          }
+          break;
+        case "tool_result": {
+          add("toolResult", 8);
+          const inner = block.content;
+          if (typeof inner === "string") add("toolResult", estimateTextTokens(inner));
+          else if (Array.isArray(inner))
+            for (const part of inner as Array<Record<string, unknown>>) {
+              if (part.type === "text") add("toolResult", estimateTextTokens(String(part.text ?? "")));
+              else if (part.type === "image") add("images", 1600);
+            }
+          break;
+        }
+        case "image":
+          add("images", 1600);
+          break;
+        default:
+          add("other", estimateTextTokens(JSON.stringify(block)));
+      }
+    }
+  }
+  return out;
+}
+
 /**
  * Tracks an exact anchor reported by the API and estimates only what has been
  * appended since. Invalidated whenever history is rewritten (compaction,
@@ -82,6 +172,11 @@ export function estimateMessagesTokens(messages: MessageParam[]): number {
 export class TokenCounter {
   private anchorTokens = 0;
   private anchorCount = 0;
+
+  /** True when a provider-reported usage anchor is driving the count. */
+  get anchored(): boolean {
+    return this.anchorCount > 0;
+  }
 
   invalidate() {
     this.anchorTokens = 0;

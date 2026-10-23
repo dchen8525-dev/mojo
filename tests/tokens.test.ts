@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { estimateTextTokens, estimateMessageTokens, estimateMessagesTokens, TokenCounter } from "../src/tokens.js";
-import type { MessageParam } from "../src/types.js";
+import {
+  estimateTextTokens,
+  estimateMessageTokens,
+  estimateMessagesTokens,
+  estimateHistoryBreakdown,
+  estimateToolTokens,
+  TokenCounter,
+} from "../src/tokens.js";
+import type { MessageParam, Tool } from "../src/types.js";
 
 describe("estimateTextTokens", () => {
   it("returns 0 for empty text", () => {
@@ -46,13 +53,78 @@ describe("estimateMessageTokens", () => {
   });
 });
 
+describe("estimateToolTokens", () => {
+  const tool = {
+    name: "read_file",
+    description: "Read a file from disk",
+    inputSchema: { type: "object", properties: { path: { type: "string" } } },
+  } as unknown as Tool;
+
+  it("returns 0 for an empty tool list", () => {
+    expect(estimateToolTokens([])).toBe(0);
+  });
+
+  it("charges name, description, and schema per tool", () => {
+    expect(estimateToolTokens([tool])).toBeGreaterThan(20);
+    expect(estimateToolTokens([tool, tool])).toBe(estimateToolTokens([tool]) * 2);
+  });
+});
+
+describe("estimateHistoryBreakdown", () => {
+  it("agrees with estimateMessagesTokens while splitting categories", () => {
+    const messages = [
+      { role: "user", content: "hello" },
+      { role: "assistant", content: [{ type: "text", text: "hi" }] },
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read_file", input: { path: "a.ts" } }] },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "t1", content: "file body" },
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "AAA" } },
+        ],
+      },
+    ] as unknown as MessageParam[];
+    const b = estimateHistoryBreakdown(messages);
+    expect(b.total).toBe(estimateMessagesTokens(messages));
+    expect(b.total).toBe(
+      b.userText + b.assistantText + b.thinking + b.toolUse + b.toolResult + b.images + b.other,
+    );
+    expect(b.userText).toBeGreaterThan(0);
+    expect(b.assistantText).toBeGreaterThan(0);
+    expect(b.toolUse).toBeGreaterThan(0);
+    expect(b.toolResult).toBeGreaterThan(0);
+    expect(b.images).toBe(1600);
+    expect(b.thinking).toBe(0);
+  });
+
+  it("counts images nested inside tool results", () => {
+    const messages = [
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "t1",
+            content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "AAA" } }],
+          },
+        ],
+      },
+    ] as unknown as MessageParam[];
+    const b = estimateHistoryBreakdown(messages);
+    expect(b.images).toBe(1600);
+    expect(b.toolResult).toBe(8);
+  });
+});
+
 describe("TokenCounter", () => {
   const msg = (text: string): MessageParam => ({ role: "user", content: text });
 
   it("returns the exact anchor when nothing was appended", () => {
     const c = new TokenCounter();
     const messages = [msg("one"), msg("two")];
+    expect(c.anchored).toBe(false);
     c.setAnchor(messages.length, 1000, 50);
+    expect(c.anchored).toBe(true);
     messages.push({ role: "assistant", content: "reply" }); // the reply the anchor covers
     expect(c.count(messages)).toBe(1050);
   });
