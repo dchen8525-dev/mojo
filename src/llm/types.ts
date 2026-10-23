@@ -143,6 +143,14 @@ export function normalizeSystem(system: string | SystemPrompt): Required<SystemP
   return typeof system === "string" ? { stable: system, volatile: "" } : { stable: system.stable, volatile: system.volatile ?? "" };
 }
 
+/** Per-request overrides; auxiliary (title/verify/summarize) calls use these to stay cheap. */
+export interface SendOptions {
+  /** Cap max output tokens for this request. */
+  maxOutput?: number;
+  /** Explicitly disable extended thinking even when AGENT_THINKING is on. */
+  thinking?: boolean;
+}
+
 export interface LLMBackend {
   readonly provider: Provider;
   model: string;
@@ -154,6 +162,7 @@ export interface LLMBackend {
     events?: StreamEvents,
     /** Abort the request when no stream event arrives for this long (0 = off). */
     idleMs?: number,
+    opts?: SendOptions,
   ): Promise<AssistantTurn>;
   /** Model ids available on this endpoint (best-effort; may throw). */
   listModels?(signal?: AbortSignal): Promise<string[]>;

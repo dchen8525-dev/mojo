@@ -19,7 +19,8 @@ import { CancelledStreamError, StreamRecoveryExhausted } from "./llm/types.js";
 import { lookupModel } from "./llm/models.js";
 import type { AssistantTurn, SystemPrompt } from "./llm/types.js";
 import { deferredTools, getTool, tools, todoStore, isExposed } from "./tools/index.js";
-import { TURN_COMPLETION, toolGuidance } from "./prompts.js";
+import { COMMUNICATION, TURN_COMPLETION, toolGuidance } from "./prompts.js";
+import { auxiliarySendOptions } from "./auxiliary.js";
 import { planWaves, runWave } from "./scheduler.js";
 import { systemReminder } from "./reminder.js";
 import {
@@ -475,7 +476,9 @@ Rules:
 3. Use todo_write for multi-step tasks; keep exactly one item in_progress.
 4. Never commit, push, delete files, or touch credentials unless the user explicitly asks.
 5. Be concise in replies: results and decisions, not narration.${planRules}
-${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().length > 0 })}`;
+${TURN_COMPLETION}
+
+${COMMUNICATION}${toolGuidance(toolNames, { hasDeferred: deferredTools().length > 0 })}`;
     const goalBlock = goalStateBlock(this.goal);
     const volatile =
       `<session_status>\n` +
@@ -660,6 +663,8 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
         SUMMARIZER_SYSTEM,
         [],
         signal,
+        undefined,
+        auxiliarySendOptions(),
       );
       this.costs.record(`${this.llm.provider}:${this.llm.model}`, {
         input: res.inputTokens,
@@ -1411,6 +1416,8 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
         GOAL_VERIFIER_SYSTEM,
         [],
         ctrl.signal,
+        undefined,
+        auxiliarySendOptions(),
       );
       goal.tokensUsed += res.inputTokens + res.outputTokens;
       goal.updatedAt = new Date().toISOString();
@@ -1473,6 +1480,8 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
           EXTRACTION_SYSTEM,
           [],
           undefined,
+          undefined,
+          auxiliarySendOptions(),
         );
         self.costs.record(`${self.llm.provider}:${self.llm.model}`, {
           input: res.inputTokens,

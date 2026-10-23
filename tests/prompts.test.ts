@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TURN_COMPLETION, toolGuidance } from "../src/prompts.js";
+import { COMMUNICATION, TURN_COMPLETION, toolGuidance } from "../src/prompts.js";
 
 describe("toolGuidance", () => {
   it("emits a block only when one of its tools is active", () => {
@@ -26,11 +26,19 @@ describe("toolGuidance", () => {
     expect(toolGuidance(["read_session"])).toContain("Past sessions (read_session):");
     expect(toolGuidance(["node_repl"])).toContain("Persistent Node REPL (node_repl):");
     expect(toolGuidance(["read_file"], { hasDeferred: true })).toContain("Deferred tools:");
+    expect(toolGuidance(["apply_patch"])).toContain("apply_patch");
+    expect(toolGuidance(["edit_file"])).not.toContain("apply_patch");
   });
 
   it("keeps the turn-completion contract non-empty and instruction-shaped", () => {
     expect(TURN_COMPLETION).toContain("Completing a turn:");
     expect(TURN_COMPLETION).toContain("verified");
     expect(TURN_COMPLETION).toContain("block");
+  });
+
+  it("sets communication discipline for final messages", () => {
+    expect(COMMUNICATION).toContain("Communicating with the user:");
+    expect(COMMUNICATION).toContain("final text message");
+    expect(COMMUNICATION).toContain("Lead with the outcome");
   });
 });

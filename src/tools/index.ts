@@ -3,6 +3,7 @@ import { readFileTool } from "./read.js";
 import { readSessionTool } from "./readSession.js";
 import { askUserTool } from "./askUser.js";
 import { writeFileTool, editFileTool } from "./write.js";
+import { applyPatchTool } from "./patch.js";
 import { bashTool, bashOutputTool, bashKillTool } from "./bash.js";
 import { nodeReplTool } from "./nodeRepl.js";
 import { globTool } from "./glob.js";
@@ -38,6 +39,7 @@ export const tools: Tool[] = [
   writeFileTool,
   editFileTool,
   multiEditTool,
+  applyPatchTool,
   getDiagnosticsTool,
   gitStatusTool,
   gitDiffTool,

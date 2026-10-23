@@ -251,6 +251,10 @@ class NodeReplKernel {
       };
       this.pending = { id, logs: [], stderr: [], chars: 0, timer, signal, onAbort, resolve };
       signal?.addEventListener("abort", onAbort, { once: true });
+      // spawnKernel re-armed the idle timer; a request is now in flight, so it
+      // must not fire mid-execution on a loaded machine.
+      if (this.idleTimer) clearTimeout(this.idleTimer);
+      this.idleTimer = undefined;
       try {
         child.stdin.write(JSON.stringify({ id, code }) + "\n");
       } catch (err) {
@@ -343,7 +347,7 @@ class NodeReplKernel {
   private touch(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = undefined;
-    if (this.idleMs <= 0) return;
+    if (this.idleMs <= 0 || this.pending) return;
     this.idleTimer = setTimeout(() => {
       this.dispose();
       this.onIdle();

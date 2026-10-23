@@ -1,6 +1,8 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { Tool } from "./types.js";
+import type { SendOptions } from "./llm/types.js";
+import { auxiliarySendOptions } from "./auxiliary.js";
 import { atomicWriteFile } from "./atomicWrite.js";
 import { projectMemoryPath, userMemoryPath } from "./memory.js";
 
@@ -34,6 +36,8 @@ export interface LlmLite {
     system: string,
     tools: unknown[],
     signal?: AbortSignal,
+    events?: unknown,
+    opts?: SendOptions,
   ): Promise<{ content: Array<{ type: string; text?: string }>; inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number }>;
 }
 
@@ -269,7 +273,7 @@ export async function proposeDream(cwd: string, llm: LlmLite): Promise<string | 
     const file = projectMemoryPath(cwd);
     const current = await fs.readFile(file, "utf8").catch(() => "");
     if (!current.trim()) return null;
-    const res = await llm.send([{ role: "user", content: `Consolidate this memory file:\n\n${current.slice(0, 300_000)}` }], DREAM_SYSTEM, [], undefined);
+    const res = await llm.send([{ role: "user", content: `Consolidate this memory file:\n\n${current.slice(0, 300_000)}` }], DREAM_SYSTEM, [], undefined, undefined, auxiliarySendOptions());
     const text = res.content
       .filter((b) => b.type === "text")
       .map((b) => String(b.text ?? ""))

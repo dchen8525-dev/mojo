@@ -18,6 +18,7 @@ const h = vi.hoisted(() => ({
   sentMessages: [] as MessageParam[][],
   sentTools: [] as string[][],
   sentSystems: [] as string[],
+  sentOpts: [] as Array<unknown>,
   recalled: "",
   appended: [] as MessageParam[],
   savedTodos: [] as Array<{ id: string; todos: unknown }>,
@@ -51,10 +52,12 @@ vi.mock("../src/llm.js", async (importOriginal) => {
       toolList?: Array<{ name: string }>,
       _signal?: AbortSignal,
       events?: { onToolReady?: (tu: ToolUseBlock) => void },
+      opts?: unknown,
     ) {
       h.onSend?.();
       h.sentMessages.push(structuredClone(messages));
       h.sentTools.push((toolList ?? []).map((t) => t.name));
+      h.sentOpts.push(opts);
       const sys =
         typeof system === "string" || !system ? (system ?? "") : `${system.stable}\n${system.volatile ?? ""}`;
       h.sentSystems.push(sys);
@@ -238,6 +241,7 @@ beforeEach(() => {
   h.sentMessages = [];
   h.sentTools = [];
   h.sentSystems = [];
+  h.sentOpts = [];
   h.recalled = "";
   h.appended = [];
   h.savedTodos = [];
@@ -861,6 +865,8 @@ describe("Agent.compactNow (LLM-summary compaction)", () => {
     expect(sent).toHaveLength(1);
     expect(String(sent[0].content)).toContain("Summarize the agent transcript");
     expect(String(sent[0].content)).toContain("Q0");
+    // Auxiliary downgrade: the summarizer runs capped and thinking-free.
+    expect(h.sentOpts[0]).toMatchObject({ maxOutput: 5000, thinking: false });
 
     const after = agent.debugMessages();
     expect(after).toHaveLength(8); // summary + ack + last 6 seeded (Q7..A9)

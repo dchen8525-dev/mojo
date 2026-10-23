@@ -10,6 +10,14 @@ export const TURN_COMPLETION = `Completing a turn:
 - If something blocks you, state what you tried, the exact error, and what you need. Never silently give up or repeat the same failing call.
 - End with a short summary: what changed, how it was verified, and anything still open.`;
 
+export const COMMUNICATION = `Communicating with the user:
+- Before your first tool call, say in a sentence what you are about to do; while working, give brief updates when you find something load-bearing or change direction.
+- Everything the user needs from the turn - answers, findings, conclusions - must be in the final text message, with no tool calls after it. Text between tool calls is just status.
+- Lead with the outcome: the first sentence after finishing answers "what happened" or "what did you find". Supporting detail comes after.
+- Being readable beats being terse. Write complete sentences, spell out technical terms, and skip fragments, arrow chains, and labels the reader cannot resolve in place.
+- Match the response to the question: a simple question gets a direct answer in prose, not headers and sections.
+- Write code that reads like the surrounding code, matching its comment density, naming, and idiom. Add a comment only for a constraint the code itself cannot show.`;
+
 /**
  * Tool-gated guidance. Each block is emitted only when at least one tool it
  * governs is in the active tool list, so plan-mode and research prompts stay
@@ -36,6 +44,11 @@ export function toolGuidance(toolNames: Iterable<string>, opts: { hasDeferred?: 
 - Read a file before editing it. edit_file wants EXACT text copied from read_file output (the "N\\t" prefixes are line numbers, not content); whitespace-insensitive matching is a fallback that may re-indent, so check the returned diff.
 - Prefer edit_file for existing files; write_file overwrites the whole file and requires a prior full read.
 - write_file/edit_file results include <diagnostics> from the language server. Fix every error before declaring the task done; use get_diagnostics to re-check.`);
+  }
+  if (has("apply_patch")) {
+    blocks.push(`Multi-file patches (apply_patch):
+- One change that spans several files (create + edit + delete + move) fits in a single apply_patch call instead of a chain of write/edit calls.
+- Update hunks must copy exact lines from read_file output; add-file lines are all prefixed with "+". If a hunk fails to match, re-read the file and widen the context instead of switching to shell replacements.`);
   }
   if (has("ask_user")) {
     blocks.push(`Asking the user (ask_user):

@@ -2,7 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { readFileSync } from "node:fs";
 import type { MessageParam, Tool, ContentBlock, ToolUseBlock } from "./types.js";
-import type { AssistantTurn, LLMBackend, Provider, RetryReason, StreamEvents, SystemPrompt } from "./llm/types.js";
+import type { AssistantTurn, LLMBackend, Provider, RetryReason, SendOptions, StreamEvents, SystemPrompt } from "./llm/types.js";
 import { StreamInterrupted, CancelledStreamError, StreamRecoveryExhausted } from "./llm/types.js";
 import { AnthropicBackend } from "./llm/anthropic.js";
 import { OpenAiBackend } from "./llm/openai.js";
@@ -10,7 +10,7 @@ import { lookupModel } from "./llm/models.js";
 import { fetchModelMeta, getModelMeta, setModelMeta, type ModelMeta } from "./modelMeta.js";
 import { recordJournalTurn } from "./journal.js";
 
-export type { AssistantTurn, StreamEvents, Provider } from "./llm/types.js";
+export type { AssistantTurn, StreamEvents, Provider, SendOptions } from "./llm/types.js";
 export { CancelledStreamError, StreamRecoveryExhausted } from "./llm/types.js";
 export { knownModelNames, lookupModel } from "./llm/models.js";
 
@@ -448,6 +448,7 @@ export class LLM {
     tools: Tool[],
     signal?: AbortSignal,
     events?: StreamEvents,
+    opts?: SendOptions,
   ): Promise<AssistantTurn> {
     const start = Date.now();
     const base = {
@@ -463,7 +464,7 @@ export class LLM {
       },
     };
     try {
-      const turn = await this.sendResumable(messages, system, tools, signal, events);
+      const turn = await this.sendResumable(messages, system, tools, signal, events, opts);
       void recordJournalTurn({
         ...base,
         durationMs: Date.now() - start,
@@ -504,6 +505,7 @@ export class LLM {
     tools: Tool[],
     signal?: AbortSignal,
     events?: StreamEvents,
+    opts?: SendOptions,
   ): Promise<AssistantTurn> {
     const maxRecoveries = LLM.streamRecoveryAttempts();
     // Text accumulated across resumes; also the provider-safe prefill anchor.
@@ -554,6 +556,7 @@ export class LLM {
               signal,
               attemptEvents,
               LLM.streamIdleMs() + 30_000 * retryAttempt,
+              opts,
             ),
           signal,
           events,

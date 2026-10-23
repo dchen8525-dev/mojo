@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { MessageParam, ContentBlock, ToolUseBlock, Tool } from "../types.js";
 import { toAnthropicTool } from "../types.js";
-import type { AssistantTurn, LLMBackend, Provider, StreamEvents, SystemPrompt } from "./types.js";
+import type { AssistantTurn, LLMBackend, Provider, SendOptions, StreamEvents, SystemPrompt } from "./types.js";
 import { StreamInterrupted, normalizeSystem } from "./types.js";
 import { lookupModel } from "./models.js";
 import { withIdleTimeout } from "./idle.js";
@@ -54,6 +54,7 @@ export class AnthropicBackend implements LLMBackend {
     signal?: AbortSignal,
     events?: StreamEvents,
     idleMs = 0,
+    opts?: SendOptions,
   ): Promise<AssistantTurn> {
     // Own the request's lifetime so the idle watchdog can kill it; the outer
     // signal (user abort) must still reach it.
@@ -73,14 +74,15 @@ export class AnthropicBackend implements LLMBackend {
     const stream = this.client.messages.stream(
       {
         model: this.model,
-        max_tokens: lookupModel(this.model).maxOutput,
+        max_tokens: opts?.maxOutput ?? lookupModel(this.model).maxOutput,
         system: systemBlocks,
         messages: cachedMessages(messages),
         tools: cachedTools(tools),
         // Opt-in extended thinking (AGENT_THINKING=1). Off by default so
         // gateways without thinking support keep working; when on, the UI
-        // streams the model's reasoning via onThinkingDelta.
-        ...(/^(1|true)$/i.test(process.env.AGENT_THINKING ?? "")
+        // streams the model's reasoning via onThinkingDelta. Auxiliary calls
+        // (SendOptions.thinking === false) never pay for thinking.
+        ...(/^(1|true)$/i.test(process.env.AGENT_THINKING ?? "") && opts?.thinking !== false
           ? { thinking: { type: "enabled" as const, budget_tokens: 4096 } }
           : {}),
       },

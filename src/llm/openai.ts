@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 import type { MessageParam, ContentBlock, ToolUseBlock, Tool } from "../types.js";
-import type { AssistantTurn, LLMBackend, Provider, StreamEvents, SystemPrompt } from "./types.js";
+import type { AssistantTurn, LLMBackend, Provider, SendOptions, StreamEvents, SystemPrompt } from "./types.js";
 import { StreamInterrupted, normalizeSystem } from "./types.js";
 import { lookupModel } from "./models.js";
 import { withIdleTimeout } from "./idle.js";
@@ -189,6 +189,7 @@ export class OpenAiBackend implements LLMBackend {
     signal?: AbortSignal,
     events?: StreamEvents,
     idleMs = 0,
+    opts?: SendOptions,
   ): Promise<AssistantTurn> {
     // Own the request's lifetime so the idle watchdog can kill it; the outer
     // signal (user abort) must still reach it.
@@ -211,8 +212,8 @@ export class OpenAiBackend implements LLMBackend {
     };
     // Reasoning models (o-series) reject max_tokens/temperature; they want
     // max_completion_tokens and no sampling params.
-    if (info.reasoning) params.max_completion_tokens = info.maxOutput;
-    else params.max_tokens = info.maxOutput;
+    if (info.reasoning) params.max_completion_tokens = opts?.maxOutput ?? info.maxOutput;
+    else params.max_tokens = opts?.maxOutput ?? info.maxOutput;
 
     const stream = await this.client.chat.completions.create(
       params as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming,

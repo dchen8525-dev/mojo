@@ -58,3 +58,4 @@
 | [persistent-node-repl.md](persistent-node-repl.md) | 2026-10-23 | 常驻 Node REPL：每会话独立进程 + 跨调用绑定 + 超时/中断重启 + 高风险审批 |
 | [session-goal-autopilot.md](session-goal-autopilot.md) | 2026-10-23 | 会话目标自动续跑：LLM 完成校验 + nextAction + 预算/续跑上限 + /goal + 三端事件 |
 | [structured-permissions-turn-resilience.md](structured-permissions-turn-resilience.md) | 2026-10-23 | 结构化权限规则 + 复合命令解析；超上下文反应式压缩；空补全重试 + 工具调用软预算告警 |
+| [apply-patch-aux-downgrade-communication.md](apply-patch-aux-downgrade-communication.md) | 2026-10-23 | apply_patch 多文件补丁工具；辅助 LLM 调用降档（5k 上限/关思考）；沟通规范提示词；nodeRepl 在途请求空闲竞态修复 |

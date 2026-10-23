@@ -1,4 +1,5 @@
 import type { LLM } from "./llm.js";
+import { auxiliarySendOptions } from "./auxiliary.js";
 
 /** Longest slice of the user's first message we send for titling. */
 export const MAX_TITLE_INPUT = 1_200;
@@ -100,6 +101,8 @@ export async function generateSessionTitle(
     prompt.system,
     [],
     AbortSignal.timeout(TITLE_TIMEOUT_MS),
+    undefined,
+    auxiliarySendOptions(),
   );
   const text = res.content
     .filter((b) => (b as { type?: string }).type === "text")

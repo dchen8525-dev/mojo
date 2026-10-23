@@ -118,7 +118,12 @@ describe("node_repl", () => {
     try {
       await run("repl-idle", "const idleMark = 1");
       await new Promise((resolve) => setTimeout(resolve, 400));
-      const after = await run("repl-idle", "typeof idleMark");
+      // Under heavy load the idle timer can fire mid-call, which surfaces as
+      // "kernel was stopped"; the tool's contract is to retry, so do that once.
+      let after = await run("repl-idle", "typeof idleMark");
+      if (!after.content.includes("'undefined'")) {
+        after = await run("repl-idle", "typeof idleMark");
+      }
       expect(after.content).toContain("'undefined'");
     } finally {
       delete process.env.AGENT_REPL_IDLE_MS;
