@@ -25,6 +25,40 @@ export interface CheckpointHandle {
   finalize: () => Promise<void>;
 }
 
+export interface UserQuestionOption {
+  label: string;
+  description?: string;
+}
+
+/** One multiple-choice question the model wants the human to answer. */
+export interface UserQuestion {
+  question: string;
+  header?: string;
+  options: UserQuestionOption[];
+  multiSelect?: boolean;
+}
+
+export interface UserQuestionRequest {
+  questions: UserQuestion[];
+  timeoutMs: number;
+}
+
+export interface UserQuestionAnswer {
+  question: string;
+  /** Option labels the user picked; empty when skipped. */
+  selected: string[];
+}
+
+export interface UserQuestionOutcome {
+  answers: UserQuestionAnswer[];
+  /** No answer arrived before the timeout (the UI was dismissed). */
+  timedOut?: boolean;
+  /** The turn was aborted while waiting. */
+  aborted?: boolean;
+  /** No interactive surface exists (subagent, print mode, no client). */
+  unavailable?: boolean;
+}
+
 export interface ToolContext {
   cwd: string;
   /** Session that owns this tool call; used to route background-task notifications. */
@@ -32,6 +66,12 @@ export interface ToolContext {
   signal?: AbortSignal;
   /** Ask the user to approve an operation. Returns true if allowed. */
   askPermission: (description: string, risk: Risk, preview?: string) => Promise<boolean>;
+  /**
+   * Ask the user a structured multiple-choice question (the ask_user tool).
+   * Absent in headless/subagent contexts, where the tool degrades to an
+   * "answer unavailable, use best judgment" result.
+   */
+  askUser?: (request: UserQuestionRequest) => Promise<UserQuestionOutcome>;
   /**
    * Copy the file's current content to the session checkpoint store before it
    * is modified (enables /undo). Best-effort: must never throw or block. The

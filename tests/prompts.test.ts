@@ -22,6 +22,8 @@ describe("toolGuidance", () => {
     expect(toolGuidance(["task"])).toContain("Subagents (task):");
     expect(toolGuidance(["web_search"])).toContain("Web:");
     expect(toolGuidance(["git_commit"])).toContain("Git:");
+    expect(toolGuidance(["ask_user"])).toContain("Asking the user (ask_user):");
+    expect(toolGuidance(["read_session"])).toContain("Past sessions (read_session):");
     expect(toolGuidance(["read_file"], { hasDeferred: true })).toContain("Deferred tools:");
   });
 

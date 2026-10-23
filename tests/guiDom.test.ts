@@ -694,4 +694,95 @@ describe("GUI interactions (happy-dom)", () => {
     expect(doc.querySelector("#help-modal")?.classList.contains("hidden")).toBe(false);
     expect(doc.querySelector("#cmdk-modal")?.classList.contains("hidden")).toBe(true);
   });
+
+  it("renders a structured question, submits selections, and closes on confirmation", async () => {
+    const { window, calls } = await boot({ routes: { "/api/answer": { ok: true } } });
+    const doc = window.document;
+    const source = FakeEventSource.instances[0];
+
+    source.emit("question_request", {
+      id: "q1",
+      timeoutMs: 30_000,
+      questions: [
+        {
+          question: "用哪个端口?",
+          header: "端口",
+          options: [{ label: "4611" }, { label: "5173", description: "Vite 默认" }],
+        },
+        { question: "要哪些端?", options: [{ label: "CLI" }, { label: "GUI" }], multiSelect: true },
+      ],
+    });
+
+    await vi.waitFor(() => {
+      expect(doc.querySelector("#ask-modal")?.classList.contains("hidden")).toBe(false);
+    });
+    expect(doc.querySelector("#ask-body")?.textContent).toContain("用哪个端口?");
+    expect(doc.querySelector("#ask-body")?.textContent).toContain("1/2");
+    expect(doc.querySelector("#ask-hint")?.textContent).toContain("30 秒");
+    // Nothing is preselected: the answer must be an explicit user choice.
+    expect(doc.querySelectorAll("#ask-body input:checked")).toHaveLength(0);
+
+    const radios = doc.querySelectorAll('input[name="ask-q0"]');
+    (radios[1] as HTMLInputElement).checked = true;
+    const boxes = doc.querySelectorAll('input[name="ask-q1"]');
+    (boxes[0] as HTMLInputElement).checked = true;
+    (boxes[1] as HTMLInputElement).checked = true;
+    (doc.querySelector("#ask-submit") as HTMLElement).click();
+
+    await vi.waitFor(() => {
+      expect(calls.some((c) => c.url === "/api/answer")).toBe(true);
+    });
+    const call = calls.find((c) => c.url === "/api/answer")!;
+    expect(JSON.parse(String(call.init?.body))).toEqual({
+      id: "q1",
+      answers: [
+        { question: "用哪个端口?", selected: ["5173"] },
+        { question: "要哪些端?", selected: ["CLI", "GUI"] },
+      ],
+    });
+
+    source.emit("question_closed", { id: "q1", reason: "answered" });
+    await vi.waitFor(() => {
+      expect(doc.querySelector("#ask-modal")?.classList.contains("hidden")).toBe(true);
+    });
+  });
+
+  it("skips a structured question with Escape", async () => {
+    const { window, calls } = await boot({ routes: { "/api/answer": { ok: true } } });
+    const doc = window.document;
+    FakeEventSource.instances[0].emit("question_request", {
+      id: "q2",
+      timeoutMs: 5_000,
+      questions: [{ question: "Q", options: [{ label: "a" }, { label: "b" }] }],
+    });
+    await vi.waitFor(() => {
+      expect(doc.querySelector("#ask-modal")?.classList.contains("hidden")).toBe(false);
+    });
+
+    key(window, doc, { key: "Escape" });
+    await vi.waitFor(() => {
+      expect(calls.some((c) => c.url === "/api/answer")).toBe(true);
+    });
+    const call = calls.find((c) => c.url === "/api/answer")!;
+    expect(JSON.parse(String(call.init?.body))).toEqual({
+      id: "q2",
+      answers: [{ question: "Q", selected: [] }],
+    });
+  });
+
+  it("re-shows a pending structured question after reconnect", async () => {
+    const { window } = await boot({
+      state: {
+        pendingQuestions: [
+          {
+            id: "q3",
+            timeoutMs: 60_000,
+            questions: [{ question: "恢复的问题", options: [{ label: "y" }, { label: "n" }] }],
+          },
+        ],
+      },
+    });
+    expect(window.document.querySelector("#ask-modal")?.classList.contains("hidden")).toBe(false);
+    expect(window.document.querySelector("#ask-body")?.textContent).toContain("恢复的问题");
+  });
 });

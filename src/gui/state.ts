@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Agent } from "../agent.js";
 import type { PermissionManager } from "../permissions.js";
-import type { Risk } from "../types.js";
+import type { Risk, UserQuestion, UserQuestionAnswer, UserQuestionOutcome, UserQuestionRequest } from "../types.js";
 import type { SseHub } from "./sse.js";
 import type { UiSubCall, UiTurn } from "./transcript.js";
 
@@ -33,6 +33,16 @@ export class GuiRuntime {
   agent!: Agent;
   permissions!: PermissionManager;
   private pending = new Map<string, { resolve: (d: PermissionDecision) => void; description: string; risk: Risk; preview?: string }>();
+  private questions = new Map<
+    string,
+    {
+      resolve: (outcome: UserQuestionOutcome) => void;
+      questions: UserQuestion[];
+      timeoutMs: number;
+      signal?: AbortSignal;
+      onAbort?: () => void;
+    }
+  >();
 
   constructor(readonly hub: SseHub) {}
 
@@ -96,6 +106,65 @@ export class GuiRuntime {
   flushPermissions(): void {
     for (const entry of this.pending.values()) entry.resolve("no");
     this.pending.clear();
+  }
+
+  /**
+   * ask_user transport: broadcast the question, park its resolver, and settle
+   * with no answer when the turn aborts (timeout or Stop). Client answers
+   * arrive through respondQuestion.
+   */
+  askUser = (request: UserQuestionRequest, signal?: AbortSignal): Promise<UserQuestionOutcome> => {
+    const id = randomUUID();
+    return new Promise<UserQuestionOutcome>((resolve) => {
+      const entry: {
+        resolve: (outcome: UserQuestionOutcome) => void;
+        questions: UserQuestion[];
+        timeoutMs: number;
+        signal?: AbortSignal;
+        onAbort?: () => void;
+      } = { resolve, questions: request.questions, timeoutMs: request.timeoutMs, signal };
+      const onAbort = () => {
+        if (this.questions.get(id) !== entry) return;
+        this.questions.delete(id);
+        this.hub.broadcast("question_closed", { id, reason: "aborted" });
+        resolve({ answers: [], aborted: true });
+      };
+      entry.onAbort = onAbort;
+      this.questions.set(id, entry);
+      this.hub.broadcast("question_request", { id, questions: request.questions, timeoutMs: request.timeoutMs });
+      if (signal?.aborted) onAbort();
+      else signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  };
+
+  /** Outstanding questions, so a reconnecting client can re-show the dialog. */
+  pendingQuestions(): Array<{ id: string; questions: UserQuestion[]; timeoutMs: number }> {
+    return [...this.questions.entries()].map(([id, q]) => ({
+      id,
+      questions: q.questions,
+      timeoutMs: q.timeoutMs,
+    }));
+  }
+
+  /** Resolve a pending question. Returns false when it was already resolved. */
+  respondQuestion(id: string, answers: UserQuestionAnswer[]): boolean {
+    const entry = this.questions.get(id);
+    if (!entry) return false;
+    this.questions.delete(id);
+    if (entry.onAbort && entry.signal) entry.signal.removeEventListener("abort", entry.onAbort);
+    entry.resolve({ answers });
+    this.hub.broadcast("question_closed", { id, reason: "answered" });
+    return true;
+  }
+
+  /** Abort every outstanding question (turn stop / last tab closed). */
+  flushQuestions(): void {
+    for (const [id, entry] of this.questions) {
+      if (entry.onAbort && entry.signal) entry.signal.removeEventListener("abort", entry.onAbort);
+      this.hub.broadcast("question_closed", { id, reason: "aborted" });
+      entry.resolve({ answers: [], aborted: true });
+    }
+    this.questions.clear();
   }
 
   get pendingCount(): number {

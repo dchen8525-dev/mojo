@@ -621,3 +621,149 @@ describe("session titles", () => {
     expect((await session.loadSession(id2))?.meta.preview).toBe(`${"x".repeat(59)}…`);
   });
 });
+
+const { readSessionTool } = await import("../src/tools/readSession.js");
+const { sessionReferenceIds } = await import("../src/sessionRefs.js");
+
+describe("readSessionContext", () => {
+  async function seedConversation(cwd = "D:\\proj") {
+    const { id } = await session.createSession(cwd);
+    await session.appendMessages(id, [
+      { role: "user", content: "How do we deploy the widget service?" },
+      { role: "assistant", content: "Run scripts/deploy-widget.sh." },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "deployed" }] },
+      { role: "user", content: '<system-reminder event="RecalledMemory">old context</system-reminder>' },
+      { role: "assistant", content: "Deployment done." },
+      { role: "user", content: "What timeout should the timer use?" },
+      { role: "assistant", content: "Use 30 seconds for the timer." },
+    ]);
+    return id;
+  }
+
+  it("returns null for a missing session", async () => {
+    expect(await session.readSessionContext("deadbeef")).toBeNull();
+  });
+
+  it("selects the most relevant turn for a query and labels it as untrusted history", async () => {
+    const id = await seedConversation();
+    const result = await session.readSessionContext(id, { query: "timer" });
+    expect(result).not.toBeNull();
+    expect(result!.matched).toBe(true);
+    expect(result!.content).toContain("Historical transcript");
+    expect(result!.content).toContain("untrusted data");
+    expect(result!.content).toContain("Use 30 seconds for the timer.");
+    expect(result!.content).not.toContain("deploy-widget");
+  });
+
+  it("groups injected reminders and tool results with the turn that produced them", async () => {
+    const id = await seedConversation();
+    const result = await session.readSessionContext(id, { query: "widget" });
+    expect(result!.content).toContain("How do we deploy the widget service?");
+    expect(result!.content).toContain("[tool result]");
+    expect(result!.content).toContain("[context]");
+  });
+
+  it("shows the newest exchanges, in order, when no query is given", async () => {
+    const id = await seedConversation();
+    const result = await session.readSessionContext(id);
+    expect(result!.matched).toBe(true);
+    expect(result!.messageCount).toBe(7);
+    expect(result!.content).toContain("no query: showing the most recent exchanges");
+    const early = result!.content.indexOf("widget");
+    const late = result!.content.indexOf("timer");
+    expect(early).toBeGreaterThan(-1);
+    expect(late).toBeGreaterThan(early);
+  });
+
+  it("falls back to recent exchanges when nothing matches the query", async () => {
+    const id = await seedConversation();
+    const result = await session.readSessionContext(id, { query: "zebra" });
+    expect(result!.matched).toBe(false);
+    expect(result!.content).toContain("No excerpt matched the query strongly");
+    expect(result!.content).toContain("timer");
+  });
+
+  it("respects the character budget and reports truncation", async () => {
+    const { id } = await session.createSession("budget");
+    await session.appendMessages(id, [
+      { role: "user", content: "a".repeat(3000) },
+      { role: "assistant", content: "b".repeat(3000) },
+      { role: "user", content: "c".repeat(3000) },
+    ]);
+    const result = await session.readSessionContext(id, { maxChars: 1000 });
+    expect(result!.truncated).toBe(true);
+    expect(result!.content).toContain("[excerpts truncated to fit 1,000 characters]");
+    expect(result!.content.length).toBeLessThan(2500);
+  });
+
+  it("clips a single oversized message at 6000 characters", async () => {
+    const { id } = await session.createSession("clip");
+    await session.appendMessages(id, [{ role: "user", content: `start-${"x".repeat(7000)}-end` }]);
+    const result = await session.readSessionContext(id);
+    expect(result!.truncated).toBe(true);
+    expect(result!.content).toContain("start-");
+    expect(result!.content).not.toContain("-end");
+    expect(result!.content).toContain("…");
+  });
+
+  it("handles a session with no transcript messages", async () => {
+    const { id } = await session.createSession("empty");
+    const result = await session.readSessionContext(id);
+    expect(result!.messageCount).toBe(0);
+    expect(result!.content).toContain("no transcript messages");
+  });
+});
+
+describe("read_session tool", () => {
+  it("reads a stored session by id, accepting #sess_ and sess_ prefixes", async () => {
+    const { id } = await session.createSession("tool");
+    await session.appendMessages(id, [
+      { role: "user", content: "remember the port number" },
+      { role: "assistant", content: "the port is 4611" },
+    ]);
+    for (const ref of [id, `#sess_${id}`, `sess_${id.toUpperCase()}`]) {
+      const result = await readSessionTool.execute(
+        { session_id: ref },
+        { cwd: "D:\\proj", sessionId: "abcd1234", askPermission: async () => true },
+      );
+      expect(result.isError).toBeUndefined();
+      expect(result.content).toContain("the port is 4611");
+    }
+  });
+
+  it("refuses to read the current session", async () => {
+    const { id } = await session.createSession("current");
+    const result = await readSessionTool.execute(
+      { session_id: id },
+      { cwd: "D:\\proj", sessionId: id, askPermission: async () => true },
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("current session");
+  });
+
+  it("reports missing ids and unknown sessions", async () => {
+    const blank = await readSessionTool.execute(
+      { session_id: "#sess_" },
+      { cwd: "D:\\proj", sessionId: "abcd1234", askPermission: async () => true },
+    );
+    expect(blank.isError).toBe(true);
+    expect(blank.content).toMatch(/session_id is required/);
+
+    const missing = await readSessionTool.execute(
+      { session_id: "deadbeef" },
+      { cwd: "D:\\proj", sessionId: "abcd1234", askPermission: async () => true },
+    );
+    expect(missing.isError).toBe(true);
+    expect(missing.content).toMatch(/was not found/);
+  });
+});
+
+describe("sessionReferenceIds", () => {
+  it("finds, lowercases, dedupes and caps #sess_ references", () => {
+    expect(sessionReferenceIds("look at #sess_ABCD1234 and #sess_abcd1234")).toEqual(["abcd1234"]);
+    expect(sessionReferenceIds("no references here")).toEqual([]);
+    expect(sessionReferenceIds("#sess_abc #sess_xyz1 #sess_0011aabb")).toEqual(["0011aabb"]);
+    expect(sessionReferenceIds("#sess_aaaa #sess_bbbb #sess_cccc #sess_dddd")).toEqual(["aaaa", "bbbb", "cccc"]);
+  });
+});
+

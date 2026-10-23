@@ -236,7 +236,10 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
   }
   // A stuck permission prompt with no client to answer it would hang the turn
   // forever; when the last tab/window closes, deny outstanding prompts.
-  hub.onEmpty = () => runtime.flushPermissions();
+  hub.onEmpty = () => {
+    runtime.flushPermissions();
+    runtime.flushQuestions();
+  };
 
   const token = randomBytes(16).toString("hex");
 
@@ -541,6 +544,7 @@ export async function startGuiBackend(opts: GuiStartOptions): Promise<RunningBac
     shut = true;
     runtime.controller?.abort();
     runtime.flushPermissions();
+    runtime.flushQuestions();
     await cron?.stop();
     await gui.close();
     await project.mcp?.shutdown();

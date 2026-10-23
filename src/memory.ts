@@ -206,7 +206,7 @@ const STOPWORDS = new Set([
 ]);
 
 /** CJK runs become bigrams; latin words are matched whole. Bounded so a pasted doc cannot make recall quadratic. */
-function queryTerms(query: string): Set<string> {
+export function queryTerms(query: string): Set<string> {
   const terms = new Set<string>();
   const lower = query.slice(0, MAX_QUERY_CHARS).toLowerCase();
   for (const run of lower.match(/[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]+/g) ?? []) {

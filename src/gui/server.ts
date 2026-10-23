@@ -461,6 +461,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
         if (t) (t.subCalls ??= []).push(call);
         hub.broadcast("sub_tool_start", { id: parentId, name, inputPreview, round });
       },
+      onUserQuestion: (request, signal) => runtime.askUser(request, signal),
       onSubTool: (parentId, name, inputPreview, ok, preview, round) => {
         const t = turn.tools.find((x) => x.id === parentId);
         const running = t?.subCalls?.find(
@@ -672,6 +673,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       transcript: attachSubCalls(toUiTranscript(project.agent.getMessages()), runtime.subCalls),
       liveTurn: runtime.liveTurn,
       pendingPermissions: runtime.pendingPermissions(),
+      pendingQuestions: runtime.pendingQuestions(),
       customCommands: [...project.customCommands.values()].map((c) => ({ name: c.name, description: c.description })),
     };
   }
@@ -899,7 +901,27 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
         const cancelled = project.agent.runtimeQueue.cancelAll("send_prompt");
         if (cancelled) hub.broadcast("system", { text: `已取消 ${cancelled} 条排队消息` });
         runtime.flushPermissions(); // never leave a turn hung on a prompt
+        runtime.flushQuestions();
         return sendJson(res, 200, { ok: true });
+      }
+
+      if (p === "/api/answer") {
+        const id = typeof body.id === "string" ? body.id : "";
+        const raw = Array.isArray(body.answers) ? body.answers : [];
+        if (raw.length > 4) return sendJson(res, 400, { error: "too many answers" });
+        const answers: Array<{ question: string; selected: string[] }> = [];
+        for (const item of raw) {
+          if (!item || typeof item !== "object") return sendJson(res, 400, { error: "invalid answer" });
+          const a = item as Record<string, unknown>;
+          const question = typeof a.question === "string" ? a.question : "";
+          if (!question) return sendJson(res, 400, { error: "invalid answer" });
+          const selected = Array.isArray(a.selected)
+            ? a.selected.filter((s): s is string => typeof s === "string").slice(0, 4)
+            : [];
+          answers.push({ question, selected });
+        }
+        const ok = runtime.respondQuestion(id, answers);
+        return sendJson(res, ok ? 200 : 404, { ok });
       }
 
       if (p === "/api/permission") {

@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";import type { ContentBlock, MessageParam, ToolUseBlock } from "../src/types.js";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";import type { ContentBlock, MessageParam, ToolUseBlock, UserQuestionRequest } from "../src/types.js";
 import { CancelledStreamError } from "../src/llm/types.js";
 
 // Scripted fake LLM: each send() pops the next canned turn.
@@ -1274,3 +1274,74 @@ describe("Agent post-compaction read-state restore", () => {
     ).toBe(false);
   });
 });
+
+describe("Agent ask_user", () => {
+  const portQuestions = [
+    {
+      question: "Which port should the dev server use?",
+      options: [{ label: "4611" }, { label: "5173", description: "Vite default" }],
+    },
+  ];
+
+  it("routes a structured question to the interactive UI and reports the choice", async () => {
+    h.turns = [toolTurn([["ask_user", { questions: portQuestions }]]), textTurn("using 5173")];
+    const seen: UserQuestionRequest[] = [];
+    const text = await makeAgent().chat("which port?", undefined, {
+      onUserQuestion: async (request) => {
+        seen.push(request);
+        return { answers: [{ question: request.questions[0].question, selected: ["5173"] }] };
+      },
+    });
+    expect(text).toBe("using 5173");
+    expect(seen).toHaveLength(1);
+    expect(seen[0].questions[0].options.map((o) => o.label)).toEqual(["4611", "5173"]);
+    expect(seen[0].timeoutMs).toBe(120_000);
+    expect(String(lastSentContent()[0].content)).toContain("Which port should the dev server use? → 5173");
+  });
+
+  it("degrades to an unavailable answer when no interactive UI is attached", async () => {
+    h.turns = [toolTurn([["ask_user", { questions: portQuestions }]]), textTurn("assumed 4611")];
+    await makeAgent().chat("which port?");
+    expect(String(lastSentContent()[0].content)).toContain("No interactive question UI");
+  });
+
+  it("times out instead of hanging when the UI never answers", async () => {
+    h.turns = [
+      toolTurn([["ask_user", { questions: portQuestions, timeout_ms: 1000 }]]),
+      textTurn("assumed 4611"),
+    ];
+    const started = Date.now();
+    await makeAgent().chat("which port?", undefined, { onUserQuestion: () => new Promise(() => {}) });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+    expect(String(lastSentContent()[0].content)).toContain("timed out");
+  }, 10_000);
+
+  it("settles as interrupted when the turn aborts while waiting", async () => {
+    h.turns = [toolTurn([["ask_user", { questions: portQuestions }]]), textTurn("never reached")];
+    const ctrl = new AbortController();
+    const chat = makeAgent().chat("which port?", ctrl.signal, {
+      onUserQuestion: () => new Promise(() => {}),
+    });
+    setTimeout(() => ctrl.abort(), 50);
+    await expect(chat).rejects.toThrow("aborted");
+  });
+});
+
+describe("Agent session references", () => {
+  it("points the model at #sess_ references without inlining the transcript", async () => {
+    h.turns = [textTurn("ok")];
+    await makeAgent().chat("keep going like in #sess_abcd1234");
+    const content = h.sentMessages[0][0].content as Array<{ type: string; text?: string }>;
+    expect(content[0].text).toContain('<system-reminder event="SessionReference">');
+    expect(content[0].text).toContain("#sess_abcd1234");
+    expect(content[0].text).toContain("read_session");
+  });
+
+  it("injects no reminder when the prompt has no session reference", async () => {
+    h.turns = [textTurn("ok")];
+    await makeAgent().chat("plain question");
+    const content = h.sentMessages[0][0].content as Array<{ type: string; text?: string }>;
+    expect(content[0].text).not.toContain("SessionReference");
+  });
+});
+

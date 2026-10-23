@@ -1989,6 +1989,143 @@ button {
   margin-left: 4px;
 }
 
+/* ---- 结构化提问弹窗（ask_user） ---- */
+
+.ask-card {
+  width: min(560px, 92vw);
+}
+
+.ask-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.ask-title {
+  font-family: var(--serif);
+  font-size: 16px;
+}
+
+.ask-body {
+  flex: 1;
+  overflow: auto;
+  padding: 14px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.ask-q {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.ask-q-title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.ask-q-title .ask-progress {
+  margin-left: 6px;
+  color: var(--faint);
+  font-weight: 400;
+  font-size: 11px;
+}
+
+.ask-opt {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 9px 11px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.ask-opt:hover {
+  border-color: var(--ink);
+}
+
+.ask-opt:has(input:checked) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.ask-opt input {
+  margin: 3px 0 0;
+  accent-color: var(--accent);
+  flex-shrink: 0;
+}
+
+.ask-opt-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ask-opt-label {
+  font-size: 12.5px;
+}
+
+.ask-opt-desc {
+  color: var(--dim);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.ask-hint {
+  padding: 0 20px 12px;
+  color: var(--faint);
+  font-size: 11.5px;
+}
+
+.ask-actions {
+  display: flex;
+  gap: 8px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--line);
+}
+
+.ask-actions button {
+  flex: 1;
+  padding: 9px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-2);
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 12.5px;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.ask-actions button:hover {
+  border-color: var(--ink);
+}
+
+.ask-actions button.primary {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--paper);
+}
+
+.ask-actions button.primary:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.ask-actions kbd {
+  font-family: var(--mono);
+  font-size: 10px;
+  opacity: 0.6;
+  margin-left: 4px;
+}
+
 /* ---- LLM 配置弹窗 ---- */
 
 .cfg-card {

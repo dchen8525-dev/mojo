@@ -89,6 +89,7 @@ const state = {
   items: [], // {kind, ...} finalized transcript entries
   liveTurn: null, // {turnId, text, thinking, tools[]}
   perms: [], // queued permission requests
+  asks: [], // queued ask_user question requests
   todos: [], // latest todo plan (drives the 待办 popover)
   images: [], // staged image attachments for the next message
   steerMode: false, // while busy: inject into the running turn instead of queuing
@@ -784,6 +785,12 @@ async function refreshState() {
     for (const p of s.pendingPermissions) if (!known.has(p.id)) state.perms.push(p);
     showPermission();
   }
+  // Same for structured questions: a reconnect must re-show the dialog.
+  if (Array.isArray(s.pendingQuestions) && s.pendingQuestions.length) {
+    const known = new Set(state.asks.map((q) => q.id));
+    for (const q of s.pendingQuestions) if (!known.has(q.id)) state.asks.push(q);
+    showAsk();
+  }
   updateHeader(s);
   updateStatus(s);
   updateComposer();
@@ -1127,6 +1134,20 @@ function connectSSE() {
     showPermission();
     notifyUser("等待权限批准", String(d.description || "").slice(0, 140));
   });
+
+  on("question_request", (d) => {
+    if (state.asks.some((q) => q.id === d.id)) return;
+    state.asks.push(d);
+    showAsk();
+    notifyUser("等待你的选择", String(d.questions?.[0]?.question || "").slice(0, 140));
+  });
+
+  on("question_closed", (d) => {
+    state.asks = state.asks.filter((q) => q.id !== d.id);
+    const modal = $("#ask-modal");
+    if (modal && !modal.classList.contains("hidden")) modal.classList.add("hidden");
+    showAsk();
+  });
 }
 
 /* ---------------- permission modal ---------------- */
@@ -1213,6 +1234,72 @@ function clearStalePermissions() {
 }
 
 document.querySelectorAll(".perm-actions button").forEach((b) => (b.onclick = () => answerPermission(b.dataset.decision)));
+
+/* ---------------- structured questions (ask_user) ---------------- */
+
+function currentAsk() {
+  return state.asks[0] ?? null;
+}
+
+function showAsk() {
+  const modal = $("#ask-modal");
+  const req = currentAsk();
+  if (!req) {
+    modal.classList.add("hidden");
+    return;
+  }
+  if (!modal.classList.contains("hidden")) return;
+  const body = $("#ask-body");
+  body.replaceChildren();
+  const questions = Array.isArray(req.questions) ? req.questions : [];
+  questions.forEach((q, qi) => {
+    const box = el("div", "ask-q");
+    const title = el("div", "ask-q-title");
+    title.appendChild(el("span", "", q.question || "请选择"));
+    if (questions.length > 1) title.appendChild(el("span", "ask-progress", `${qi + 1}/${questions.length}`));
+    box.appendChild(title);
+    const multi = q.multiSelect === true;
+    (Array.isArray(q.options) ? q.options : []).forEach((opt, oi) => {
+      const label = el("label", "ask-opt");
+      const input = document.createElement("input");
+      input.type = multi ? "checkbox" : "radio";
+      input.name = `ask-q${qi}`;
+      input.value = String(opt.label ?? "");
+      const main = el("span", "ask-opt-main");
+      main.appendChild(el("span", "ask-opt-label", String(opt.label ?? "")));
+      if (opt.description) main.appendChild(el("span", "ask-opt-desc", String(opt.description)));
+      label.append(input, main);
+      box.appendChild(label);
+    });
+    body.appendChild(box);
+  });
+  const seconds = Math.max(1, Math.round((Number(req.timeoutMs) || 120000) / 1000));
+  $("#ask-hint").textContent = `若 ${seconds} 秒内未回答，将自动跳过并让模型自行判断。`;
+  modal.classList.remove("hidden");
+  body.scrollTop = 0;
+}
+
+/** Submit (or skip) the visible question, then show the next queued one. */
+async function answerAsk(skip) {
+  const req = currentAsk();
+  if (!req) return;
+  state.asks.shift();
+  $("#ask-modal").classList.add("hidden");
+  const questions = Array.isArray(req.questions) ? req.questions : [];
+  const answers = questions.map((q, qi) => {
+    const checked = skip ? [] : [...$("#ask-body").querySelectorAll(`input[name="ask-q${qi}"]:checked`)];
+    return { question: q.question, selected: checked.map((i) => i.value) };
+  });
+  try {
+    await api("/api/answer", { id: req.id, answers });
+  } catch {
+    /* already resolved (timeout/abort) */
+  }
+  showAsk();
+}
+
+$("#ask-submit").onclick = () => answerAsk(false);
+$("#ask-skip").onclick = () => answerAsk(true);
 
 /* ---------------- narrow-screen drawer ---------------- */
 
@@ -1336,7 +1423,7 @@ input.addEventListener("input", () => {
 
 input.addEventListener("keydown", (e) => {
   if (e.isComposing || e.keyCode === 229) return; // Enter/Escape belong to the IME while composing
-  if (!$("#perm-modal").classList.contains("hidden")) return; // modal owns keys
+  if (!$("#perm-modal").classList.contains("hidden") || !$("#ask-modal").classList.contains("hidden")) return; // modal owns keys
   if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
     e.preventDefault();
     send();
@@ -3239,6 +3326,16 @@ document.addEventListener("keydown", (e) => {
   ) {
     e.preventDefault();
     openHelp();
+    return;
+  }
+  if (!$("#ask-modal").classList.contains("hidden")) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      answerAsk(true);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      answerAsk(false);
+    }
     return;
   }
   if (!$("#perm-modal").classList.contains("hidden")) {

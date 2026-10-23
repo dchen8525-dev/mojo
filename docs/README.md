@@ -53,3 +53,4 @@
 | [turn-restore-plan-continuity.md](turn-restore-plan-continuity.md) | 2026-10-23 | 压缩后读状态重注入 + bash 提示/图片提取 + 已批准计划延续 + SSRF 补口 |
 | [session-titles-subagent-mirroring.md](session-titles-subagent-mirroring.md) | 2026-10-23 | 会话标题 sidecar（首轮自动命名）+ 子代理工具事件实时镜像（start/result） |
 | [context-breakdown-early-tools.md](context-breakdown-early-tools.md) | 2026-10-23 | /context 上下文用量分解 + 只读工具流式提前执行（onToolReady） |
+| [structured-questions-session-context.md](structured-questions-session-context.md) | 2026-10-23 | 结构化提问 ask_user（1–4 问/超时放行）+ 跨会话检索 read_session（#sess_ 引用/词法选段/预算） |

@@ -328,6 +328,55 @@ describe("gui server", () => {
     });
   });
 
+  it("serves structured question answers and exposes pending questions in state", async () => {
+    await withServer(async (gui, runtime) => {
+      const pending = runtime.askUser({
+        questions: [{ question: "Pick one", options: [{ label: "a" }, { label: "b" }] }],
+        timeoutMs: 5000,
+      });
+      const id = runtime.pendingQuestions()[0].id;
+      const state = await req(gui.port, "/api/state", { token: TOKEN });
+      expect(state.json.pendingQuestions).toMatchObject([{ id, timeoutMs: 5000 }]);
+
+      const bad = await req(gui.port, "/api/answer", {
+        method: "POST",
+        token: TOKEN,
+        body: { id, answers: [{ question: "", selected: [] }] },
+      });
+      expect(bad.status).toBe(400);
+      expect(runtime.pendingQuestions()).toHaveLength(1);
+
+      const good = await req(gui.port, "/api/answer", {
+        method: "POST",
+        token: TOKEN,
+        body: { id, answers: [{ question: "Pick one", selected: ["b"] }] },
+      });
+      expect(good.status).toBe(200);
+      await expect(pending).resolves.toEqual({ answers: [{ question: "Pick one", selected: ["b"] }] });
+      expect(runtime.pendingQuestions()).toEqual([]);
+
+      const late = await req(gui.port, "/api/answer", {
+        method: "POST",
+        token: TOKEN,
+        body: { id, answers: [] },
+      });
+      expect(late.status).toBe(404);
+    });
+  });
+
+  it("flushes pending structured questions when the turn is aborted", async () => {
+    await withServer(async (gui, runtime) => {
+      const pending = runtime.askUser({
+        questions: [{ question: "Pick one", options: [{ label: "a" }, { label: "b" }] }],
+        timeoutMs: 5000,
+      });
+      const abort = await req(gui.port, "/api/abort", { method: "POST", token: TOKEN, body: {} });
+      expect(abort.status).toBe(200);
+      await expect(pending).resolves.toEqual({ answers: [], aborted: true });
+      expect(runtime.pendingQuestions()).toEqual([]);
+    });
+  });
+
   it("marks API responses and static assets as non-cacheable", async () => {
     await withServer(async (gui) => {
       const state = await req(gui.port, "/api/state", { token: TOKEN });

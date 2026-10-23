@@ -1,5 +1,7 @@
 import type { Tool } from "../types.js";
 import { readFileTool } from "./read.js";
+import { readSessionTool } from "./readSession.js";
+import { askUserTool } from "./askUser.js";
 import { writeFileTool, editFileTool } from "./write.js";
 import { bashTool, bashOutputTool, bashKillTool } from "./bash.js";
 import { globTool } from "./glob.js";
@@ -17,6 +19,8 @@ import { saveMemoryTool } from "../memoryWrite.js";
 
 export const tools: Tool[] = [
   readFileTool,
+  readSessionTool,
+  askUserTool,
   globTool,
   grepTool,
   todoWriteTool,

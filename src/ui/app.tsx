@@ -3,7 +3,7 @@ import { Box, Text, useApp, useInput, useStdout } from "ink";
 import TextInput from "ink-text-input";
 import { Agent, COMPACT_RATIO, type AgentEvents } from "../agent.js";
 import type { PermissionManager } from "../permissions.js";
-import type { ImageBlockParam, Risk } from "../types.js";
+import type { ImageBlockParam, Risk, UserQuestionOutcome, UserQuestionRequest } from "../types.js";
 import type { TodoItem } from "../tools/todo.js";
 import { bridge } from "./bridge.js";
 import { Markdown } from "./markdown.js";
@@ -32,6 +32,14 @@ interface PermissionRequest {
   risk: Risk;
   preview?: string;
   resolve: (answer: "yes" | "no" | "session" | "project" | "always" | "always_deny") => void;
+}
+
+interface AskState {
+  request: UserQuestionRequest;
+  /** Question being shown; earlier ones are already answered. */
+  index: number;
+  selected: Set<string>[];
+  resolve: (outcome: UserQuestionOutcome) => void;
 }
 
 const MAX_VISIBLE_TOOLS = 6;
@@ -161,6 +169,40 @@ function PermissionPrompt({ request, diffPage, diffSplit, termCols }: { request:
   );
 }
 
+function QuestionPrompt({ ask }: { ask: AskState }) {
+  const theme = useTheme();
+  const question = ask.request.questions[ask.index];
+  const selected = ask.selected[ask.index] ?? new Set<string>();
+  const total = ask.request.questions.length;
+  const timeoutSecs = Math.round(ask.request.timeoutMs / 1000);
+  const last = ask.index + 1 >= total;
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor={theme.accent} paddingX={1}>
+      <Text bold color={theme.accent}>
+        Question {ask.index + 1}/{total}
+        {question.header ? <Text dimColor> · {question.header}</Text> : null}
+      </Text>
+      <Text>{question.question}</Text>
+      {question.options.map((o, i) => {
+        const active = selected.has(o.label);
+        return (
+          <Box key={o.label} flexDirection="column">
+            <Text color={active ? theme.accent : undefined}>
+              {active ? (question.multiSelect ? "[x] " : "(o) ") : question.multiSelect ? "[ ] " : "( ) "}
+              {i + 1}. {o.label}
+            </Text>
+            {o.description && <Text dimColor>{"     " + o.description}</Text>}
+          </Box>
+        );
+      })}
+      <Text dimColor>
+        1-4 select{question.multiSelect ? " (multi)" : ""} · Enter {last ? "submit" : "next"} · Esc skip · {timeoutSecs}s
+        timeout
+      </Text>
+    </Box>
+  );
+}
+
 function TranscriptView({ items, expandedAll }: { items: TranscriptItem[]; expandedAll: boolean }) {
   const theme = useTheme();
   return (
@@ -258,6 +300,7 @@ export function AgentApp({
   const [busy, setBusy] = useState(false);
   const [input, setInput] = useState("");
   const [permission, setPermission] = useState<PermissionRequest | null>(null);
+  const [ask, setAsk] = useState<AskState | null>(null);
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const [error, setError] = useState("");
   const [pendingImages, setPendingImages] = useState<ImageBlockParam[]>([]);
@@ -276,6 +319,8 @@ export function AgentApp({
   const streamRef = useRef("");
   const permissionRef = useRef<PermissionRequest | null>(null);
   permissionRef.current = permission;
+  const askRef = useRef<AskState | null>(null);
+  askRef.current = ask;
   const busyRef = useRef(busy);
   busyRef.current = busy;
   const imagesRef = useRef<ImageBlockParam[]>([]);
@@ -283,6 +328,51 @@ export function AgentApp({
   const pastingRef = useRef(false);
   const themeRef = useRef(theme);
   themeRef.current = theme;
+
+  /** Answer the current question (or skip it and every later one). */
+  const finishAsk = useCallback((skipRest: boolean) => {
+    const current = askRef.current;
+    if (!current) return;
+    askRef.current = null;
+    current.resolve({
+      answers: current.request.questions.map((q, i) => ({
+        question: q.question,
+        selected: skipRest && i >= current.index ? [] : [...current.selected[i]],
+      })),
+    });
+  }, []);
+
+  const advanceAsk = useCallback(() => {
+    const current = askRef.current;
+    if (!current) return;
+    if (current.index + 1 >= current.request.questions.length) {
+      finishAsk(false);
+      return;
+    }
+    const next = { ...current, index: current.index + 1 };
+    askRef.current = next;
+    setAsk(next);
+  }, [finishAsk]);
+
+  const toggleAskOption = useCallback((optionIndex: number) => {
+    const current = askRef.current;
+    if (!current) return;
+    const question = current.request.questions[current.index];
+    const option = question.options[optionIndex];
+    if (!option) return;
+    const selected = current.selected.map((s, i) => (i === current.index ? new Set(s) : s));
+    const set = selected[current.index];
+    if (question.multiSelect) {
+      if (set.has(option.label)) set.delete(option.label);
+      else set.add(option.label);
+    } else {
+      set.clear();
+      set.add(option.label);
+    }
+    const next = { ...current, selected };
+    askRef.current = next;
+    setAsk(next);
+  }, []);
 
   // Let /theme (CLI side, outside React) swap the palette in place.
   useEffect(() => {
@@ -319,6 +409,22 @@ export function AgentApp({
   useInput(
     useCallback(
       (ch, key) => {
+        const question = askRef.current;
+        if (question) {
+          if (key.escape) {
+            finishAsk(true);
+            return;
+          }
+          if (key.return) {
+            advanceAsk();
+            return;
+          }
+          const option = Number(ch);
+          if (Number.isInteger(option) && option >= 1 && option <= 4) {
+            toggleAskOption(option - 1);
+          }
+          return;
+        }
         const perm = permissionRef.current;
         if (perm) {
           if (key.pageDown) {
@@ -416,7 +522,7 @@ export function AgentApp({
           else exit();
         }
       },
-      [historySel, exit],
+      [historySel, exit, finishAsk, advanceAsk, toggleAskOption],
     ),
   );
 
@@ -489,6 +595,33 @@ export function AgentApp({
           setItems((prev) => [...prev, { kind: "system", text: "plan approved — switching to execution mode" }]);
           setPlanMode(false);
         },
+        onUserQuestion: (request, signal) =>
+          new Promise<UserQuestionOutcome>((resolve) => {
+            let settled = false;
+            let onAbort = () => {};
+            const finish = (outcome: UserQuestionOutcome) => {
+              if (settled) return;
+              settled = true;
+              signal.removeEventListener("abort", onAbort);
+              askRef.current = null;
+              setAsk(null);
+              resolve(outcome);
+            };
+            onAbort = () => finish({ answers: [], timedOut: true });
+            if (signal.aborted) {
+              resolve({ answers: [], aborted: true });
+              return;
+            }
+            signal.addEventListener("abort", onAbort, { once: true });
+            const next: AskState = {
+              request,
+              index: 0,
+              selected: request.questions.map(() => new Set<string>()),
+              resolve: finish,
+            };
+            askRef.current = next;
+            setAsk(next);
+          }),
       };
 
       try {
@@ -597,6 +730,8 @@ export function AgentApp({
 
         {permission && <PermissionPrompt request={permission} diffPage={diffPage} diffSplit={diffSplit} termCols={termCols} />}
 
+        {ask && <QuestionPrompt ask={ask} />}
+
         {error && <Text color={theme.error}>Error: {error}</Text>}
 
         <TodoPanel todos={todos} />
@@ -611,7 +746,7 @@ export function AgentApp({
             value={input}
             onChange={setInput}
             onSubmit={onSubmit}
-            focus={!permission && !historyOpen}
+            focus={!permission && !historyOpen && !ask}
             placeholder={busy ? "steer the running turn — input is queued" : "ask the agent… (/help · Esc history · Ctrl+O expand)"}
           />
         </Box>
