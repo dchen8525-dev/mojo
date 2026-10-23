@@ -34,6 +34,7 @@ let backend: RunningBackend;
 let base: string;
 let messageRequests = 0;
 let failNext = false;
+let breakNext = false;
 let retryAfterSecs = 1;
 
 function startMock(): Promise<http.Server> {
@@ -53,6 +54,43 @@ function startMock(): Promise<http.Server> {
         return;
       }
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+      if (breakNext) {
+        // Text, then a tool call that never finishes its arguments: the
+        // facade must restart instead of resuming from the partial text.
+        breakNext = false;
+        const send = (event: string, data: unknown) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        send("message_start", {
+          type: "message_start",
+          message: {
+            id: "msg_break",
+            type: "message",
+            role: "assistant",
+            model: "claude-sonnet-4-5",
+            content: [],
+            stop_reason: null,
+            stop_sequence: null,
+            usage: { input_tokens: 12, output_tokens: 1 },
+          },
+        });
+        send("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+        send("content_block_delta", {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "DISCARDED" },
+        });
+        send("content_block_start", {
+          type: "content_block_start",
+          index: 1,
+          content_block: { type: "tool_use", id: "toolu_broken", name: "read_file", input: {} },
+        });
+        send("content_block_delta", {
+          type: "content_block_delta",
+          index: 1,
+          delta: { type: "input_json_delta", partial_json: '{"path":"a' },
+        });
+        setTimeout(() => res.destroy(), 10);
+        return;
+      }
       const send = (event: string, data: unknown) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
       send("message_start", {
         type: "message_start",
@@ -239,6 +277,31 @@ describe("GUI retry path (real HTTP/SSE)", () => {
     expect(messageRequests - before).toBe(2);
     expect(sub.frames.some((f) => f.event === "turn_error")).toBe(false);
     expect(sub.frames.map((f) => f.event)).toContain("text_delta");
+    sub.close();
+  });
+
+  it("restarts a stream that died mid-tool-call and reports the discarded tail", async () => {
+    const sub = openStream();
+    await sub.ready;
+    breakNext = true;
+    const before = messageRequests;
+
+    expect((await postJson("/api/chat", { text: "restart me" })).status).toBe(202);
+
+    const rec = await sub.waitFor("stream_recovery");
+    expect(rec).toMatchObject({
+      attempt: 1,
+      maxAttempts: 4,
+      mode: "restart",
+      discardedChars: "DISCARDED".length,
+      reason: "connection",
+    });
+
+    const end = await sub.waitFor("turn_end");
+    // The server trimmed the abandoned attempt from the turn before saving it.
+    expect(end.text).toBe(FINAL_TEXT);
+    expect(messageRequests - before).toBe(2);
+    expect(sub.frames.some((f) => f.event === "turn_error")).toBe(false);
     sub.close();
   });
 

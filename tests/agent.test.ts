@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";import type { ContentBlock, MessageParam, ToolUseBlock, UserQuestionRequest } from "../src/types.js";
-import { CancelledStreamError } from "../src/llm/types.js";
+import { CancelledStreamError, StreamRecoveryExhausted } from "../src/llm/types.js";
 
 // Scripted fake LLM: each send() pops the next canned turn.
 const h = vi.hoisted(() => ({
@@ -425,6 +425,52 @@ describe("Agent.chat early read-only execution", () => {
     const results = lastSentContent() as Array<{ tool_use_id: string; content: string }>;
     expect(results.map((r) => r.tool_use_id)).toEqual(["tu0", "tu1"]);
     expect(results.map((r) => r.content)).toEqual(["S1", "P2"]);
+  });
+
+  it("drops stale early-run events once a restart discards the attempt", async () => {
+    let runs = 0;
+    registerTool({
+      name: "t_slow_early",
+      description: "test",
+      isReadOnly: true,
+      parallelSafe: true,
+      inputSchema: { type: "object", properties: {} },
+      async execute(_input, ctx) {
+        runs++;
+        if (runs === 1) {
+          // Finishes only when the restart aborts the discarded attempt.
+          await new Promise<void>((resolve) => {
+            if (ctx.signal?.aborted) resolve();
+            else ctx.signal?.addEventListener("abort", () => resolve(), { once: true });
+          });
+          return { content: "EARLY" };
+        }
+        return { content: "LATE" };
+      },
+    });
+    h.onStream = async (events, toolUses) => {
+      if (!toolUses.length) return; // final text round
+      events?.onToolReady?.(toolUses[0]);
+      await new Promise((r) => setTimeout(r, 10));
+      (events as unknown as { onStreamRecovery?: (info: Record<string, unknown>) => void }).onStreamRecovery?.({
+        attempt: 1,
+        maxAttempts: 4,
+        mode: "restart",
+        discardedChars: 5,
+        delayMs: 0,
+        reason: "connection",
+      });
+      await new Promise((r) => setTimeout(r, 10)); // the aborted run settles here
+    };
+    h.turns = [toolTurn([["t_slow_early", { n: 1 }]]), textTurn("done")];
+    const seen: string[] = [];
+    await makeAgent().chat("go", undefined, {
+      onToolStart: (_id, name) => seen.push(`start ${name}`),
+      onToolEnd: (_id, name, _ok, preview) => seen.push(`end ${name} ${preview}`),
+    });
+    // The discarded attempt's end event is suppressed; the re-run in the
+    // normal wave reports normally, exactly once.
+    expect(seen).toEqual(["start t_slow_early", "start t_slow_early", "end t_slow_early LATE"]);
   });
 });
 
@@ -1161,6 +1207,19 @@ describe("cancelled-stream salvage", () => {
     const b = makeAgent();
     await expect(b.chat("hi")).rejects.toThrow("aborted");
     expect(h.appended.some((m) => m.role === "assistant")).toBe(false);
+    h.onSend = null;
+  });
+
+  it("persists the received text when stream recovery is exhausted", async () => {
+    h.appended = [];
+    h.onSend = () => {
+      throw new StreamRecoveryExhausted("partial after recovery", 4);
+    };
+    const a = makeAgent();
+    await expect(a.chat("hi")).rejects.toThrow(/stream interrupted/);
+    const asst = h.appended.find((m) => m.role === "assistant");
+    expect(asst).toBeDefined();
+    expect(JSON.stringify(asst!.content)).toContain("partial after recovery");
     h.onSend = null;
   });
 });

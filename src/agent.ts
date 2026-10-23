@@ -15,7 +15,7 @@ import { validateToolInput } from "./types.js";
 import { RuntimeCommandQueue, type RuntimeCommandImage } from "./runtimeQueue.js";
 import { enforceSessionMediaBudget, mediaLimits, validateImages } from "./mediaBudget.js";
 import { LLM, type Config, type StreamEvents } from "./llm.js";
-import { CancelledStreamError } from "./llm/types.js";
+import { CancelledStreamError, StreamRecoveryExhausted } from "./llm/types.js";
 import { lookupModel } from "./llm/models.js";
 import type { AssistantTurn, SystemPrompt } from "./llm/types.js";
 import { deferredTools, getTool, tools, todoStore, isExposed } from "./tools/index.js";
@@ -816,7 +816,30 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
         // are complete, without waiting for the whole response. They are
         // matched back by id below; everything else runs in the normal waves.
         const earlyRuns = new Map<string, Promise<ToolResultBlockParam>>();
-        const earlyAbort = new AbortController();
+        let earlyAbort = new AbortController();
+        // A restart aborts early runs but cannot stop an in-flight tool from
+        // reporting its end during the recovery sleep. Events from a discarded
+        // attempt would re-create tool cards the host just rolled back, so gate
+        // them on the attempt they were started under.
+        let earlyEpoch = 0;
+        const earlyEvents = (epoch: number): AgentEvents | undefined => {
+          if (!events) return undefined;
+          return {
+            ...events,
+            onToolStart: (id, name, preview, input) => {
+              if (epoch === earlyEpoch) events.onToolStart?.(id, name, preview, input);
+            },
+            onToolEnd: (id, name, ok, preview, output) => {
+              if (epoch === earlyEpoch) events.onToolEnd?.(id, name, ok, preview, output);
+            },
+            onSubTool: (parentId, name, preview, ok, result, round) => {
+              if (epoch === earlyEpoch) events.onSubTool?.(parentId, name, preview, ok, result, round);
+            },
+            onSubToolStart: (parentId, name, preview, round) => {
+              if (epoch === earlyEpoch) events.onSubToolStart?.(parentId, name, preview, round);
+            },
+          };
+        };
         const forwardAbort = () => earlyAbort.abort();
         if (signal?.aborted) earlyAbort.abort();
         else signal?.addEventListener("abort", forwardAbort, { once: true });
@@ -829,13 +852,29 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
             signal,
             {
               ...events,
+              onStreamRecovery: (info) => {
+                if (info.mode === "restart") {
+                  // Early-started read-only tools belong to the discarded
+                  // response: stop them and forget their results so the
+                  // re-run cannot pair them with mismatched calls.
+                  earlyEpoch++;
+                  signal?.removeEventListener("abort", forwardAbort);
+                  earlyAbort.abort();
+                  earlyRuns.clear();
+                  earlyAbort = new AbortController();
+                  if (signal?.aborted) earlyAbort.abort();
+                  else signal?.addEventListener("abort", forwardAbort, { once: true });
+                }
+                events?.onStreamRecovery?.(info);
+              },
               onToolReady: (tu) => {
                 const tool = getTool(tu.name);
                 if (!tool || !tool.isReadOnly || !tool.parallelSafe || !tu.id) return;
                 if (earlyAbort.signal.aborted || earlyRuns.has(tu.id)) return;
+                const epoch = earlyEpoch;
                 earlyRuns.set(
                   tu.id,
-                  this.runTool(tu, earlyAbort.signal, events).catch(
+                  this.runTool(tu, earlyAbort.signal, earlyEvents(epoch)).catch(
                     (err): ToolResultBlockParam => ({
                       type: "tool_result",
                       tool_use_id: tu.id,
@@ -952,19 +991,21 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
       // Queued steering dies with a failed or aborted turn: never auto-replay
       // it into the next one.
       this.runtimeQueue.cancelAll("steer");
-      // A user abort mid-stream must not lose the text already delivered to
-      // the UI: salvage it as a plain assistant message so /resume and the
-      // next request see the same thing the user saw, and the history stays
-      // API-valid (text-only assistant message needs no tool_result).
-      if (err instanceof CancelledStreamError && err.partialText.trim()) {
+      // A user abort or an unrecoverable stream break must not lose the text
+      // already delivered to the UI: salvage it as a plain assistant message
+      // so /resume and the next request see the same thing the user saw, and
+      // the history stays API-valid (text-only assistant needs no tool_result).
+      const salvage =
+        err instanceof CancelledStreamError || err instanceof StreamRecoveryExhausted ? err.partialText : "";
+      if (salvage.trim()) {
         try {
           this.messages.push({
             role: "assistant",
-            content: [{ type: "text", text: err.partialText }],
+            content: [{ type: "text", text: salvage }],
           });
           await this.persistTurn();
         } catch {
-          // salvage is best-effort; the original abort still propagates
+          // salvage is best-effort; the original error still propagates
         }
       }
       throw err;

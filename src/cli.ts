@@ -201,6 +201,14 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
       const secs = Math.round(info.delayMs / 100) / 10;
       console.log(ANSI.warn(`… retrying in ${secs}s (${info.attempt}/${info.maxAttempts}, ${why})`));
     },
+    onStreamRecovery: (info) => {
+      const secs = Math.round(info.delayMs / 100) / 10;
+      const what =
+        info.mode === "restart"
+          ? `discarding ${info.discardedChars} chars and restarting`
+          : "resuming from the cut-off point";
+      console.log(ANSI.warn(`… stream interrupted — ${what} in ${secs}s (${info.attempt}/${info.maxAttempts})`));
+    },
   };
 
   const controller = new AbortController();

@@ -126,11 +126,11 @@ export class AnthropicBackend implements LLMBackend {
         }
       }
     } catch (err) {
-      // A dead connection mid-text can be resumed from the partial output;
-      // a break during tool-call streaming cannot (incomplete args), so only
-      // surface StreamInterrupted for the resumable case.
-      if (!toolStarted && text && !signal?.aborted && !(err instanceof Error && err.name === "APIUserAbortError")) {
-        throw new StreamInterrupted(text, err);
+      // Surface mid-stream breaks to the facade, which decides whether to
+      // resume from the text or restart because a tool call was left with
+      // incomplete arguments. User aborts keep their own path.
+      if (text && !signal?.aborted && !(err instanceof Error && err.name === "APIUserAbortError")) {
+        throw new StreamInterrupted(text, err, { toolStarted });
       }
       throw err;
     } finally {

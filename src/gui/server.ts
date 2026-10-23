@@ -491,6 +491,25 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
       onHook: (event, message) => hub.broadcast("hook", { event, message }),
       onPlanApproved: () => hub.broadcast("plan_approved", {}),
       onRetry: (info) => hub.broadcast("retry", info),
+      onStreamRecovery: (info) => {
+        // A restart abandons the response produced so far: trim the live turn
+        // (and this round's tool cards) so the snapshot matches what the client
+        // is told to discard.
+        if (info.mode === "restart") {
+          turn.text = turn.text.slice(0, Math.max(0, turn.text.length - info.discardedChars));
+          const round = turn.round ?? 1;
+          turn.tools = turn.tools.filter((t) => t.round !== round);
+          const seg = turn.rounds?.find((r) => r.round === round) ?? turn.rounds?.[turn.rounds.length - 1];
+          if (seg) {
+            seg.text = seg.text.slice(0, Math.max(0, seg.text.length - info.discardedChars));
+            if (seg.thinking) {
+              turn.thinking = turn.thinking.slice(0, Math.max(0, turn.thinking.length - seg.thinking.length));
+              seg.thinking = "";
+            }
+          }
+        }
+        hub.broadcast("stream_recovery", info);
+      },
     };
   }
 

@@ -50,6 +50,14 @@ describe("headless NDJSON contract", () => {
     h.events.onCompacted?.(900, 400);
     h.events.onRetry?.({ attempt: 2, maxAttempts: 5, delayMs: 1500, reason: "server", status: 502 });
     h.events.onRetry?.({ attempt: 3, maxAttempts: 5, delayMs: 200, reason: "timeout" });
+    h.events.onStreamRecovery?.({
+      attempt: 1,
+      maxAttempts: 4,
+      mode: "restart",
+      discardedChars: 12,
+      delayMs: 500,
+      reason: "connection",
+    });
     h.events.onCostWarning?.("over budget");
     h.events.onHook?.("PostToolUse", "done");
     h.events.onPlanApproved?.();
@@ -70,6 +78,7 @@ describe("headless NDJSON contract", () => {
       "compacted",
       "retry",
       "retry",
+      "stream_recovery",
       "cost_warning",
       "hook",
       "plan_approved",
@@ -82,6 +91,15 @@ describe("headless NDJSON contract", () => {
     expect(parsed[9]).toEqual({ ts: expect.any(String), type: "usage", input: 120, output: 45 });
     expect(parsed[12]).toMatchObject({ type: "retry", attempt: 2, max_attempts: 5, delay_ms: 1500, reason: "server", status: 502 });
     expect(parsed[13]).not.toHaveProperty("status");
+    expect(parsed[14]).toMatchObject({
+      type: "stream_recovery",
+      attempt: 1,
+      max_attempts: 4,
+      mode: "restart",
+      discarded_chars: 12,
+      delay_ms: 500,
+      reason: "connection",
+    });
   });
 
   it("wraps permission asks so decisions are observable", async () => {

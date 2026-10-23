@@ -49,6 +49,7 @@ function makeLLM(provider: "anthropic" | "openai" = "anthropic") {
 
 afterEach(() => {
   h.script.length = 0;
+  delete process.env.AGENT_RETRY_BASE_MS;
 });
 
 describe("cancelled-stream salvage", () => {
@@ -88,6 +89,7 @@ describe("cancelled-stream salvage", () => {
   });
 
   it("aborts during an anthropic resume keep prefill + held-back suffix", async () => {
+    process.env.AGENT_RETRY_BASE_MS = "0";
     const ac = new AbortController();
     h.script.push(async () => {
       throw new StreamInterrupted("part one ");

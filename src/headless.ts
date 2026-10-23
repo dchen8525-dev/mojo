@@ -87,6 +87,16 @@ export function createNdjsonEvents(
           reason: info.reason,
           ...(info.status !== undefined ? { status: info.status } : {}),
         }),
+      onStreamRecovery: (info) =>
+        emit({
+          type: "stream_recovery",
+          attempt: info.attempt,
+          max_attempts: info.maxAttempts,
+          mode: info.mode,
+          discarded_chars: info.discardedChars,
+          delay_ms: info.delayMs,
+          reason: info.reason,
+        }),
       onCostWarning: (message) => emit({ type: "cost_warning", message }),
       onHook: (event, message) => emit({ type: "hook", event, message }),
       onPlanApproved: () => emit({ type: "plan_approved" }),

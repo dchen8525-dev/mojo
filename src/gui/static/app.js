@@ -1102,6 +1102,42 @@ function connectSSE() {
             : "连接失败";
     appendItem(makeSystemItem(`… ${Math.round(d.delayMs / 100) / 10} 秒后重试（${d.attempt}/${d.maxAttempts} · ${why}）`));
   });
+  on("stream_recovery", (d) => {
+    const secs = Math.round(d.delayMs / 100) / 10;
+    const what = d.mode === "restart" ? "丢弃未完成的工具调用，重新生成" : "从已生成内容继续";
+    appendItem(makeSystemItem(`… 流中断：${what}（${d.attempt}/${d.maxAttempts} · ${secs} 秒后）`));
+    if (d.mode !== "restart" || !state.liveTurn) return;
+    // Drop the abandoned response: its text, thinking, tool cards and round
+    // bubble are all invalid; a fresh live segment starts after the notice.
+    const lt = state.liveTurn;
+    const round = lt.round ?? 1;
+    const drop = Math.max(0, d.discardedChars || 0);
+    lt.text = lt.text.slice(0, Math.max(0, lt.text.length - drop));
+    const seg = (lt.rounds ?? []).find((s) => s.round === round);
+    if (seg) {
+      seg.text = seg.text.slice(0, Math.max(0, seg.text.length - drop));
+      if (seg.thinking) {
+        lt.thinking = lt.thinking.slice(0, Math.max(0, lt.thinking.length - seg.thinking.length));
+        seg.thinking = "";
+      }
+    }
+    for (const t of lt.tools.filter((x) => (x.round ?? 1) === round)) {
+      liveNodes?.toolEls.get(t.id)?.remove();
+      liveNodes?.toolEls.delete(t.id);
+    }
+    lt.tools = lt.tools.filter((x) => (x.round ?? 1) !== round);
+    if (liveNodes) {
+      const live = liveNodes.rounds.get(round);
+      if (live) {
+        live.thinkEl?.remove();
+        live.textEl.remove();
+        liveNodes.rounds.delete(round);
+      }
+      liveNodes.groups.get(round)?.remove();
+      liveNodes.groups.delete(round);
+      makeLiveSegment(round);
+    }
+  });
   on("hook", (d) => appendItem(makeSystemItem(`[hook ${d.event}] ${d.message}`)));
   on("plan_approved", () => {
     syncPermissionUi({ planMode: false, mode: state.mode });

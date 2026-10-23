@@ -3,7 +3,7 @@ import path from "node:path";
 import { readFileSync } from "node:fs";
 import type { MessageParam, Tool, ContentBlock, ToolUseBlock } from "./types.js";
 import type { AssistantTurn, LLMBackend, Provider, RetryReason, StreamEvents, SystemPrompt } from "./llm/types.js";
-import { StreamInterrupted, CancelledStreamError } from "./llm/types.js";
+import { StreamInterrupted, CancelledStreamError, StreamRecoveryExhausted } from "./llm/types.js";
 import { AnthropicBackend } from "./llm/anthropic.js";
 import { OpenAiBackend } from "./llm/openai.js";
 import { lookupModel } from "./llm/models.js";
@@ -11,7 +11,7 @@ import { fetchModelMeta, getModelMeta, setModelMeta, type ModelMeta } from "./mo
 import { recordJournalTurn } from "./journal.js";
 
 export type { AssistantTurn, StreamEvents, Provider } from "./llm/types.js";
-export { CancelledStreamError } from "./llm/types.js";
+export { CancelledStreamError, StreamRecoveryExhausted } from "./llm/types.js";
 export { knownModelNames, lookupModel } from "./llm/models.js";
 
 export interface Config {
@@ -255,12 +255,7 @@ export class LLM {
         if ((err as { name?: string }).name === "APIUserAbortError") throw err;
         const e = err as { status?: number; headers?: { get?: (k: string) => string | null } };
         const status = e.status;
-        const retriable =
-          status === 408 ||
-          status === 429 ||
-          (typeof status === "number" && status >= 500 && status < 600) ||
-          (status === undefined && LLM.isConnectionError(err));
-        if (!retriable) throw err;
+        if (!LLM.isTransientError(err)) throw err;
         // Respect server-provided Retry-After when present, else back off
         // exponentially (1s -> 2s -> 4s ...) with a little jitter so clients
         // that fail together do not retry in lockstep.
@@ -315,6 +310,51 @@ export class LLM {
     };
   }
 
+  /**
+   * How many times one logical request may recover from a broken stream
+   * (AGENT_STREAM_RECOVERY_ATTEMPTS, default 4; 0 disables recovery).
+   */
+  private static streamRecoveryAttempts(): number {
+    const n = Number(process.env.AGENT_STREAM_RECOVERY_ATTEMPTS);
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 4;
+  }
+
+  /** Same exponential backoff as retries, indexed by recovery number (0-based). */
+  private static recoveryDelayMs(index: number): number {
+    const cfg = LLM.retryConfig();
+    return Math.round(
+      Math.min(cfg.baseMs * 2 ** index, cfg.maxDelayMs) * (1 + (Math.random() * 2 - 1) * cfg.jitter),
+    );
+  }
+
+  /** Label a stream break for the UI; `stream` when the cause is unknown. */
+  private static recoveryReason(cause: unknown): RetryReason | "stream" {
+    const e = cause as { status?: number; name?: string } | undefined;
+    if (!e) return "stream";
+    if (e.status === 429) return "rate-limit";
+    if (e.status === 408 || e.name === "StreamIdleError") return "timeout";
+    if (typeof e.status === "number") return e.status >= 500 && e.status < 600 ? "server" : "stream";
+    return "connection";
+  }
+
+  /**
+   * A broken stream is worth recovering only for transient causes; a 400 or a
+   * malformed request would fail the same way on every retry. A missing cause
+   * counts as transient (tests and gateways that drop the socket outright).
+   */
+  private static isRecoverableStreamBreak(err: StreamInterrupted): boolean {
+    return err.cause === undefined || LLM.isTransientError(err.cause);
+  }
+
+  /** Transient failures that retry/stream-recovery may re-attempt. */
+  private static isTransientError(err: unknown): boolean {
+    const e = err as { status?: number } | null;
+    const status = e?.status;
+    if (status === 408 || status === 429) return true;
+    if (typeof status === "number") return status >= 500 && status < 600;
+    return LLM.isConnectionError(err);
+  }
+
   /** Abort a stream that stops sending events (AGENT_STREAM_IDLE_MS, 0 = off). */
   private static streamIdleMs(): number {
     const n = Number(process.env.AGENT_STREAM_IDLE_MS);
@@ -325,16 +365,23 @@ export class LLM {
   private static isConnectionError(err: unknown): boolean {
     // SDK 0.135 stopped setting `name` on APIConnectionError, so fall back to
     // the constructor name before giving up on classifying it.
-    const e = err as { name?: string; constructor?: { name?: string } } | null;
+    const e = err as { name?: string; constructor?: { name?: string }; code?: string; message?: string } | null;
     const ctorName = e?.constructor?.name;
     if (ctorName === "APIConnectionError" || ctorName === "APIConnectionTimeoutError") return true;
     const name = e?.name;
-    return (
-      name === "APIConnectionError" ||
-      name === "APIConnectionTimeoutError" ||
-      name === "StreamIdleError" ||
-      (err instanceof TypeError && /fetch failed|network|terminat/i.test(err.message))
-    );
+    if (name === "APIConnectionError" || name === "APIConnectionTimeoutError" || name === "StreamIdleError") return true;
+    const code = e?.code;
+    if (
+      code &&
+      ["ECONNRESET", "ECONNREFUSED", "EPIPE", "ETIMEDOUT", "EAI_AGAIN", "UND_ERR_SOCKET", "ERR_STREAM_PREMATURE_CLOSE"].includes(
+        code,
+      )
+    ) {
+      return true;
+    }
+    // Undici surfaces a killed SSE body as a plain Error("terminated") or
+    // Error("premature close"); neither carries a status or a code.
+    return /fetch failed|network|terminated|premature close|socket hang up/i.test(e?.message ?? "");
   }
 
   /** Wake immediately on abort instead of finishing a multi-second backoff. */
@@ -409,6 +456,16 @@ export class LLM {
     }
   }
 
+  /**
+   * Recovery state machine for one logical request. A stream that dies mid-text
+   * is resumed from the cut-off point (provider prefill / continuation). A
+   * stream that dies while tool arguments are still arriving cannot be resumed,
+   * so the partial response is discarded and the request is re-run — the host
+   * is told how many visible characters to drop via `onStreamRecovery`.
+   * Recovery is transient-only, backed off, and budgeted; when it runs out the
+   * received text is thrown as `StreamRecoveryExhausted` for the agent to
+   * salvage into history instead of losing what the user already saw.
+   */
   private async sendResumable(
     messages: MessageParam[],
     system: string | SystemPrompt,
@@ -416,14 +473,15 @@ export class LLM {
     signal?: AbortSignal,
     events?: StreamEvents,
   ): Promise<AssistantTurn> {
-    const MAX_RESUMES = 2;
+    const maxRecoveries = LLM.streamRecoveryAttempts();
+    // Text accumulated across resumes; also the provider-safe prefill anchor.
     let partial = "";
-    // Track what the caller has actually seen. If the user aborts mid-stream,
-    // this is the only record of the visible text - the agent salvages it
-    // into the history so the transcript keeps what was already on screen.
-    let streamed = "";
+    // Characters the host has actually rendered for this response. Aborts and
+    // restarts use it to salvage or discard exactly what was on screen.
+    let visible = "";
+    let recoveries = 0;
 
-    for (let attempt = 0; ; attempt++) {
+    for (;;) {
       let resumedMessages = messages;
       if (partial) {
         if (this.provider === "anthropic") {
@@ -451,7 +509,7 @@ export class LLM {
           partial && events
             ? { ...events, onTextDelta: (d: string) => { resumedDelta += d; } }
             : events && partial === ""
-              ? { ...events, onTextDelta: (d: string) => { streamed += d; events.onTextDelta?.(d); } }
+              ? { ...events, onTextDelta: (d: string) => { visible += d; events.onTextDelta?.(d); } }
               : events;
         const turn = await LLM.withRetry(
           (retryAttempt) =>
@@ -470,7 +528,8 @@ export class LLM {
         );
         LLM.ensureUniqueToolIds(turn);
         if (!partial) return turn;
-        const text = LLM.mergeText(partial, turn.text);        const suffix = text.slice(partial.length);
+        const text = LLM.mergeText(partial, turn.text);
+        const suffix = text.slice(visible.length);
         if (suffix) events?.onTextDelta?.(suffix);
         return {
           ...turn,
@@ -487,18 +546,51 @@ export class LLM {
         // streamed-so-far text for the agent to salvage.
         if (signal?.aborted) {
           throw new CancelledStreamError(
-            attempt === 0 ? streamed : partial + (this.provider === "anthropic" ? resumedDelta : ""),
+            partial ? partial + (this.provider === "anthropic" ? resumedDelta : "") : visible,
           );
         }
-        if (err instanceof StreamInterrupted && attempt < MAX_RESUMES) {
-          partial += err.partialText;
-          continue;
+        if (!(err instanceof StreamInterrupted)) throw err;
+
+        const combined = partial ? LLM.mergeText(partial, err.partialText) : err.partialText;
+        const mode = err.toolStarted ? "restart" : "resume";
+        if (mode === "resume") {
+          // Sync the host with the held-back continuation: on resumed attempts
+          // deltas are withheld until the overlap is known, and without this
+          // the text from an interrupted attempt would never reach the UI.
+          const unseen = combined.slice(visible.length);
+          visible = combined;
+          if (unseen) events?.onTextDelta?.(unseen);
         }
-        if (err instanceof StreamInterrupted && partial) {
-          // Out of resume attempts: salvage what we have rather than losing it.
-          throw new Error(`stream interrupted; ${partial.length} chars were received before the break: ${partial}`);
+
+        const recoverable = recoveries < maxRecoveries && LLM.isRecoverableStreamBreak(err);
+        if (!recoverable) {
+          // Everything visible stays visible; hand the text to the agent for
+          // history salvage instead of dropping it with the error.
+          throw new StreamRecoveryExhausted(mode === "restart" ? visible : combined, recoveries, err.cause ?? err);
         }
-        throw err;
+
+        recoveries++;
+        const delayMs = LLM.recoveryDelayMs(recoveries - 1);
+        events?.onStreamRecovery?.({
+          attempt: recoveries,
+          maxAttempts: maxRecoveries,
+          mode,
+          discardedChars: mode === "restart" ? visible.length : 0,
+          delayMs,
+          reason: LLM.recoveryReason(err.cause),
+        });
+        if (mode === "restart") {
+          // The incomplete tool call is unusable; re-run from the original
+          // messages and make the host drop the abandoned response.
+          partial = "";
+          visible = "";
+        } else {
+          partial = combined;
+        }
+        await LLM.abortableSleep(delayMs, signal);
+        if (signal?.aborted) {
+          throw new CancelledStreamError(mode === "restart" ? "" : partial);
+        }
       }
     }
   }

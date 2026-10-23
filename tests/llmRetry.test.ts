@@ -3,7 +3,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MessageParam } from "../src/types.js";
 import type { RetryInfo, StreamEvents } from "../src/llm/types.js";
-import { StreamInterrupted } from "../src/llm/types.js";
+import { CancelledStreamError, StreamInterrupted, StreamRecoveryExhausted } from "../src/llm/types.js";
 
 // The facade is what retries; swap both backends for a scripted one so no
 // network or API key is involved.
@@ -101,6 +101,7 @@ afterEach(() => {
   delete process.env.AGENT_RETRY_JITTER;
   delete process.env.AGENT_RETRY_BASE_MS;
   delete process.env.AGENT_RETRY_MAX_ATTEMPTS;
+  delete process.env.AGENT_STREAM_RECOVERY_ATTEMPTS;
   vi.useRealTimers();
 });
 
@@ -359,7 +360,9 @@ describe("LLM retry and stream resume", () => {
       () => { throw new StreamInterrupted("Hello"); },
       () => turn("Hello world"),
     );
-    const result = await makeLLM("anthropic").send(messages, "S", []);
+    const p = makeLLM("anthropic").send(messages, "S", []);
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await p;
 
     expect(result.text).toBe("Hello world");
     expect(h.calls).toHaveLength(2);
@@ -381,9 +384,11 @@ describe("LLM retry and stream resume", () => {
       },
     );
     const deltas: string[] = [];
-    const result = await makeLLM("openai").send(messages, "S", [], undefined, {
+    const p = makeLLM("openai").send(messages, "S", [], undefined, {
       onTextDelta: (delta) => deltas.push(delta),
     });
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await p;
 
     expect(result.text).toBe("Hello world");
     expect(deltas).toEqual(["Hello", " world"]);
@@ -394,7 +399,9 @@ describe("LLM retry and stream resume", () => {
       () => { throw new StreamInterrupted("abc"); },
       () => turn("abc def"),
     );
-    const result = await makeLLM("openai").send(messages, "S", []);
+    const p = makeLLM("openai").send(messages, "S", []);
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await p;
 
     expect(result.text).toBe("abc def");
     expect(h.calls).toHaveLength(2);
@@ -404,14 +411,130 @@ describe("LLM retry and stream resume", () => {
     expect(String(last.content)).toContain("abc");
   });
 
-  it("stops after two resumes and reports the received text", async () => {
+  it("reports a resume recovery with its backoff", async () => {
+    setScript(
+      () => { throw new StreamInterrupted("abc"); },
+      () => turn("abcdef"),
+    );
+    const seen: Array<Record<string, unknown>> = [];
+    const p = makeLLM().send(messages, "S", [], undefined, {
+      onStreamRecovery: (info) => seen.push(info),
+    });
+    await vi.advanceTimersByTimeAsync(999);
+    expect(h.calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(p).resolves.toMatchObject({ text: "abcdef" });
+    expect(seen).toEqual([
+      { attempt: 1, maxAttempts: 4, mode: "resume", discardedChars: 0, delayMs: 1000, reason: "stream" },
+    ]);
+  });
+
+  it("restarts from the original messages when a tool call was streaming", async () => {
+    setScript(
+      () => {
+        h.calls.at(-1)!.events?.onTextDelta?.("intro");
+        throw new StreamInterrupted("intro", undefined, { toolStarted: true });
+      },
+      () => {
+        h.calls.at(-1)!.events?.onTextDelta?.("second try");
+        return turn("second try");
+      },
+    );
+    const deltas: string[] = [];
+    const seen: Array<Record<string, unknown>> = [];
+    const p = makeLLM("anthropic").send(messages, "S", [], undefined, {
+      onTextDelta: (delta) => deltas.push(delta),
+      onStreamRecovery: (info) => seen.push(info),
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await p;
+
+    expect(result.text).toBe("second try");
+    expect(deltas).toEqual(["intro", "second try"]);
+    // No prefill: the re-run starts from the untouched history.
+    expect(h.calls[1].messages).toHaveLength(1);
+    expect(seen).toEqual([
+      { attempt: 1, maxAttempts: 4, mode: "restart", discardedChars: 5, delayMs: 1000, reason: "stream" },
+    ]);
+  });
+
+  it("keeps the text from an interrupted resume in sync with the host", async () => {
+    setScript(
+      () => { throw new StreamInterrupted("hello "); },
+      () => {
+        h.calls.at(-1)!.events?.onTextDelta?.("wor");
+        throw new StreamInterrupted("wor");
+      },
+      () => turn("hello world"),
+    );
+    const deltas: string[] = [];
+    const p = makeLLM().send(messages, "S", [], undefined, {
+      onTextDelta: (delta) => deltas.push(delta),
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(2000);
+    await expect(p).resolves.toMatchObject({ text: "hello world" });
+    // The held-back continuation from the failed resume reaches the UI too.
+    expect(deltas).toEqual(["hello ", "wor", "ld"]);
+  });
+
+  it("does not recover a non-transient break", async () => {
+    setScript(() => { throw new StreamInterrupted("abc", httpError(400)); });
+    const err = await makeLLM().send(messages, "S", []).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(StreamRecoveryExhausted);
+    expect((err as InstanceType<typeof StreamRecoveryExhausted>).partialText).toBe("abc");
+    expect((err as Error).message).toMatch(/stream interrupted; 3 chars/);
+    expect(h.calls).toHaveLength(1);
+  });
+
+  it("recovers a break whose cause is transient", async () => {
+    setScript(
+      () => { throw new StreamInterrupted("abc", httpError(503)); },
+      () => turn("abcdef"),
+    );
+    const seen: Array<Record<string, unknown>> = [];
+    const p = makeLLM().send(messages, "S", [], undefined, {
+      onStreamRecovery: (info) => seen.push(info),
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect(p).resolves.toMatchObject({ text: "abcdef" });
+    expect(seen[0].reason).toBe("server");
+  });
+
+  it("stops after the recovery budget and reports the received text", async () => {
+    process.env.AGENT_STREAM_RECOVERY_ATTEMPTS = "2";
     setScript(
       () => { throw new StreamInterrupted("aa"); },
       () => { throw new StreamInterrupted("bb"); },
       () => { throw new StreamInterrupted("cc"); },
     );
 
-    await expect(makeLLM().send(messages, "S", [])).rejects.toThrow(/stream interrupted; 4 chars/);
+    const p = makeLLM().send(messages, "S", []).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(2000);
+    const err = await p;
+    expect(err).toBeInstanceOf(StreamRecoveryExhausted);
+    expect((err as Error).message).toMatch(/stream interrupted; 6 chars/);
+    expect((err as InstanceType<typeof StreamRecoveryExhausted>).partialText).toBe("aabbcc");
     expect(h.calls).toHaveLength(3);
+  });
+
+  it("can disable stream recovery entirely", async () => {
+    process.env.AGENT_STREAM_RECOVERY_ATTEMPTS = "0";
+    setScript(() => { throw new StreamInterrupted("abc"); });
+    await expect(makeLLM().send(messages, "S", [])).rejects.toBeInstanceOf(StreamRecoveryExhausted);
+    expect(h.calls).toHaveLength(1);
+  });
+
+  it("wakes up immediately when aborted during a recovery backoff", async () => {
+    setScript(() => { throw new StreamInterrupted("abc"); });
+    const controller = new AbortController();
+    const p = makeLLM().send(messages, "S", [], controller.signal).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    const err = await p;
+    expect(err).toBeInstanceOf(CancelledStreamError);
+    expect((err as InstanceType<typeof CancelledStreamError>).partialText).toBe("abc");
+    expect(h.calls).toHaveLength(1);
   });
 });

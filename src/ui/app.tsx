@@ -19,11 +19,12 @@ interface ToolRow {
   preview: string;
   status: "running" | "ok" | "error";
   result?: string;
+  round?: number;
 }
 
 type TranscriptItem =
   | { kind: "user"; text: string }
-  | { kind: "assistant"; text: string }
+  | { kind: "assistant"; text: string; round?: number }
   | { kind: "tool"; row: ToolRow }
   | { kind: "system"; text: string };
 
@@ -317,6 +318,7 @@ export function AgentApp({
 
   const abortRef = useRef<AbortController | null>(null);
   const streamRef = useRef("");
+  const roundRef = useRef(1);
   const permissionRef = useRef<PermissionRequest | null>(null);
   permissionRef.current = permission;
   const askRef = useRef<AskState | null>(null);
@@ -539,6 +541,8 @@ export function AgentApp({
       setError("");
       setBusy(true);
       setStreamText("");
+      streamRef.current = "";
+      roundRef.current = 1;
       setPendingImages([]);
       setDiffPage(0);
       // Remember plain user prompts (not slash commands) for the Esc history picker.
@@ -556,15 +560,21 @@ export function AgentApp({
           streamRef.current += d;
           setStreamText(streamRef.current);
         },
+        onRoundStart: (round) => {
+          roundRef.current = round;
+        },
         onToolStart: (id, name, preview) => {
           // Freeze any narration text before the tool call into the transcript.
           if (streamRef.current) {
             const narration = streamRef.current;
             streamRef.current = "";
             setStreamText("");
-            setItems((prev) => [...prev, { kind: "assistant", text: narration }]);
+            setItems((prev) => [...prev, { kind: "assistant", text: narration, round: roundRef.current }]);
           }
-          setItems((prev) => [...prev, { kind: "tool", row: { id, name, preview, status: "running" } }]);
+          setItems((prev) => [
+            ...prev,
+            { kind: "tool", row: { id, name, preview, status: "running", round: roundRef.current } },
+          ]);
         },
         onToolEnd: (id, _name, ok, result) => {
           setItems((prev) =>
@@ -589,6 +599,30 @@ export function AgentApp({
             ...prev,
             { kind: "system", text: `retrying in ${secs}s (${info.attempt}/${info.maxAttempts}, ${why})` },
           ]);
+        },
+        onStreamRecovery: (info) => {
+          const secs = Math.round(info.delayMs / 100) / 10;
+          const what =
+            info.mode === "restart" ? "discarding partial output and restarting" : "resuming from the cut-off point";
+          if (info.mode === "restart") {
+            const round = roundRef.current;
+            streamRef.current = "";
+            setStreamText("");
+            // Narration and early tool rows belong to the abandoned response.
+            setItems((prev) => [
+              ...prev.filter(
+                (it) =>
+                  !(it.kind === "tool" && it.row.round === round) &&
+                  !(it.kind === "assistant" && it.round === round),
+              ),
+              { kind: "system", text: `stream interrupted — ${what} (${info.attempt}/${info.maxAttempts}, ${secs}s)` },
+            ]);
+          } else {
+            setItems((prev) => [
+              ...prev,
+              { kind: "system", text: `stream interrupted — ${what} (${info.attempt}/${info.maxAttempts}, ${secs}s)` },
+            ]);
+          }
         },
         onHook: (event, message) => setItems((prev) => [...prev, { kind: "system", text: `[hook ${event}] ${message}` }]),
         onPlanApproved: () => {

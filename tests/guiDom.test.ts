@@ -785,4 +785,31 @@ describe("GUI interactions (happy-dom)", () => {
     expect(window.document.querySelector("#ask-modal")?.classList.contains("hidden")).toBe(false);
     expect(window.document.querySelector("#ask-body")?.textContent).toContain("恢复的问题");
   });
+
+  it("drops the abandoned attempt when a stream restarts", async () => {
+    const { window } = await boot();
+    const doc = window.document;
+    const es = FakeEventSource.instances[0];
+    es.emit("turn_start", { turnId: 1, user: "hi" });
+    es.emit("round_start", { round: 1 });
+    es.emit("text_delta", { d: "OLD TEXT" });
+    es.emit("tool_use_start", { name: "read_file", id: "t1", round: 1 });
+    es.emit("stream_recovery", {
+      attempt: 1,
+      maxAttempts: 4,
+      mode: "restart",
+      discardedChars: "OLD TEXT".length,
+      delayMs: 1000,
+      reason: "connection",
+    });
+    es.emit("text_delta", { d: "NEW TEXT" });
+
+    await vi.waitFor(() => {
+      const text = doc.querySelector("#transcript")?.textContent ?? "";
+      expect(text).toContain("流中断");
+      expect(text).toContain("NEW TEXT");
+      expect(text).not.toContain("OLD TEXT");
+    });
+    expect(doc.querySelectorAll(".tool-card").length).toBe(0);
+  });
 });

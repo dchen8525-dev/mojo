@@ -266,11 +266,11 @@ export class OpenAiBackend implements LLMBackend {
         }
       }
     } catch (err) {
-      // Same resumability rule as the Anthropic backend: only a mid-text
-      // break (no tool-call streaming started) can be picked up from the
-      // partial output; aborts are the user's intent and propagate as-is.
-      if (text && !toolCalls.length && !signal?.aborted && !(err instanceof Error && err.name === "APIUserAbortError")) {
-        throw new StreamInterrupted(text, err);
+      // Hand mid-stream breaks to the facade. It resumes from the text, or
+      // restarts when a tool call was left mid-arguments. Aborts are the
+      // user's intent and propagate as-is.
+      if (text && !signal?.aborted && !(err instanceof Error && err.name === "APIUserAbortError")) {
+        throw new StreamInterrupted(text, err, { toolStarted: toolCalls.length > 0 });
       }
       throw err;
     } finally {

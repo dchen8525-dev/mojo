@@ -29,6 +29,26 @@ export interface RetryInfo {
   reason: RetryReason;
 }
 
+/**
+ * How a broken stream is picked back up:
+ * - `resume`: continue from the text already received (prefill / continuation).
+ * - `restart`: discard the partial response and re-run the request; used when
+ *   a tool call was already streaming and its arguments cannot be completed.
+ */
+export type StreamRecoveryMode = "resume" | "restart";
+
+export interface StreamRecoveryInfo {
+  /** 1-based recovery within this logical request. */
+  attempt: number;
+  maxAttempts: number;
+  mode: StreamRecoveryMode;
+  /** Visible response characters the host must drop (`restart` only). */
+  discardedChars: number;
+  /** Backoff applied before the recovery attempt starts. */
+  delayMs: number;
+  reason: RetryReason | "stream";
+}
+
 export interface StreamEvents {
   onTextDelta?: (delta: string) => void;
   /** Reasoning/thinking tokens streamed before (or between) visible output. */
@@ -42,6 +62,8 @@ export interface StreamEvents {
   onToolReady?: (tool: ToolUseBlock) => void;
   /** A transient failure is about to be retried after `delayMs`. */
   onRetry?: (info: RetryInfo) => void;
+  /** A broken stream is about to be resumed or restarted after `delayMs`. */
+  onStreamRecovery?: (info: StreamRecoveryInfo) => void;
 }
 
 /**
@@ -51,10 +73,33 @@ export interface StreamEvents {
  */
 export class StreamInterrupted extends Error {
   partialText: string;
-  constructor(partialText: string, cause?: unknown) {
+  /** A tool call had started streaming when the break happened. */
+  toolStarted: boolean;
+  constructor(partialText: string, cause?: unknown, info?: { toolStarted?: boolean }) {
     super(`stream interrupted after ${partialText.length} chars`);
     this.name = "StreamInterrupted";
     this.partialText = partialText;
+    this.toolStarted = info?.toolStarted ?? false;
+    this.cause = cause;
+  }
+}
+
+/**
+ * The stream broke and recovery was impossible (non-transient cause) or out of
+ * budget. Carries the text the user already saw so the agent can salvage it
+ * into history before the error surfaces.
+ */
+export class StreamRecoveryExhausted extends Error {
+  readonly partialText: string;
+  readonly attempts: number;
+  constructor(partialText: string, attempts: number, cause?: unknown) {
+    const detail = cause instanceof Error && cause.message ? ` — ${cause.message}` : "";
+    super(
+      `stream interrupted; ${partialText.length} chars were received before the break (recovery attempts: ${attempts})${detail}`,
+    );
+    this.name = "StreamRecoveryExhausted";
+    this.partialText = partialText;
+    this.attempts = attempts;
     this.cause = cause;
   }
 }
