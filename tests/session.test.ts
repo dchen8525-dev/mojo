@@ -570,3 +570,54 @@ describe("todo persistence", () => {
     expect(await session.saveTodos("deadbeef", items)).toBe(false);
   });
 });
+
+describe("session titles", () => {
+  it("stores a generated title once and never overwrites it", async () => {
+    const { id } = await session.createSession("titles");
+    expect(await session.setGeneratedTitle(id, "自动生成的标题")).toBe(true);
+    const first = await session.loadSession(id);
+    expect(first?.meta.title).toBe("自动生成的标题");
+    expect(first?.meta.titleSource).toBe("generated");
+
+    expect(await session.setGeneratedTitle(id, "第二个标题")).toBe(false);
+    expect((await session.loadSession(id))?.meta.title).toBe("自动生成的标题");
+  });
+
+  it("a user rename is custom and wins over a later generated title", async () => {
+    const { id } = await session.createSession("titles");
+    await session.renameSession(id, "我的名字");
+    expect((await session.loadSession(id))?.meta.titleSource).toBe("custom");
+
+    expect(await session.setGeneratedTitle(id, "自动标题")).toBe(false);
+    const loaded = await session.loadSession(id);
+    expect(loaded?.meta.title).toBe("我的名字");
+    expect(loaded?.meta.titleSource).toBe("custom");
+
+    await session.renameSession(id, "");
+    expect((await session.loadSession(id))?.meta.title).toBeUndefined();
+    // Clearing a custom title re-opens the door for the generator.
+    expect(await session.setGeneratedTitle(id, "之后生成的")).toBe(true);
+  });
+
+  it("returns false for a missing session", async () => {
+    expect(await session.setGeneratedTitle("deadbeef", "x")).toBe(false);
+  });
+
+  it("derives a preview from the first real user request, skipping injected context", async () => {
+    const { id } = await session.createSession("preview");
+    await session.appendMessages(id, [
+      { role: "user", content: '<system-reminder event="SessionFork">forked</system-reminder>' },
+      { role: "assistant", content: "noted" },
+      { role: "user", content: "  请帮我\n检查构建配置  " },
+    ]);
+    const loaded = await session.loadSession(id);
+    expect(loaded?.meta.preview).toBe("请帮我 检查构建配置");
+    // The screenshot-style reminder at the very start is also skipped.
+    const { id: id2 } = await session.createSession("preview2");
+    await session.appendMessages(id2, [
+      { role: "user", content: `<context_compaction>\nsummary\n</context_compaction>` },
+      { role: "user", content: "x".repeat(100) },
+    ]);
+    expect((await session.loadSession(id2))?.meta.preview).toBe(`${"x".repeat(59)}…`);
+  });
+});

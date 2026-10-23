@@ -44,7 +44,8 @@ import {
 import { listSkills, renderSkillsBlock } from "./skills.js";
 import { buildReviewPrompt, collectReview, REVIEW_SYSTEM } from "./review.js";
 import { truncate } from "./tools/utils.js";
-import { appendMessages, appendModel, createSession, forkSession, rewriteMessages, saveTodos } from "./session.js";
+import { appendMessages, appendModel, createSession, forkSession, loadSession, rewriteMessages, saveTodos, setGeneratedTitle } from "./session.js";
+import { generateSessionTitle, normalizeTitleInput, sessionTitlesEnabled } from "./sessionTitle.js";
 import type { TodoItem } from "./tools/todo.js";
 import {
   buildAckMessage,
@@ -81,6 +82,20 @@ export const MAX_AUTOCOMPACT_FAILURES = 3;
 export const MICROCOMPACT_RATIO = 0.7;
 const MICRO_PRUNE_PROTECT_LAST = 6;
 
+/** A user message that is a real request, not injected context or tool output. */
+function isRealUserTurn(m: MessageParam): boolean {
+  if (m.role !== "user") return false;
+  const text =
+    typeof m.content === "string"
+      ? m.content
+      : m.content
+          .filter((b): b is { type: "text"; text: string } => (b as { type?: string }).type === "text")
+          .map((b) => b.text)
+          .join(" ");
+  const flat = text.trim();
+  return !!flat && !/^<(system-reminder|context_compaction)/.test(flat);
+}
+
 export interface AgentEvents extends StreamEvents {
   /** A new model round begins (one response + the tools it requests). 1-based. */
   onRoundStart?: (round: number) => void;
@@ -88,12 +103,16 @@ export interface AgentEvents extends StreamEvents {
   onToolEnd?: (id: string, name: string, ok: boolean, preview: string, result?: string) => void;
   /** One tool call performed *inside* a tool (the subagent's chain). */
   onSubTool?: (parentId: string, name: string, inputPreview: string, ok: boolean, preview: string, round?: number) => void;
+  /** A subagent is about to run one of its tools (live mirror; onSubTool carries the result). */
+  onSubToolStart?: (parentId: string, name: string, inputPreview: string, round?: number) => void;
   onUsage?: (input: number, output: number) => void;
   onCostWarning?: (message: string) => void;
   onCompacting?: () => void;
   onCompacted?: (before: number, after: number) => void;
   onHook?: (event: string, message: string) => void;
   onPlanApproved?: () => void;
+  /** The auto-titler named this session (fires after the first turn, in the background). */
+  onSessionTitle?: (title: string) => void;
 }
 
 export class Agent {
@@ -590,6 +609,9 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
     // must not litter the sidebar with empty sessions; a session exists once
     // the user actually sends something.
     await this.ensureSession();
+    // Titling only applies to the session's first real request; compute it
+    // before this turn's message (and any injected reminders) join history.
+    const firstUserTurn = !this.messages.some(isRealUserTurn);
     this.systemPromptCache = null; // fresh git status / memory for each user turn
     let prompt = userText;
     if (this.hooks) {
@@ -812,6 +834,7 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
 
     await this.persistTurn();
     this.scheduleMemoryExtraction(userText, finalText);
+    if (firstUserTurn) this.scheduleTitleGeneration(userText, events);
     this.saveMemoryThisTurn = false;
     return finalText;
   }
@@ -820,6 +843,10 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
   private saveMemoryThisTurn = false;
   /** The user-approved plan (loaded lazily from the session's plan file). */
   private approvedPlan: string | null | undefined;
+  /** Auto-titling runs once per session (the first real request). */
+  private titleAttempted = false;
+  /** In-flight titling job; awaited by tests only. */
+  private titleJob: Promise<void> | null = null;
 
   /**
    * Post-turn memory extraction (opt-in via AGENT_MEMORY_EXTRACTION=1): one
@@ -857,6 +884,36 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
         /* memory extraction is best-effort */
       }
     });
+  }
+
+  /**
+   * First real request of a fresh session: name it from what the user asked,
+   * without blocking the turn. Runs after the reply is persisted; short
+   * requests are skipped (they read better verbatim), an existing title wins,
+   * and every failure stays silent — a title is decoration.
+   */
+  private scheduleTitleGeneration(userText: string, events?: AgentEvents): void {
+    if (this.titleAttempted || !sessionTitlesEnabled() || !this.sessionId) return;
+    if (normalizeTitleInput(userText).length < 10) return;
+    this.titleAttempted = true;
+    const sessionId = this.sessionId;
+    this.titleJob = (async () => {
+      try {
+        const parsed = await loadSession(sessionId);
+        if (parsed?.meta.title) return; // user rename or an earlier generator won
+        const res = await generateSessionTitle(this.llm, userText);
+        if (!res) return;
+        this.costs.record(`${this.llm.provider}:${this.llm.model}`, res.usage);
+        if (await setGeneratedTitle(sessionId, res.title)) events?.onSessionTitle?.(res.title);
+      } catch {
+        /* a failed title must never surface to the user */
+      }
+    })();
+  }
+
+  /** Test hook: wait for the in-flight auto-title (no-op when none ran). */
+  async waitForSessionTitle(): Promise<void> {
+    await this.titleJob;
   }
 
   /** /dream: propose a consolidated rewrite of the project memory file. */
@@ -946,6 +1003,7 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
         },
         reportUsage: (usage) => this.costs.record(`${this.llm.provider}:${this.llm.model}`, usage),
         onSubTool: (n, p, ok, r, round) => events?.onSubTool?.(tu.id, n, p, ok, r, round),
+        onSubToolStart: (n, p, round) => events?.onSubToolStart?.(tu.id, n, p, round),
         planMode: this.planMode,
         fileState: this.fileState,
         approvePlan: async (plan?: string) => {
@@ -1036,6 +1094,7 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
     this.tokens.invalidate();
     this.autoCompactFails = 0;
     this.autoCompactSuspended = false;
+    this.titleAttempted = false; // a different session gets its own title chance
     await this.startSession(this.messages.length ? "resume" : "startup", undefined, todos);
   }
 

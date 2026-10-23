@@ -452,7 +452,25 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
         }
         hub.broadcast("tool_end", { id, name, ok, preview, result: full });
       },
+      onSubToolStart: (parentId, name, inputPreview, round) => {
+        // Live-only: fills a running row so long subagent calls are visible
+        // before their result exists. Persistence happens on completion.
+        const call: UiSubCall = { name, inputPreview, running: true };
+        if (round) call.round = round;
+        const t = turn.tools.find((x) => x.id === parentId);
+        if (t) (t.subCalls ??= []).push(call);
+        hub.broadcast("sub_tool_start", { id: parentId, name, inputPreview, round });
+      },
       onSubTool: (parentId, name, inputPreview, ok, preview, round) => {
+        const t = turn.tools.find((x) => x.id === parentId);
+        const running = t?.subCalls?.find(
+          (c) => c.running && c.name === name && c.round === round && c.inputPreview === inputPreview,
+        );
+        if (running) {
+          running.ok = ok;
+          running.result = preview;
+          delete running.running;
+        }
         // Keep the chain out-of-band as well: the live turn is dropped at
         // turn_end, but the card is rebuilt from history right after.
         const call: UiSubCall = { name, inputPreview, ok, result: preview };
@@ -461,10 +479,10 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
         // Persist it (UI-only line) so a restart or /resume keeps the chain.
         const sessionId = project.agent.sessionId;
         if (sessionId) void appendSubCall(sessionId, { toolUseId: parentId, ...call }).catch(() => {});
-        const t = turn.tools.find((x) => x.id === parentId);
-        if (t) (t.subCalls ??= []).push(call);
+        if (t && !running) (t.subCalls ??= []).push(call);
         hub.broadcast("sub_tool", { id: parentId, name, inputPreview, ok, preview, round });
       },
+      onSessionTitle: (title) => hub.broadcast("session_title", { title }),
       onUsage: (input, output) => hub.broadcast("usage", { input, output }),
       onCostWarning: (message) => hub.broadcast("cost_warning", { message }),
       onCompacting: () => hub.broadcast("compacting", {}),

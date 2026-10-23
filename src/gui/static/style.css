@@ -1225,6 +1225,28 @@ button {
   color: var(--red);
 }
 
+.sub-status {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--accent);
+  opacity: 0.8;
+  animation: sub-pulse 1.2s ease-in-out infinite;
+}
+
+.sub-item.run .sub-name {
+  opacity: 0.6;
+}
+
+@keyframes sub-pulse {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 0.95;
+  }
+}
+
 .sub-sum {
   flex: 1;
   min-width: 0;

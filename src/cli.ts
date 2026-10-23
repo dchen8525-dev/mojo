@@ -20,6 +20,7 @@ import { renderSessionMarkdown, createSession, loadSession, listSessions } from 
 import { runAgentCommand, type CommandContext } from "./agentCommands.js";
 import { createNdjsonEvents } from "./headless.js";
 import { disableMemoryExtraction } from "./memoryWrite.js";
+import { disableSessionTitles } from "./sessionTitle.js";
 import { CronScheduler } from "./cronScheduler.js";
 import {
   ansiEmphasize,
@@ -133,6 +134,8 @@ function warnUntrustedHooks(hooks: HookManager) {
 async function runPrint(args: ReturnType<typeof parseArgs>) {
   // Headless runs (cron, pipes) must never silently rewrite the memory file.
   disableMemoryExtraction();
+  // ...and should not spend an extra model call just to name the session.
+  disableSessionTitles();
   const session = await resolveSession(args);
   const resolved = resolveTheme({ theme: args.theme, cwd: session.cwd });
   ANSI = ansiHelpers(resolved.theme);

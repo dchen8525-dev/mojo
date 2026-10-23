@@ -46,6 +46,11 @@ export interface ToolContext {
    * `round` is the subagent's own model round, for a call-stack style tree.
    */
   onSubTool?: (name: string, inputPreview: string, ok: boolean, preview: string, round?: number) => void;
+  /**
+   * Announce a subagent tool call the moment it starts, so a live viewer shows
+   * the running row before the result exists (onSubTool then closes it).
+   */
+  onSubToolStart?: (name: string, inputPreview: string, round?: number) => void;
   /** True while the agent is in plan mode (read-only exploration before execution). */
   planMode?: boolean;
   /** Called by exit_plan when the user approves the plan; the agent leaves plan mode. May persist the plan asynchronously. */

@@ -379,6 +379,7 @@ async function runSubagent(
           ctx.onSubTool?.(tu.name, inputPreview, false, msg.slice(0, 200), iterations);
           continue;
         }
+        ctx.onSubToolStart?.(tu.name, inputPreview, iterations);
         try {
           const r = await tool.execute(tu.input as Record<string, unknown>, {
             cwd: ctx.cwd,

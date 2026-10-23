@@ -256,6 +256,38 @@ describe("named subagent persistent memory", () => {
   });
 });
 
+describe("subagent tool mirroring", () => {
+  function mirroringCtx(events: string[]) {
+    return {
+      ...ctx,
+      onSubToolStart: (name: string) => events.push(`start ${name}`),
+      onSubTool: (name: string, _p: string, ok: boolean) => events.push(`end ${name}:${ok}`),
+    } as never;
+  }
+
+  it("announces each subagent tool start before its result", async () => {
+    h.turns = [toolTurn("glob_files", { pattern: "package.json" }), textTurn("done")];
+    const events: string[] = [];
+    const r = await taskTool.execute({ description: "dig", prompt: "p" }, mirroringCtx(events));
+    expect(r.isError).toBeFalsy();
+    expect(events).toEqual(["start glob_files", "end glob_files:true"]);
+  });
+
+  it("mirrors the start even when the tool itself fails", async () => {
+    h.turns = [toolTurn("read_file", { path: "definitely-missing-file.xyz" }), textTurn("done")];
+    const events: string[] = [];
+    await taskTool.execute({ description: "dig", prompt: "p" }, mirroringCtx(events));
+    expect(events).toEqual(["start read_file", "end read_file:false"]);
+  });
+
+  it("does not announce an unknown tool that never ran", async () => {
+    h.turns = [toolTurn("no_such_tool", {}), textTurn("done")];
+    const events: string[] = [];
+    await taskTool.execute({ description: "dig", prompt: "p" }, mirroringCtx(events));
+    expect(events).toEqual(["end no_such_tool:false"]);
+  });
+});
+
 describe("subagent mailbox", () => {
   it("delivers queued coordinator messages at the subagent's next round boundary", async () => {
     h.turns = [toolTurn("no_such_tool", {}), textTurn("done")];

@@ -376,14 +376,15 @@ function renderSubChain(calls, openSet) {
 
     group.calls.forEach((call, ci) => {
       const i = indexOf.get(call) ?? 0;
-      const item = el("div", "sub-item " + (call.ok === false ? "err" : "ok"));
+      const item = el("div", "sub-item " + (call.running ? "run" : call.ok === false ? "err" : "ok"));
       if (openSet?.has(i)) item.classList.add("open");
 
       const head = el("div", "sub-head");
       head.appendChild(el("span", "sub-rail", ci === group.calls.length - 1 ? "└" : "├"));
       head.appendChild(el("span", "sub-index", String(i + 1).padStart(2, "0")));
       head.appendChild(el("span", "sub-name", call.name));
-      head.appendChild(el("span", "sub-sum", subCallSummary(call)));
+      head.appendChild(el("span", "sub-sum", call.running ? "" : subCallSummary(call)));
+      if (call.running) head.appendChild(el("span", "sub-status", "运行中…"));
       head.appendChild(el("span", "sub-caret", "▸"));
 
       const body = el("div", "sub-body");
@@ -989,20 +990,56 @@ function connectSSE() {
     if (card) refreshToolCard(card);
   });
 
-  on("sub_tool", (d) => {
-    // A subagent ran one of its own tools — append it to the parent task card.
+  on("sub_tool_start", (d) => {
+    // The subagent began one of its own tools — show a live row immediately.
     if (!state.liveTurn) return;
     const t = state.liveTurn.tools.find((x) => x.id === d.id);
     if (!t) return;
     (t.subCalls ??= []).push({
       name: d.name,
       inputPreview: d.inputPreview,
-      ok: d.ok,
-      result: d.preview,
       round: d.round,
+      running: true,
     });
     refreshToolCard(liveNodes?.toolEls.get(d.id));
     scrollBottom();
+  });
+
+  on("sub_tool", (d) => {
+    // A subagent finished one of its own tools — fill its running row, or
+    // append it when no start event was seen (e.g. reconnected tab).
+    if (!state.liveTurn) return;
+    const t = state.liveTurn.tools.find((x) => x.id === d.id);
+    if (!t) return;
+    const calls = (t.subCalls ??= []);
+    let running = null;
+    for (let i = calls.length - 1; i >= 0; i--) {
+      const c = calls[i];
+      if (c.running && c.name === d.name && c.round === d.round && c.inputPreview === d.inputPreview) {
+        running = c;
+        break;
+      }
+    }
+    if (running) {
+      running.ok = d.ok;
+      running.result = d.preview;
+      delete running.running;
+    } else {
+      calls.push({
+        name: d.name,
+        inputPreview: d.inputPreview,
+        ok: d.ok,
+        result: d.preview,
+        round: d.round,
+      });
+    }
+    refreshToolCard(liveNodes?.toolEls.get(d.id));
+    scrollBottom();
+  });
+
+  on("session_title", () => {
+    // The first turn generated a display title for the sidebar.
+    void loadSessions();
   });
 
   on("turn_end", () => {

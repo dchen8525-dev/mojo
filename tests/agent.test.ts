@@ -19,6 +19,9 @@ const h = vi.hoisted(() => ({
   recalled: "",
   appended: [] as MessageParam[],
   savedTodos: [] as Array<{ id: string; todos: unknown }>,
+  generatedTitles: [] as Array<{ id: string; title: string }>,
+  /** What the mocked loadSession returns (null = no stored session). */
+  sessionMeta: null as null | { meta: { title?: string } },
   /** Test hook, invoked at the start of every fake send(). */
   onSend: null as null | (() => void),
 }));
@@ -87,6 +90,11 @@ vi.mock("../src/session.js", () => ({
     h.savedTodos.push({ id, todos });
     return true;
   },
+  loadSession: async () => h.sessionMeta,
+  setGeneratedTitle: async (id: string, title: string) => {
+    h.generatedTitles.push({ id, title });
+    return true;
+  },
 }));
 
 // Keep tests from reading/writing the real repo's memory.md.
@@ -117,6 +125,7 @@ const { Agent } = await import("../src/agent.js");
 const { registerTool, unregisterToolsByPrefix, todoStore } = await import("../src/tools/index.js");
 const { subagentTasks } = await import("../src/taskRegistry.js");
 const { HookManager } = await import("../src/hooks.js");
+const { enableSessionTitlesForTests, disableSessionTitles } = await import("../src/sessionTitle.js");
 
 const permissions = { check: async () => true } as never;
 
@@ -196,6 +205,8 @@ beforeEach(() => {
   h.sentSystems = [];
   h.recalled = "";
   h.appended = [];
+  h.generatedTitles = [];
+  h.sessionMeta = null;
   h.onSend = null;
   toolEvents.length = 0;
 });
@@ -209,6 +220,57 @@ describe("Agent.chat memory recall", () => {
     expect(content[0].text).toContain("why did we choose WAL?");
     expect(content[0].text).toContain('<system-reminder event="RecalledMemory">');
     expect(content[0].text).toContain("WAL mode is required.");
+  });
+});
+
+describe("Agent session titles", () => {
+  afterEach(() => disableSessionTitles());
+
+  it("generates a title from the first request and reports it", async () => {
+    enableSessionTitlesForTests();
+    h.turns = [
+      textTurn("ok"),
+      { content: [{ type: "text", text: '{"title":"检查项目构建配置"}' } as ContentBlock], inputTokens: 30, outputTokens: 8 },
+    ];
+    const titles: string[] = [];
+    const agent = makeAgent();
+    await agent.chat("帮我检查一下这个项目的构建配置是否正常", undefined, { onSessionTitle: (t) => titles.push(t) });
+    await agent.waitForSessionTitle();
+    expect(h.generatedTitles).toEqual([{ id: "test-session", title: "检查项目构建配置" }]);
+    expect(titles).toEqual(["检查项目构建配置"]);
+    expect(h.calls).toBe(2);
+  });
+
+  it("does not overwrite a session that already has a title", async () => {
+    enableSessionTitlesForTests();
+    h.sessionMeta = { meta: { title: "既有标题" } };
+    h.turns = [textTurn("ok")];
+    const agent = makeAgent();
+    await agent.chat("帮我检查一下这个项目的构建配置是否正常");
+    await agent.waitForSessionTitle();
+    expect(h.generatedTitles).toEqual([]);
+    expect(h.calls).toBe(1);
+  });
+
+  it("skips resumed sessions and very short first messages", async () => {
+    enableSessionTitlesForTests();
+    h.turns = [textTurn("a")];
+    const resumed = makeAgent(undefined, [
+      { role: "user", content: "earlier request about builds" },
+      { role: "assistant", content: "earlier reply" },
+    ]);
+    await resumed.chat("继续说明构建配置该怎么调整");
+    await resumed.waitForSessionTitle();
+    expect(h.generatedTitles).toEqual([]);
+    expect(h.calls).toBe(1);
+
+    h.turns = [textTurn("b")];
+    h.calls = 0;
+    const fresh = makeAgent();
+    await fresh.chat("修一下");
+    await fresh.waitForSessionTitle();
+    expect(h.generatedTitles).toEqual([]);
+    expect(h.calls).toBe(1);
   });
 });
 

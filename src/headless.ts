@@ -11,7 +11,10 @@ import type { Risk } from "./types.js";
  *   {"type":"round_start","round":1}
  *   {"type":"text_delta","delta":"..."}      streamed assistant text
  *   {"type":"tool_start","id","name","input_preview","input"?}
+ *   {"type":"sub_tool_start","parent_id","name","input_preview","round"?}
+ *   {"type":"sub_tool","parent_id","name","input_preview","ok","preview","round"?}
  *   {"type":"tool_end","id","name","ok","preview"}   preview is truncated
+ *   {"type":"session_title","title"}         first turn only, when generated
  *   {"type":"usage","input","output"}        per model response
  *   {"type":"compacting"} / {"type":"compacted","before","after"}
  *   {"type":"retry","attempt","max_attempts","delay_ms","reason","status"?}
@@ -67,8 +70,11 @@ export function createNdjsonEvents(
       onToolStart: (id, name, inputPreview, input) =>
         emit({ type: "tool_start", id, name, input_preview: inputPreview, ...(input ? { input } : {}) }),
       onToolEnd: (id, name, ok, preview) => emit({ type: "tool_end", id, name, ok, preview }),
+      onSubToolStart: (parentId, name, inputPreview, round) =>
+        emit({ type: "sub_tool_start", parent_id: parentId, name, input_preview: inputPreview, ...(round ? { round } : {}) }),
       onSubTool: (parentId, name, inputPreview, ok, preview, round) =>
         emit({ type: "sub_tool", parent_id: parentId, name, input_preview: inputPreview, ok, preview, ...(round ? { round } : {}) }),
+      onSessionTitle: (title) => emit({ type: "session_title", title }),
       onUsage: (input, output) => emit({ type: "usage", input, output }),
       onCompacting: () => emit({ type: "compacting" }),
       onCompacted: (before, after) => emit({ type: "compacted", before, after }),

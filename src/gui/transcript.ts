@@ -14,6 +14,8 @@ export interface UiSubCall {
   result?: string;
   /** The subagent's own model round (1-based), for the call-stack tree. */
   round?: number;
+  /** Live-only: the call has started and has no result yet (never persisted). */
+  running?: boolean;
 }
 
 export interface UiTool {
