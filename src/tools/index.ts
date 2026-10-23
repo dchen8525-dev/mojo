@@ -4,6 +4,7 @@ import { readSessionTool } from "./readSession.js";
 import { askUserTool } from "./askUser.js";
 import { writeFileTool, editFileTool } from "./write.js";
 import { bashTool, bashOutputTool, bashKillTool } from "./bash.js";
+import { nodeReplTool } from "./nodeRepl.js";
 import { globTool } from "./glob.js";
 import { grepTool } from "./grep.js";
 import { todoWriteTool } from "./todo.js";
@@ -33,6 +34,7 @@ export const tools: Tool[] = [
   bashTool,
   bashOutputTool,
   bashKillTool,
+  nodeReplTool,
   writeFileTool,
   editFileTool,
   multiEditTool,

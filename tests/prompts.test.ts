@@ -24,6 +24,7 @@ describe("toolGuidance", () => {
     expect(toolGuidance(["git_commit"])).toContain("Git:");
     expect(toolGuidance(["ask_user"])).toContain("Asking the user (ask_user):");
     expect(toolGuidance(["read_session"])).toContain("Past sessions (read_session):");
+    expect(toolGuidance(["node_repl"])).toContain("Persistent Node REPL (node_repl):");
     expect(toolGuidance(["read_file"], { hasDeferred: true })).toContain("Deferred tools:");
   });
 

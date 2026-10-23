@@ -25,6 +25,12 @@ export function toolGuidance(toolNames: Iterable<string>, opts: { hasDeferred?: 
 - Do not use bash for things read_file/glob_files/grep can do.
 - Long-running commands (dev servers, watchers) must use bash with run_in_background, then bash_output to poll and bash_kill to stop. Never use interactive editors or REPLs.`);
   }
+  if (has("node_repl")) {
+    blocks.push(`Persistent Node REPL (node_repl):
+- Use it for incremental JavaScript/data work where state must survive between calls (parsed files, computed tables, fetched data). Load once, then keep computing on the same bindings.
+- Prefer it over writing throwaway scripts for exploration; use bash for shell commands and background servers.
+- Top-level bindings persist, but the kernel restarts with fresh state after a timeout, an abort, a crash or an idle period - re-create anything expensive if a call reports a restart.`);
+  }
   if (has("write_file", "edit_file", "multi_edit")) {
     blocks.push(`Editing files:
 - Read a file before editing it. edit_file wants EXACT text copied from read_file output (the "N\\t" prefixes are line numbers, not content); whitespace-insensitive matching is a fallback that may re-indent, so check the returned diff.

@@ -55,3 +55,4 @@
 | [context-breakdown-early-tools.md](context-breakdown-early-tools.md) | 2026-10-23 | /context 上下文用量分解 + 只读工具流式提前执行（onToolReady） |
 | [structured-questions-session-context.md](structured-questions-session-context.md) | 2026-10-23 | 结构化提问 ask_user（1–4 问/超时放行）+ 跨会话检索 read_session（#sess_ 引用/词法选段/预算） |
 | [stream-recovery-state-machine.md](stream-recovery-state-machine.md) | 2026-10-23 | 流恢复状态机：文本续写 resume / 工具调用中断 restart + 预算退避 + 四端回滚 |
+| [persistent-node-repl.md](persistent-node-repl.md) | 2026-10-23 | 常驻 Node REPL：每会话独立进程 + 跨调用绑定 + 超时/中断重启 + 高风险审批 |

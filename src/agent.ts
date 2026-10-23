@@ -26,6 +26,7 @@ import { buildReadStateReminder } from "./contextRestore.js";
 import { approvedPlanReminder, copyPlanFile, planVisibleIn, readPlanFile, writePlanFile } from "./planFile.js";
 import { RepetitionTracker } from "./repetition.js";
 import { backgroundManager } from "./tools/background.js";
+import { disposeNodeReplSession } from "./tools/nodeRepl.js";
 import { subagentTasks } from "./taskRegistry.js";
 import { exitPlanTool } from "./tools/exitPlan.js";
 import { askTimeoutMs } from "./tools/askUser.js";
@@ -1319,6 +1320,9 @@ ${TURN_COMPLETION}${toolGuidance(toolNames, { hasDeferred: deferredTools().lengt
    * session start from the model's point of view, so SessionStart fires here.
    */
   async resetSession(sessionId: string, history?: MessageParam[], modelSpec?: string, todos: TodoItem[] = []) {
+    // A REPL kernel is session state: /clear, /resume, /fork and a project
+    // switch must not leak bindings or a live process into the next session.
+    disposeNodeReplSession(this.sessionId);
     this.sessionId = sessionId;
     this.checkpoints = new CheckpointStore(sessionId);
     // A session start has no model context yet, so no file counts as read.
