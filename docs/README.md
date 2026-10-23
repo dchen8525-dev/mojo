@@ -61,3 +61,4 @@
 | [apply-patch-aux-downgrade-communication.md](apply-patch-aux-downgrade-communication.md) | 2026-10-23 | apply_patch 多文件补丁工具；辅助 LLM 调用降档（5k 上限/关思考）；沟通规范提示词；nodeRepl 在途请求空闲竞态修复 |
 | [session-usage-webcache-windows-delete.md](session-usage-webcache-windows-delete.md) | 2026-10-23 | 会话真实用量基线（resume 后精确压缩决策）；web_fetch TTL+LRU 缓存；Windows 树删除/robocopy 镜像破坏性分类；tool_search 已发现工具持久化 |
 | [session-retention-tui-file-mentions.md](session-retention-tui-file-mentions.md) | 2026-10-23 | 会话/journal 按 mtime 天数保留清理（AGENT_RETENTION_DAYS，启动延迟+keep 保护）；TUI @ 文件提及补全（git ls-files/目录遍历索引 + ↑/↓/Tab/Esc 面板） |
+| [error-sanitization.md](error-sanitization.md) | 2026-10-24 | 错误信息脱敏：journal error/GUI turn_error/TUI/print 边界清洗密钥·URL·路径·邮箱（2048 截断）；journal 请求体与工具输出保持原文 |

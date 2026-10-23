@@ -23,6 +23,7 @@ import { disableMemoryExtraction } from "./memoryWrite.js";
 import { disableSessionTitles } from "./sessionTitle.js";
 import { disableGoalAutopilot } from "./goal.js";
 import { scheduleRetentionCleanup } from "./retention.js";
+import { sanitizeErrorMessage } from "./errorSanitizer.js";
 import { CronScheduler } from "./cronScheduler.js";
 import {
   ansiEmphasize,
@@ -246,7 +247,7 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
       if (!ndjson) console.log(ANSI.warn("\n(interrupted)"));
     } else {
       outcome = "error";
-      console.error(ANSI.error(`Error: ${msg}`));
+      console.error(ANSI.error(`Error: ${sanitizeErrorMessage(msg) ?? msg}`));
     }
   } finally {
     ndjson?.result(outcome, finalText, {

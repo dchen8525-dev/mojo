@@ -2,6 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { promises as fs } from "node:fs";
 import type { MessageParam } from "./types.js";
+import { sanitizeErrorMessage } from "./errorSanitizer.js";
 
 /**
  * Opt-in model-I/O journal (AGENT_JOURNAL=1): every LLM request/response pair
@@ -67,16 +68,21 @@ function sanitizeId(id: string): string {
  */
 export async function recordJournalTurn(turn: JournalTurn, opts: { dir?: string } = {}): Promise<void> {
   if (!journalEnabled()) return;
+  // The error field leaves the process boundary; the request dump stays raw
+  // for debugging but the error text gets the same redaction as display sinks.
+  const recorded: JournalTurn = turn.error
+    ? { ...turn, error: sanitizeErrorMessage(turn.error) ?? turn.error }
+    : turn;
   const dir = opts.dir ?? journalDir();
   chain = chain.then(async () => {
     try {
       await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-      const file = path.join(dir, `${sanitizeId(turn.sessionId)}.jsonl`);
-      let line = JSON.stringify(turn);
+      const file = path.join(dir, `${sanitizeId(recorded.sessionId)}.jsonl`);
+      let line = JSON.stringify(recorded);
       if (Buffer.byteLength(line, "utf8") > MAX_ENTRY_BYTES) {
-        const { messages, ...rest } = turn.request;
+        const { messages, ...rest } = recorded.request;
         void messages;
-        line = JSON.stringify({ ...turn, request: { ...rest, messagesOmitted: true } });
+        line = JSON.stringify({ ...recorded, request: { ...rest, messagesOmitted: true } });
       }
       await fs.appendFile(file, line + "\n", { mode: 0o600 });
       if (++appends % PRUNE_EVERY === 0) await pruneJournal(dir);

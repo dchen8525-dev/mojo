@@ -13,6 +13,7 @@ import { captureClipboardImage } from "../clipboard.js";
 import { backgroundManager } from "../tools/background.js";
 import { expandFileReferences, renderCommand, type SlashCommand } from "../commands.js";
 import { goalSummaryLine } from "../goal.js";
+import { sanitizeErrorMessage } from "../errorSanitizer.js";
 import {
   completeMention,
   filterMentionPaths,
@@ -800,7 +801,7 @@ export function AgentApp({
         if (msg === "aborted") {
           setItems((prev) => [...prev, { kind: "system", text: "(interrupted)" }]);
         } else {
-          setError(msg);
+          setError(sanitizeErrorMessage(msg) ?? msg);
         }
         setStreamText("");
       } finally {

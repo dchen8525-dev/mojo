@@ -68,6 +68,21 @@ describe("model-I/O journal", () => {
     expect(stats.bytes).toBe(Buffer.byteLength(body, "utf8"));
   });
 
+  it("sanitizes the error field before persisting", async () => {
+    process.env.AGENT_JOURNAL = "1";
+    await recordJournalTurn(
+      turn({
+        response: undefined,
+        error: "POST https://api.x.com/v1?api_key=supersecret123 failed with Bearer sk-abcdefghijklmnopqrstu",
+      }),
+      { dir },
+    );
+    const body = await fs.readFile(path.join(dir, "sess1.jsonl"), "utf8");
+    const line = JSON.parse(body.trim().split("\n")[0]);
+    expect(line.error).toBe("POST https://api.x.com/v1 failed with Bearer {redacted}");
+    expect(line.error).not.toContain("supersecret123");
+  });
+
   it("sanitizes hostile session ids into safe filenames", async () => {
     process.env.AGENT_JOURNAL = "1";
     await recordJournalTurn(turn({ sessionId: "../../evil:name" }), { dir });

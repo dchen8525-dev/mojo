@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import type { AgentEvents } from "../agent.js";
 import { renderCommand, expandFileReferences } from "../commands.js";
+import { sanitizeErrorMessage } from "../errorSanitizer.js";
 import { runAgentCommand, type CommandResult } from "../agentCommands.js";
 import {
   toUiTranscript,
@@ -648,14 +649,18 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
         hub.broadcast("turn_end", { turnId, text: finalText });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        hub.broadcast("turn_error", { turnId, message: msg === "aborted" ? "" : msg, aborted: msg === "aborted" });
+        hub.broadcast("turn_error", {
+          turnId,
+          message: msg === "aborted" ? "" : sanitizeErrorMessage(msg) ?? msg,
+          aborted: msg === "aborted",
+        });
       }
     } catch (err) {
       // Failures before turn_start (e.g. unreadable @ references) would
       // otherwise vanish into an unhandled rejection with the UI waiting.
       hub.broadcast("turn_error", {
         turnId,
-        message: err instanceof Error ? err.message : String(err),
+        message: sanitizeErrorMessage(err instanceof Error ? err.message : String(err)) ?? "turn failed",
         aborted: false,
       });
     } finally {
