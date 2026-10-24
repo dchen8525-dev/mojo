@@ -7,6 +7,7 @@ import {
   completeMention,
   filterMentionPaths,
   listWorkspacePaths,
+  parseGitFileList,
   resolveActiveMention,
   visibleMentionWindow,
   type MentionPath,
@@ -24,6 +25,11 @@ describe("resolveActiveMention", () => {
     expect(resolveActiveMention("no mention here")).toBeNull();
     expect(resolveActiveMention("@foo bar")).toBeNull();
     expect(resolveActiveMention("x @foo bar")).toBeNull();
+  });
+
+  it("accepts spaces inside an open quoted token and stops once the quote closes", () => {
+    expect(resolveActiveMention('look @"my fi')).toEqual({ start: 5, token: "my fi", quoted: true });
+    expect(resolveActiveMention('@"my file.txt" and more')).toBeNull();
   });
 });
 
@@ -63,6 +69,23 @@ describe("completeMention", () => {
       "check @src please",
     );
   });
+
+  it("quotes paths the unquoted grammar cannot express", () => {
+    const mention = { start: 0, token: "my" };
+    expect(completeMention("@my rest", mention, { kind: "file", path: "my file.txt" })).toBe(
+      '@"my file.txt"  rest',
+    );
+    // Directories stay open (no closing quote) so completion can continue.
+    expect(completeMention("@my rest", mention, { kind: "directory", path: "my dir" })).toBe(
+      '@"my dir rest',
+    );
+    const open = resolveActiveMention('@"my dir/');
+    expect(open).toEqual({ start: 0, token: "my dir/", quoted: true });
+    const openFile = resolveActiveMention('@"my dir/f')!;
+    expect(completeMention('@"my dir/f', openFile, { kind: "file", path: "my dir/f.ts" })).toBe(
+      '@"my dir/f.ts" ',
+    );
+  });
 });
 
 describe("visibleMentionWindow", () => {
@@ -75,6 +98,22 @@ describe("visibleMentionWindow", () => {
     expect(bottom.selectedIndex).toBe(7);
     expect(bottom.entries).toHaveLength(8);
     expect(visibleMentionWindow(entries, 3, 5).startIndex).toBe(0);
+  });
+});
+
+describe("parseGitFileList", () => {
+  it("decodes a multi-byte name split across stdout chunks", () => {
+    const bytes = Buffer.from("café.txt\0src/main.ts\0", "utf8");
+    const split = bytes.indexOf(Buffer.from("é")) + 1; // middle of the two-byte char
+    const entries = parseGitFileList([bytes.subarray(0, split), bytes.subarray(split)]);
+    expect(entries.map((e) => e.path)).toEqual(["café.txt", "src/main.ts", "src"]);
+    expect(entries.find((e) => e.path === "src")?.kind).toBe("directory");
+  });
+
+  it("drops agent state files and rejects empty output", () => {
+    expect(() => parseGitFileList(Buffer.from("\0"))).toThrow(/returned nothing/u);
+    const entries = parseGitFileList(Buffer.from("a.ts\0.node-agent/data.jsonl\0"));
+    expect(entries.map((e) => e.path)).toEqual(["a.ts"]);
   });
 });
 

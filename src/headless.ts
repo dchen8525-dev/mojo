@@ -10,6 +10,7 @@ import type { Risk } from "./types.js";
  *   {"type":"system","subtype":"init",...}   session identity, once
  *   {"type":"round_start","round":1}
  *   {"type":"text_delta","delta":"..."}      streamed assistant text
+ *   {"type":"thinking_delta","delta":"..."}  reasoning delta (when the model streams it)
  *   {"type":"tool_start","id","name","input_preview","input"?}
  *   {"type":"sub_tool_start","parent_id","name","input_preview","round"?}
  *   {"type":"sub_tool","parent_id","name","input_preview","ok","preview","round"?}
@@ -20,11 +21,17 @@ import type { Risk } from "./types.js";
  *   {"type":"usage","input","output"}        per model response
  *   {"type":"compacting"} / {"type":"compacted","before","after"}
  *   {"type":"retry","attempt","max_attempts","delay_ms","reason","status"?}
- *   {"type":"permission","description","risk","decision"}
+ *   {"type":"stream_recovery","attempt","max_attempts","mode","discarded_chars","delay_ms","reason"}
+ *   {"type":"cost_warning","message"}
+ *   {"type":"hook","event","message"}
+ *   {"type":"plan_approved"}
+ *   {"type":"permission","description","risk","decision","rule"?}
  *   {"type":"result","subtype":"success"|"error"|"aborted","text",...}  last
  *
  * Field names are snake_case to match the wider headless-agent ecosystem.
- * Every event carries an ISO `ts` timestamp.
+ * Every event carries an ISO `ts` timestamp. Human-readable print-mode text
+ * (the interactive permission prompt) goes to stderr through `human()`, so a
+ * terminal run still has a pure NDJSON stdout.
  */
 
 export type PermissionDecision = "yes" | "no" | "session" | "project" | "always" | "always_deny";
@@ -56,11 +63,17 @@ export interface NdjsonEvents {
   ) => Promise<PermissionDecision>;
   /** The final result line; call once when the turn settles. */
   result: (subtype: "success" | "error" | "aborted", text: string, info: { durationMs: number; tokens: number; costUsd: number; provider: string; model: string }) => void;
+  /**
+   * Human-readable print-mode text (permission prompts and previews). stdout
+   * belongs to the event stream, so this must never write there.
+   */
+  human: (line: string) => void;
 }
 
 export function createNdjsonEvents(
   init: NdjsonInit,
   write: (line: string) => void = (line) => process.stdout.write(line + "\n"),
+  human: (line: string) => void = (line) => process.stderr.write(line + "\n"),
 ): NdjsonEvents {
   const emit = (event: Record<string, unknown>) => write(JSON.stringify({ ts: new Date().toISOString(), ...event }));
 
@@ -156,5 +169,6 @@ export function createNdjsonEvents(
         model: info.model,
       });
     },
+    human,
   };
 }

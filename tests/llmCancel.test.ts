@@ -105,4 +105,24 @@ describe("cancelled-stream salvage", () => {
     expect(err).toBeInstanceOf(CancelledStreamError);
     expect((err as CancelledStreamError).partialText).toBe("part one part two");
   });
+
+  it("de-duplicates re-emitted text when an openai resume is aborted", async () => {
+    process.env.AGENT_RETRY_BASE_MS = "0";
+    const ac = new AbortController();
+    h.script.push(async () => {
+      throw new StreamInterrupted("part one ");
+    });
+    h.script.push(async (_signal, events) => {
+      // OpenAI has no prefill, so the continuation repeats the whole answer.
+      events?.onTextDelta?.("part one part two");
+      ac.abort();
+      throw new Error("Request was aborted.");
+    });
+    const err = await makeLLM("openai")
+      .send([{ role: "user", content: "hi" }], "sys", [], ac.signal, { onTextDelta: () => {} })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CancelledStreamError);
+    // Salvaging "part one part one part two" would duplicate the overlap.
+    expect((err as CancelledStreamError).partialText).toBe("part one part two");
+  });
 });

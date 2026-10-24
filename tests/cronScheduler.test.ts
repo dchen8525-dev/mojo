@@ -87,6 +87,34 @@ describe("CronScheduler", () => {
     }
   });
 
+  it("stays in standby when the owner's lease mtime is ahead of our clock", async () => {
+    await createCronTask({ cron: "* * * * *", prompt: "tick", cwd: project }, home);
+    await forceDue();
+    const file = cronLeasePath(home);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, JSON.stringify({ pid: process.ppid, token: "other" }), "utf8");
+    // Timestamps are written with sub-millisecond rounding and a shared home may
+    // live on a clock-skewed server: a future mtime is still a live lease, not a
+    // stale one. Before the fix this unlinked the healthy lease and took over.
+    const ahead = new Date(Date.now() + 60_000);
+    await fs.utimes(file, ahead, ahead);
+    const calls: string[] = [];
+    const scheduler = new CronScheduler({
+      home,
+      intervalMs: 60_000,
+      log: () => {},
+      runner: async (t) => (calls.push(t.id), { ok: true }),
+    });
+    try {
+      expect(await scheduler.start()).toBe(false);
+      expect(scheduler.isOwner).toBe(false);
+      expect(calls).toEqual([]);
+      expect(await fs.readFile(file, "utf8")).toContain("other");
+    } finally {
+      await scheduler.stop();
+    }
+  });
+
   it("grants the lease to exactly one of two simultaneous schedulers", async () => {
     const mk = () => new CronScheduler({ home, intervalMs: 60_000, log: () => {}, runner: async () => ({ ok: true }) });
     const a = mk();

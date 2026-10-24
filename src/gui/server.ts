@@ -408,6 +408,15 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
   }
 
   function buildEvents(turn: UiTurn): AgentEvents {
+    // A detached subagent can report after its turn ended, by which time the
+    // user may have resumed another session. Remember the owning session while
+    // the turn is still live so the UI-only subcall line lands in the right
+    // transcript. The id can be empty at turn start for a brand-new session,
+    // so it is re-read once the first round runs.
+    let ownerSession = project.agent.sessionId;
+    const rememberOwner = () => {
+      if (runtime.liveTurn === turn) ownerSession = project.agent.sessionId;
+    };
     return {
       onTextDelta: (d) => {
         turn.text += d;
@@ -416,6 +425,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
         hub.broadcast("text_delta", { d });
       },
       onRoundStart: (round) => {
+        rememberOwner();
         turn.round = round;
         (turn.rounds ??= []).push({ round, text: "", thinking: "" });
         hub.broadcast("round_start", { round });
@@ -455,6 +465,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
         hub.broadcast("tool_end", { id, name, ok, preview, result: full });
       },
       onSubToolStart: (parentId, name, inputPreview, round) => {
+        rememberOwner();
         // Live-only: fills a running row so long subagent calls are visible
         // before their result exists. Persistence happens on completion.
         const call: UiSubCall = { name, inputPreview, running: true };
@@ -480,8 +491,7 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
         if (round) call.round = round;
         runtime.recordSubCall(parentId, call);
         // Persist it (UI-only line) so a restart or /resume keeps the chain.
-        const sessionId = project.agent.sessionId;
-        if (sessionId) void appendSubCall(sessionId, { toolUseId: parentId, ...call }).catch(() => {});
+        if (ownerSession) void appendSubCall(ownerSession, { toolUseId: parentId, ...call }).catch(() => {});
         if (t && !running) (t.subCalls ??= []).push(call);
         hub.broadcast("sub_tool", { id: parentId, name, inputPreview, ok, preview, round });
       },
@@ -1299,6 +1309,8 @@ export interface RunningGui {
   token: string;
   port: number;
   close: () => Promise<void>;
+  /** Session currently open in the agent (changes when the user resumes/creates one). */
+  currentSessionId: () => string;
 }
 
 /** Bind to 127.0.0.1 and return the URL (with token fragment) to open. */
@@ -1322,6 +1334,7 @@ export async function startGuiServer(opts: GuiServerOptions, port = 0): Promise<
     token: opts.token,
     port: boundPort,
     url: `http://127.0.0.1:${boundPort}/#${opts.token}`,
+    currentSessionId: () => opts.project.agent.sessionId,
     close: () =>
       new Promise<void>((resolve) => {
         opts.hub.closeAll();

@@ -32,7 +32,8 @@ Agent tool call
 - 成功：`日志...` + `\n\n=> <util.inspect(value)>`；仅日志或仅结果均可；都没有时返回 `(no output)`。stderr 以 `[stderr]` 段附后。
 - 代码抛错：`Error: message` + 过滤掉 `node:internal`/`node_repl.js` 帧后的至多 8 行栈；`isError: true`，内核与已有绑定继续可用。
 - `unhandledRejection` / `uncaughtException` 被 worker 捕获并写入 stderr，不让内核退出。
-- 输出预算：默认返回 30000 字符（`max_output` 可调，最低 1000）；超出时由 `boundedResult` 落盘到临时文件并保留 head+tail 指针。运行中 stdout 累计超过 200000 字符则判定为失控输出，杀掉内核并报错（避免无界缓冲）。
+- 输出预算：默认返回 30000 字符（`max_output` 可调，最低 1000）；超出时由 `boundedResult` 落盘到临时文件并保留 head+tail 指针。
+- 无界缓冲防线：运行中 stdout 未换行缓冲、stderr 未换行缓冲、单请求累计日志字符、单请求 stderr 字符都以 200000 为硬上限；任一超限判定为失控输出，杀掉内核并报错，后台刷屏不能把主进程内存吃光。单个返回值超过 100000 字符时在 worker 侧截断并标注 `[... value truncated]`（`util.inspect` 同时限制深度/数组长度/字符串长度）。
 
 ## 生命周期
 
@@ -61,13 +62,13 @@ Agent tool call
 
 ## 测试
 
-`tests/nodeRepl.test.ts`（14，真实子进程）：
+`tests/nodeRepl.test.ts`（17，真实子进程）：
 - 顶层 `const`/`let` 跨调用与变更保留；并发调用串行化；`require` 可用。
 - 日志 + 结果合并；抛错后绑定仍在。
 - 顶层 await 单表达式返回值；多语句 async 通过 `globalThis` 持久化。
 - 会话隔离；`disposeNodeReplSession` 清空状态；空闲超时后新内核。
 - 超时/中断后内核重启且状态丢失；拒绝审批时不执行（断言 high + code 预览）。
-- 超大输出截断并给出完整文件指针。
+- 超大输出截断并给出完整文件指针；无换行 stdout/stderr 超限、单请求日志超限都会杀内核；单个超大返回值截断标注。
 
 `tests/prompts.test.ts`：node_repl 指导块按工具门控出现。
 

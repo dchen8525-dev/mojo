@@ -16,13 +16,15 @@
 ### 设计
 
 - `TokenCounter.snapshot()`（src/tokens.ts）返回当前锚点 `{ count, tokens }`（无锚点时为 null）；`restoreAnchor(count, tokens)` 重新挂载上一个进程留下的锚点（非法输入静默忽略）。
+- `setAnchor(messagesSent, input, output, cached)` 的锚点值为**新鲜输入 + 缓存读/写 + 输出**：Anthropic 的 `input_tokens` 不含缓存项，OpenAI 后端已从 `prompt_tokens` 扣除缓存项，漏算会让缓存命中越高的会话基线越低，长会话可能直到上下文溢出都不触发自动压缩。
 - `SessionMeta.usage: { messages, tokens }`（src/session.ts）：语义为"前 `messages` 条消息恰好花费 `tokens`"。`saveUsage()` 写入（非法值丢弃），加载侧白名单重建时同步解析清洗。
-- `agent.persistTurn()` 在回合末尾 diff 快照，变化才调用 `saveUsage()`；`loadGoal()` 更名 `loadSessionMeta()`，在 `/resume` / `resetSession` 时恢复锚点，守卫条件 `usage.messages <= this.messages.length` —— 压缩/裁剪后的历史比保存时短，计数校验自然拒绝过期锚点，回落到字符估算。
+- `agent.persistTurn()` 在回合末尾 diff 快照，变化才调用 `saveUsage()`；若锚点已被失效（压缩、裁剪、媒体剔除）且本轮没有新锚点（例如流中断后的打捞持久化），写入 `usage: null` 删除旧基线——否则 resume 会把旧 token 数绑到已被原地改写的历史。
+- `loadSessionMeta()` 在 `/resume` / `resetSession` 时恢复锚点，守卫条件 `usage.messages <= this.messages.length` —— 压缩/裁剪后的历史比保存时短，计数校验拒绝过期锚点，回落到字符估算。
 - forkSession 刻意不复制 usage（新会话的历史前缀已经改变）。
 
 ### 效果
 
-恢复会话后 `tokenEstimate()` 直接返回真实锚点值（消息数吻合时），autocompact 决策与 /context 的"anchored"行不再从零估算。
+恢复会话后 `tokenEstimate()` 直接返回真实锚点值（消息数吻合时），autocompact 决策与 /context 的"anchored"行不再从零估算；启用 prompt caching 后基线也包含缓存命中部分，不会低估上下文占用。
 
 ## B：web_fetch TTL+LRU 缓存（src/tools/web.ts）
 
@@ -36,6 +38,7 @@
 新增 `isWindowsDestructiveDelete()` 并入 `isDangerousCommand()`（移植 ZCode guarded/windows-delete.ts 语义）：
 
 - cmd `rd`/`rmdir` 带 `/S`（组合开关如 `/s /q` 也识别）→ 树删除；无 `/S` 只删空目录不算；纯 `/?` 帮助调用不算；
+- 命令词按「去引号/`@`、取路径末段、去 `.exe`」归一化，并在整条命令里查找而不是只看第一个词：`cmd /c rd /s …`、`powershell -Command "rd /s …"`、`C:\Windows\System32\rmdir.exe /s …` 与裸 `rd` 同等对待（此前会被漏判，auto 模式下直接放行）；
 - `robocopy` `/MIR` 或 `/PURGE` 且源+目标 ≥2 个路径且无 `/L`（list-only）→ 镜像删除；`/XF /XD` 排除列表中的词不计入路径数；
 - 连带效果：只读分类硬拒（Explore 子代理）、主 bash 标注危险并以 high 等级请求审批。
 
@@ -44,16 +47,18 @@
 ## D：tool_search 已发现工具持久化
 
 - `SessionMeta.exposedTools?: string[]` + `saveExposedTools()`（去重、截断 80 字符、上限 100 个、空列表清除），加载侧同样解析清洗；
-- `tools/index.ts` 新增 `exposedToolNames()` 导出当前暴露集合；
-- `persistTurn()` diff 后持久化；`loadSessionMeta()` 恢复时逐个 `exposeTool(name)`（未知/非 deferred 名称静默跳过，比如服务器已断开），并同步 diff 基线。
+- `tools/index.ts` 的暴露集合按 session id 分桶；`exposedToolNames(sessionId)` 只返回当前会话的集合；
+- `persistTurn()` 只 diff/持久化当前会话；`loadSessionMeta()` 恢复时逐个 `exposeTool(name, sessionId)`
+  （未知/非 deferred 名称静默跳过，比如服务器已断开），并同步 diff 基线。会话切换不会继承其他会话的
+  发现结果，plan 模式的工具表也只列出本会话已暴露的延迟工具。
 
 ## 测试
 
-- tokens.test.ts：snapshot/restore 单元 + 过期锚点被 count() 拒绝；
+- tokens.test.ts：snapshot/restore 单元、过期锚点被 count() 拒绝、缓存读/写计入锚点；
 - session.test.ts：usage/exposedTools 写读、非法值丢弃、去重与清除；
 - web.test.ts：命中标注、错误不缓存、`AGENT_WEBFETCH_CACHE=0`、TTL 过期、8MB 预算 LRU 逐出；
-- bash.test.ts：`rd /S`、`robocopy /MIR|/PURGE`、`/L` 豁免、`/XF /XD` 列表、只读类排除；
-- agent.test.ts：回合末持久化锚点、/resume 恢复锚点（过期拒绝）、tool_search 暴露持久化与恢复。
+- bash.test.ts：`rd /S`、`robocopy /MIR|/PURGE`、`/L` 豁免、`/XF /XD` 列表、只读类排除、shell 包装与绝对可执行路径下的树删除；
+- agent.test.ts：回合末持久化锚点（含缓存 token）、/resume 恢复锚点（过期拒绝）、锚点失效且未重锚时清除旧 usage、tool_search 暴露持久化与恢复。
 
 ## 配置
 

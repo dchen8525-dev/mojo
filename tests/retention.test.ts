@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanupRetention, retentionDays, scheduleRetentionCleanup } from "../src/retention.js";
 
 let home = "";
@@ -59,14 +59,37 @@ describe("cleanupRetention", () => {
     const kept = await seed("sessions", "deadbeef.jsonl", 30);
     const keptJournal = await seed("journal", "deadbeef.jsonl", 30);
     const keptSanitized = await seed("journal", "a_b_c.jsonl", 30);
+    const keptCase = await seed("journal", "Sess_One.jsonl", 30);
     const doomed = await seed("sessions", "other.jsonl", 30);
 
-    const result = await cleanupRetention({ home, keepIds: ["deadbeef", "a b c"], now: new Date() });
+    const result = await cleanupRetention({
+      home,
+      keepIds: ["deadbeef", "a b c", "Sess:One"],
+      now: new Date(),
+    });
 
     expect(result.deletedFiles).toEqual(["other.jsonl"]);
     await expect(fs.stat(kept)).resolves.toBeTruthy();
     await expect(fs.stat(keptJournal)).resolves.toBeTruthy();
     await expect(fs.stat(keptSanitized)).resolves.toBeTruthy();
+    await expect(fs.stat(keptCase)).resolves.toBeTruthy();
+  });
+
+  it("does not delete a file that was refreshed between the ownership check and unlink", async () => {
+    const resumed = await seed("sessions", "resumed.jsonl", 30);
+    let calls = 0;
+    const statSpy = vi.spyOn(fs, "lstat").mockImplementation((async () => {
+      calls += 1;
+      // Old on first look, freshly appended by another process on re-check.
+      return { isFile: () => true, mtimeMs: calls === 1 ? 0 : Date.now() } as never;
+    }) as never);
+    try {
+      const result = await cleanupRetention({ home, now: new Date() });
+      expect(result.deletedFiles).toEqual([]);
+    } finally {
+      statSpy.mockRestore();
+    }
+    await expect(fs.stat(resumed)).resolves.toBeTruthy();
   });
 
   it("respects retentionDays override and disables at 0", async () => {
@@ -121,5 +144,26 @@ describe("scheduleRetentionCleanup", () => {
     await expect
       .poll(async () => fs.stat(doomed).then(() => false, () => true))
       .toBe(true);
+  });
+
+  it("evaluates a keepIds function when cleanup fires, not when scheduled", async () => {
+    const kept = await seed("sessions", "aaaa1111.jsonl", 30);
+    const doomed = await seed("sessions", "zzzz9999.jsonl", 30);
+    let current: string[] = [];
+    let fired: (() => void) | undefined;
+    scheduleRetentionCleanup({
+      home,
+      keepIds: () => current,
+      delayMs: 5,
+      setTimeout: (cb) => {
+        fired = cb;
+        return { unref() {} };
+      },
+    });
+    // The host (GUI) opens an old session after scheduling, before the timer.
+    current = ["aaaa1111"];
+    fired?.();
+    await expect.poll(async () => fs.stat(doomed).then(() => false, () => true)).toBe(true);
+    await expect(fs.stat(kept)).resolves.toBeTruthy();
   });
 });

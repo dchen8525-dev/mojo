@@ -129,6 +129,24 @@ describe("TokenCounter", () => {
     expect(c.count(messages)).toBe(1050);
   });
 
+  it("counts cache read/write tokens as context footprint", () => {
+    const c = new TokenCounter();
+    const messages = [msg("one"), msg("two"), { role: "assistant", content: "reply" } as MessageParam];
+    // Providers report cached prompt tokens outside inputTokens, but they
+    // still occupy the context window.
+    c.setAnchor(2, 1000, 50, 3000);
+    expect(c.count(messages)).toBe(4050);
+    expect(c.snapshot()).toEqual({ count: 3, tokens: 4050 });
+  });
+
+  it("anchors when every prompt token was served from cache", () => {
+    const c = new TokenCounter();
+    const messages = [msg("one"), { role: "assistant", content: "reply" } as MessageParam];
+    c.setAnchor(1, 0, 40, 2000); // no fresh input, but usage was reported
+    expect(c.anchored).toBe(true);
+    expect(c.count(messages)).toBe(2040);
+  });
+
   it("estimates only the delta after the anchor", () => {
     const c = new TokenCounter();
     const messages = [msg("one")];

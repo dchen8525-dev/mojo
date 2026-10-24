@@ -21,7 +21,7 @@ Survey 第 3 轮对 ZCode 的 5 个候选改进，落地情况：
 **方案**：compaction 完成后（三个重写路径：截断 fallback、摘要成功、异常 fallback 各调用一次 `restoreAfterCompaction`，每次压缩至多执行一次，`restoreRan` 标志防重）：
 
 - 取 `FileStateStore.recent(5)`（插入序，重读会移到末尾——record 先 delete 再 set）。
-- 跳过路径仍出现在保留尾部文本里的文件（原始路径与 JSON 转义形式都匹配，Windows 反斜杠在 JSON 里会翻倍；`JSON.stringify` 的结果要去掉首尾引号）。
+- 跳过路径仍出现在保留尾部文本里的文件（原始路径与 JSON 转义形式都匹配，Windows 反斜杠在 JSON 里会翻倍；`JSON.stringify` 的结果要去掉首尾引号）。`read_file` 的结果只带工作区相对路径，所以还要匹配「tool_result 的 JSON `content` 前缀 + 相对路径 + 换行」这一表头；否则刚读过、内容仍在尾部的文件会被重复注入，抵消压缩效果。只认表头而不认裸路径，避免散文里一句提及就误跳过。
 - 文件已从磁盘消失 → 丢弃；磁盘已变更（mtime/size）→ 降级为一行警告"已变更，编辑前请重读"。
 - 未变更的完整读取且 ≤16k 字符 → 直接把当前文件内容以代码块形式恢复进提醒（总预算 48k 字符，超出或部分读取降级为引用行）。
 - 全部为空 → 不注入。注入体走统一 `<system-reminder event="ReadStateRestored">` 通道，tokens 缓存失效。
@@ -33,6 +33,8 @@ Survey 第 3 轮对 ZCode 的 5 个候选改进，落地情况：
 **提示注入**：规则表（当前一条：GitHub API 限流报错 → 提示用 `gh api rate_limit` 查看配额），同一条提示文本 60 秒冷却防刷屏；匹配命中时在输出末尾追加 `<system-reminder event="BashHint">`。
 
 **数据 URL 图片提取**：输出中出现 `data:image/png;base64,…` 时自动剥离为附带的图片块（ToolResult 新增 `images?: ImageBlockParam[]`，runTool 组装 tool_result 时并入 content 数组；批次 25 的媒体预算会照常对驻留历史裁剪）。约束：仅 png/jpeg/jpg/gif/webp；base64 运行段 ≥100 字符；单图 5 MiB 预算（超限替换为 `[image omitted: …]` 占位）；每结果至多 2 张；文本位置留 `[image attached from output]` 占位。实现细节：V8 正则对超长 base64 串的无界量词会栈溢出（实测 >6.99MB 必崩），改为按 1MiB 分块的手动锚定扫描。
+
+**流式上限联动**：主 bash 捕获输出时对普通文本有 200k 字符硬上限（超限杀进程）。截图 base64 天然超过它，原实现会在截图中途杀进程，或把成功命令标成 `output exceeded 200KB` 且附带残缺 base64。现改为：流式扫描到 `data:image/`（跨 chunk 用 10 字符尾巴拼接判定）后，上限放宽为「文本上限 + 2 张 5 MiB 图片的 base64 长度」（`imageCaptureChars()`，与提取器实际接受的数量/字节预算同源），超出时提示中的数字取当前生效上限。
 
 ## #4 SSRF 防护补口（web.ts）
 
@@ -51,8 +53,8 @@ isBlockedAddress 的 IPv6 分支新增 `100::/64`（RFC 6666 discard-only，不�
 
 ## 测试
 
-- `tests/contextRestore.test.ts`：recent 顺序（重读移末尾）、四档降级、尾部可见跳过、空读取表。
-- `tests/bashHints.test.ts`：冷却期、图片提取/规范化/超限占位、提示追加。
+- `tests/contextRestore.test.ts`：recent 顺序（重读移末尾）、四档降级、尾部可见跳过（含 `read_file` 相对路径表头仍在尾部时不重复注入、散文提及路径仍会恢复）、空读取表。
+- `tests/bashHints.test.ts`：冷却期、图片提取/规范化/超限占位、提示追加；`tests/bash.test.ts`：超过 200k 文本上限的截图仍被完整捕获并转成图片块（不再误杀进程）。
 - `tests/planFile.test.ts`：写读复制往返、id 清洗、可见性判定（文本块/tool_use input/不可见）、截断。
 - `tests/agent.test.ts` 新增两组：approved-plan continuity（批准写盘且可见期不重复注入、resume 后重注入一次、压缩后重新附带、fork 带走计划）与 post-compaction read-state restore（恢复文件内容、无读取不注入）。旧的 plan-mode 测试改用临时 cwd（exit_plan 批准现在会写盘，不能污染仓库目录）。
 

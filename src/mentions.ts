@@ -19,6 +19,8 @@ export interface MentionPath {
 export interface ActiveMention {
   start: number;
   token: string;
+  /** Set for `@"partial path` tokens, where spaces belong to the path. */
+  quoted?: boolean;
 }
 
 export const MENTION_VISIBLE_COUNT = 8;
@@ -27,6 +29,8 @@ const WALK_MAX_ENTRIES = 5000;
 const WALK_MAX_DEPTH = 8;
 const WALK_SKIP_DIRS = new Set([".git", "node_modules", ".svn", ".hg"]);
 const PATH_CACHE_TTL_MS = 30_000;
+/** A giant monorepo must not turn completion into an unbounded read. */
+const GIT_MAX_STDOUT_BYTES = 8 * 1024 * 1024;
 
 const pathCache = new Map<string, { entries: MentionPath[]; fetchedAt: number }>();
 
@@ -40,9 +44,15 @@ export function resolveActiveMention(text: string): ActiveMention | null {
   const before = text.lastIndexOf("@");
   if (before < 0) return null;
   if (before > 0 && !/\s/u.test(text[before - 1]!)) return null;
-  const token = text.slice(before + 1);
-  if (/\s/u.test(token)) return null;
-  return { start: before, token };
+  const rest = text.slice(before + 1);
+  if (rest.startsWith('"')) {
+    // An unterminated quote is an in-progress mention; a closed one is final
+    // (completeMention closes it for files), so suggestions stop there.
+    if (rest.indexOf('"', 1) >= 0) return null;
+    return { start: before, token: rest.slice(1), quoted: true };
+  }
+  if (/\s/u.test(rest)) return null;
+  return { start: before, token: rest };
 }
 
 /** Rank matches: basename prefix > path prefix > substring; then alphabetical. */
@@ -66,9 +76,19 @@ export function filterMentionPaths(entries: MentionPath[], token: string, limit 
   return scored.slice(0, limit).map((s) => s.entry);
 }
 
+/** Paths the unquoted `@token` grammar cannot express (see commands.ts AT_RE). */
+const MENTION_NEEDS_QUOTES = /[\s,;()]/u;
+
 export function completeMention(text: string, mention: ActiveMention, entry: MentionPath): string {
-  const replacement = `@${entry.path}${entry.kind === "file" ? " " : ""}`;
-  return `${text.slice(0, mention.start)}${replacement}${text.slice(mention.start + 1 + mention.token.length)}`;
+  // Spaces/specials break the unquoted grammar, so quote instead of producing
+  // a mention that expandFileReferences would silently leave as literal text.
+  const quote = MENTION_NEEDS_QUOTES.test(entry.path) && !entry.path.includes('"');
+  const trailing = entry.kind === "file" ? " " : "";
+  const replacement = quote
+    ? `@"${entry.path}${entry.kind === "file" ? '"' : ""}${trailing}`
+    : `@${entry.path}${trailing}`;
+  const consumed = mention.start + 1 + mention.token.length + (mention.quoted ? 1 : 0);
+  return `${text.slice(0, mention.start)}${replacement}${text.slice(consumed)}`;
 }
 
 /** Sliding window of suggestions shown in the panel. */
@@ -117,38 +137,59 @@ export function clearWorkspacePathCacheForTests(): void {
 }
 
 async function gitListPaths(cwd: string, signal?: AbortSignal): Promise<MentionPath[]> {
-  const out = await new Promise<string>((resolve, reject) => {
+  const chunks: Buffer[] = [];
+  await new Promise<void>((resolve, reject) => {
     const child = spawn("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], {
       cwd,
       stdio: ["ignore", "pipe", "ignore"],
       windowsHide: true,
     });
-    let stdout = "";
+    let bytes = 0;
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      if (error) reject(error);
+      else resolve();
+    };
     const timer = setTimeout(() => {
       child.kill();
-      reject(new Error("git ls-files timeout"));
+      finish(new Error("git ls-files timeout"));
     }, 5_000);
     timer.unref?.();
     child.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString("utf8");
+      bytes += chunk.length;
+      if (bytes > GIT_MAX_STDOUT_BYTES) {
+        child.kill();
+        finish(new Error("git ls-files output too large"));
+        return;
+      }
+      chunks.push(chunk);
     });
     const onAbort = () => {
-      clearTimeout(timer);
       child.kill();
-      reject(new Error("aborted"));
+      finish(new Error("aborted"));
     };
     signal?.addEventListener("abort", onAbort, { once: true });
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
+    child.on("error", (error) => finish(error));
     child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve(stdout);
-      else reject(new Error(`git ls-files exited ${code}`));
+      if (code === 0) finish();
+      else finish(new Error(`git ls-files exited ${code}`));
     });
   });
-  const files = out.split("\0").filter((p) => p && !p.startsWith(".node-agent/"));
+  // Decode after concatenating: a UTF-8 filename can straddle chunk boundaries.
+  return parseGitFileList(chunks);
+}
+
+/** Build the mention index from `git ls-files -z` output. */
+export function parseGitFileList(output: Buffer | Buffer[]): MentionPath[] {
+  // Concatenate before decoding: a UTF-8 filename can straddle chunk boundaries.
+  const files = (Array.isArray(output) ? Buffer.concat(output) : output)
+    .toString("utf8")
+    .split("\0")
+    .filter((p) => p && !p.startsWith(".node-agent/"));
   if (!files.length) throw new Error("git ls-files returned nothing");
   const seen = new Set<string>();
   const entries: MentionPath[] = [];

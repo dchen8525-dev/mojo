@@ -94,7 +94,10 @@ export function normalizeQuestions(raw: unknown): { questions?: UserQuestion[]; 
 /** Keep answers to labels that were actually offered, in option order. */
 function cleanSelected(question: UserQuestion, selected: string[]): string[] {
   const wanted = new Set(selected.map((s) => s.toLowerCase()));
-  return question.options.filter((o) => wanted.has(o.label.toLowerCase())).map((o) => o.label);
+  const offered = question.options.filter((o) => wanted.has(o.label.toLowerCase())).map((o) => o.label);
+  // A non-conforming client can post several labels for a single-select
+  // question; reporting all of them to the model would contradict the contract.
+  return question.multiSelect ? offered : offered.slice(0, 1);
 }
 
 /** Render the outcome for the model; never throws on malformed answers. */

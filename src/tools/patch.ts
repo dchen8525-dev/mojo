@@ -65,6 +65,26 @@ export const applyPatchTool: Tool = {
         plans.push(await planSection(section, abs, ctx));
       }
 
+      // Two sections may not write the same path (update+delete, move onto a
+      // file another section edits, ...): applying them in parse order would
+      // silently make one of them win.
+      const touched = new Map<string, string>();
+      for (const plan of plans) {
+        for (const p of plan.moveAbs ? [plan.abs, plan.moveAbs] : [plan.abs]) {
+          const key = pathKey(p);
+          const previous = touched.get(key);
+          if (previous) {
+            return {
+              content:
+                `Error: conflicting patch sections both touch ${relPath(ctx.cwd, p)} ` +
+                `(${previous} and ${plan.kind}). Split them into separate calls.`,
+              isError: true,
+            };
+          }
+          touched.set(key, plan.kind);
+        }
+      }
+
       // Ask once per affected path; existing allow rules answer silently and a
       // denial aborts the whole patch before anything touches the disk.
       for (const plan of plans) {
@@ -88,14 +108,23 @@ export const applyPatchTool: Tool = {
           continue;
         }
         const target = plan.moveAbs ?? plan.abs;
-        const checkpoint = await ctx.checkpoint?.(plan.abs, "apply_patch");
+        const checkpoint = await ctx.checkpoint?.(
+          plan.abs,
+          "apply_patch",
+          plan.moveAbs ? { movedTo: plan.moveAbs } : undefined,
+        );
         if (plan.kind === "add") await fs.mkdir(path.dirname(target), { recursive: true });
         await atomicWriteFile(target, plan.newContent ?? "");
-        await checkpoint?.finalize?.();
-        ctx.fileState?.recordCurrent(target);
         if (plan.moveAbs) {
           await fs.unlink(plan.abs);
           ctx.fileState?.invalidate(plan.abs);
+        }
+        // Finalize only after the source is gone: for a move the checkpoint must
+        // record that post-state, otherwise /undo mistakes the agent's own
+        // unlink for a user edit and refuses to roll the move back.
+        await checkpoint?.finalize?.();
+        ctx.fileState?.recordCurrent(target);
+        if (plan.moveAbs) {
           summaries.push(`M ${relPath(ctx.cwd, plan.abs)} -> ${relPath(ctx.cwd, plan.moveAbs)} (+${plan.added}/-${plan.removed})`);
         } else {
           summaries.push(`${plan.kind === "add" ? "A" : "M"} ${relPath(ctx.cwd, plan.abs)} (+${plan.added}/-${plan.removed})`);
@@ -169,6 +198,18 @@ async function planSection(section: ParsedPatch, abs: string, ctx: ToolContext):
     );
   }
   const moveAbs = section.movePath ? resolvePath(ctx.cwd, section.movePath) : undefined;
+  if (moveAbs) {
+    if (pathKey(moveAbs) === pathKey(abs)) {
+      throw new Error(`Cannot move ${display} onto itself (the source is deleted after writing).`);
+    }
+    const exists = await fs
+      .access(moveAbs)
+      .then(() => true)
+      .catch(() => false);
+    // Overwriting an existing file during a move is silent data loss: the old
+    // content is never read, previewed or checkpointed.
+    if (exists) throw new Error(`Move target already exists: ${relPath(ctx.cwd, moveAbs)}.`);
+  }
   const { added, removed } = countChunkLines(section.chunks);
   const preview = section.chunks
     .map((chunk) => {
@@ -217,4 +258,10 @@ function clipPreview(preview: string): string {
   const lines = preview.split("\n");
   if (lines.length <= PREVIEW_LINE_CAP) return preview;
   return `${lines.slice(0, PREVIEW_LINE_CAP).join("\n")}\n[... preview truncated: ${lines.length - PREVIEW_LINE_CAP} more lines]`;
+}
+
+/** Case-insensitive only where the filesystem is (Windows). */
+function pathKey(p: string): string {
+  const resolved = path.resolve(p);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }

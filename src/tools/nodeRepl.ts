@@ -32,13 +32,18 @@ const MARKER = "\u0001NODE_REPL:" + TOKEN + ":";
 const send = (msg) => process.stdout.write("\n" + MARKER + JSON.stringify(msg) + "\n");
 process.stdout.on("error", () => process.exit(0));
 globalThis.require = createRequire(process.cwd() + "/");
+// One inspected value can dwarf every log line combined (nested arrays of long
+// strings), and it travels as a single protocol line. Bound it at the source.
+const MAX_VALUE_CHARS = 100000;
 const formatValue = (v) => {
   if (v === undefined) return "";
+  let text;
   try {
-    return util.inspect(v, { depth: 3, maxArrayLength: 100, maxStringLength: 20000, breakLength: 100 });
+    text = util.inspect(v, { depth: 3, maxArrayLength: 100, maxStringLength: 20000, breakLength: 100 });
   } catch {
-    return String(v);
+    text = String(v);
   }
+  return text.length > MAX_VALUE_CHARS ? text.slice(0, MAX_VALUE_CHARS) + "\n[... value truncated]" : text;
 };
 const formatError = (e) => {
   if (e && typeof e === "object") {
@@ -129,6 +134,7 @@ interface Pending {
   logs: string[];
   stderr: string[];
   chars: number;
+  errChars: number;
   timer: NodeJS.Timeout;
   signal?: AbortSignal;
   onAbort?: () => void;
@@ -249,7 +255,7 @@ class NodeReplKernel {
         this.failPending("Execution aborted; the Node kernel was restarted and its state was lost.");
         this.restartKernel();
       };
-      this.pending = { id, logs: [], stderr: [], chars: 0, timer, signal, onAbort, resolve };
+      this.pending = { id, logs: [], stderr: [], chars: 0, errChars: 0, timer, signal, onAbort, resolve };
       signal?.addEventListener("abort", onAbort, { once: true });
       // spawnKernel re-armed the idle timer; a request is now in flight, so it
       // must not fire mid-execution on a loaded machine.
@@ -293,6 +299,11 @@ class NodeReplKernel {
         this.pushLog(line);
       }
     }
+    if (this.outBuf.length > HARD_OUTPUT_CAP) {
+      this.onOverflow(
+        `Output exceeded ${HARD_OUTPUT_CAP.toLocaleString()} chars without a line break; the Node kernel was restarted.`,
+      );
+    }
   }
 
   private onStderr(chunk: string): void {
@@ -303,8 +314,38 @@ class NodeReplKernel {
       const line = this.errBuf.slice(0, nl);
       this.errBuf = this.errBuf.slice(nl + 1);
       const pending = this.pending;
-      if (line.length && pending) pending.stderr.push(line);
+      if (!line.length || !pending) continue;
+      pending.stderr.push(line);
+      pending.errChars += line.length + 1;
+      if (pending.errChars > HARD_OUTPUT_CAP) {
+        this.onOverflow(
+          `stderr exceeded ${HARD_OUTPUT_CAP.toLocaleString()} chars; the Node kernel was restarted. ` +
+            "Write less to stderr (filter or summarize in code).",
+        );
+        return;
+      }
     }
+    if (this.errBuf.length > HARD_OUTPUT_CAP) {
+      this.onOverflow(
+        `stderr exceeded ${HARD_OUTPUT_CAP.toLocaleString()} chars; the Node kernel was restarted. ` +
+          "Write less to stderr (filter or summarize in code).",
+      );
+    }
+  }
+
+  /**
+   * Bound the stream buffers. With a request in flight this fails it and
+   * restarts the kernel; without one (late output from an async task), the
+   * buffer is dropped so a background spammer cannot grow it forever.
+   */
+  private onOverflow(message: string): void {
+    if (this.pending) {
+      this.failPending(message);
+      this.restartKernel();
+      return;
+    }
+    this.outBuf = "";
+    this.errBuf = "";
   }
 
   private pushLog(line: string): void {

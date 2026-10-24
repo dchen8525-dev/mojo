@@ -17,7 +17,7 @@ interface SessionGoal {
   objective: string;            // 单行目标，最长 4000 字符
   status: "active" | "paused" | "completed" | "cancelled";
   tokenBudget: number | null;   // null = 不限
-  tokensUsed: number;           // 本轮/校验器 input + output 累计
+  tokensUsed: number;           // 主回合/校验器的 input + output + 缓存读写累计
   continuations: number;        // 已排队的自动续跑次数
   maxContinuations: number;     // 默认 10，硬上限 50
   createdAt / updatedAt: string;
@@ -54,15 +54,17 @@ user turn / continuation turn
 - **用户输入优先**：任何真实用户消息（非续跑）都会先 `cancelBySource("goal")`，把排队中的自动续跑标记为 cancelled；正在运行的回合不受影响。
 - **失败即暂停**：回合抛错/中断时先记账再 `pauseGoal`（“turn interrupted / turn failed”），队列中的续跑一并取消；Salvage 逻辑照常保留已输出的文本。
 - **计划模式**：`queueGoalContinuation` 与 `afterTurnGoal` 都会在 planMode 为真时暂停目标（note `paused automatically: plan mode is on`）。计划模式的意义是先审计划再执行，自动起回合会绕过审批门。
-- **成本与上限**：`tokensUsed` 只统计 provider 的 input + output（缓存读/写不计入，避免把折扣 token 与预算混算）；成本台账仍完整记录 cacheRead/cacheWrite。`turnStopped` 由成本预算熔断或工具迭代上限设置，自动循环据此暂停。
+- **成本与上限**：`tokensUsed` 统计 provider 的全部输入 token（新鲜输入 + 缓存读/写）与输出。缓存命中只是折扣价，仍占上下文与预算；漏算会让缓存型会话的预算长期虚低。成本台账另记 cacheRead/cacheWrite，两者不混用。`turnStopped` 由成本预算熔断或工具迭代上限设置，自动循环据此暂停。
 
 ## 校验器
 
 - 系统提示 `GOAL_VERIFIER_SYSTEM` 要求只回一个 JSON：`{"done":boolean,"nextAction":"...","reason":"..."}`。
 - 输入只有：目标、上一轮 nextAction、累计 token、**最近一次 assistant 输出**（≤8000 字符，超出截断）。刻意不传工具调用历史：校验器判断“最新回合是否推进到目标”，不重放整个会话。
 - 解析容忍 ```json 代码围栏与前后说明文字；`done` 允许布尔字符串。无可用判定 → 暂停并提示 “completion verifier returned no usable verdict”。
-- 校验调用 60s 超时会中止请求并暂停；用户中断会转发 abort。用量计入 `tokensUsed`、成本台账与 `onUsage`。
+- 校验调用 60s 超时会中止请求并暂停；用户中断会转发 abort。用量（含缓存读/写）计入 `tokensUsed`、成本台账与 `onUsage`。
 - 校验器调用本身不触发新一轮校验（只有回合结束才进 `afterTurnGoal`）。
+- **标签注入防护**：objective/nextAction/note 与校验器引用的上一轮输出在拼进 `<goal_state>` / `<latest_turn>` 前，闭合标签统一转义为 `&lt;...`；文件或网页里引用的目标文本不能提前结束提醒块、冒充顶层指令。
+- **陈旧目标**：校验返回后先比对目标身份（`this.goal !== goal`）；等待期间目标被替换或清除时，不把成本与判定记到旧目标上。
 
 ## `/goal` 命令
 
@@ -107,7 +109,7 @@ user turn / continuation turn
 ## 测试
 
 - `tests/goal.test.ts`（13）：状态构造/容错解析、预算与剩余量、摘要/状态块、续跑提示、校验 JSON 解析（围栏/散文/坏值）、命令解析（别名、flag、非法值）。
-- `tests/agent.test.ts`（goal 12）：首轮排队与持久化、提示注入与完成判定、nextAction 落盘、续跑上限、预算耗尽、校验不可解析、中断/失败暂停并取消队列、真实输入取消续跑、pause/resume/complete/clear、预算/上限调整、恢复持久化目标、**plan 模式暂停**。
+- `tests/agent.test.ts`（goal 13）：首轮排队与持久化、提示注入与完成判定、nextAction 落盘、续跑上限、预算耗尽（含缓存 token 计入）、校验不可解析、中断/失败暂停并取消队列、真实输入取消续跑、pause/resume/complete/clear、预算/上限调整、恢复持久化目标、**plan 模式暂停**。
 - `tests/agentCommands.test.ts`（4）：`/goal` 启动（含 `--budget/--max`）、状态/暂停/继续/完成/清除、预算与上限调整（`off`→null）、非法输入。
 - `tests/session.test.ts`（5）：goal 写入/读取、null 清除、损坏记录丢弃、fork 携带、缺失会话返回 false。
 - `tests/runtimeQueue.test.ts`（1）：`cancelBySource` 只取消该来源的 accepted 命令。

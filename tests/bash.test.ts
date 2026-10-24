@@ -4,7 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { bashTool, bashOutputTool, bashKillTool, isDangerousCommand, isReadOnlyCommand, pickWin32Shell, defaultTimeoutMs, readOnlyBashTool } from "../src/tools/bash.js";
 import { backgroundManager } from "../src/tools/background.js";
-import type { ToolContext } from "../src/types.js";
+import type { PermissionRequest, ToolContext } from "../src/types.js";
 
 describe("pickWin32Shell", () => {
   it("defaults to cmd.exe", () => {
@@ -58,6 +58,39 @@ describe("isDangerousCommand (cross-shell patterns)", () => {
     expect(isDangerousCommand("Set-MpPreference -DisableRealtimeMonitoring $true")).toBe(true);
   });
 
+  it("flags git commands that discard uncommitted work or delete tracked files", () => {
+    for (const cmd of [
+      "git checkout -- .",
+      "git checkout HEAD -- src/app.ts",
+      "git checkout .",
+      "git checkout -f main",
+      "git switch --discard-changes main",
+      "git restore src/app.ts",
+      "git restore --source=HEAD~1 src/app.ts",
+      "git restore --staged --worktree src/app.ts",
+      "git restore -s HEAD~1 src/app.ts",
+      "git stash drop",
+      "git stash clear",
+      "git rm src/app.ts",
+    ]) {
+      expect(isDangerousCommand(cmd), cmd).toBe(true);
+    }
+    // Branch switching, reading the stash and unstaging touch no work.
+    for (const cmd of [
+      "git checkout main",
+      "git checkout -b feat",
+      "git checkout --orphan gh-pages",
+      "git switch main",
+      "git restore --staged src/app.ts",
+      "git restore -S src/app.ts",
+      "git stash list",
+      "git stash pop",
+      "git rm --cached src/app.ts",
+    ]) {
+      expect(isDangerousCommand(cmd), cmd).toBe(false);
+    }
+  });
+
   it("does not flag ordinary commands", () => {
     expect(isDangerousCommand("dir")).toBe(false);
     expect(isDangerousCommand("git status")).toBe(false);
@@ -95,6 +128,14 @@ describe("isDangerousCommand (windows tree deletes)", () => {
     expect(isReadOnlyCommand("rd /S /Q build")).toBe(false);
     expect(isReadOnlyCommand("robocopy src dst /MIR")).toBe(false);
   });
+
+  it("flags tree deletes behind a shell wrapper or an absolute executable path", () => {
+    expect(isDangerousCommand("cmd /c rd /s /q C:\\proj\\build")).toBe(true);
+    expect(isDangerousCommand("cmd.exe /c rmdir /s /q C:\\proj")).toBe(true);
+    expect(isDangerousCommand('powershell -Command "rd /s /q C:\\proj"')).toBe(true);
+    expect(isDangerousCommand("C:\\Windows\\System32\\rmdir.exe /s /q C:\\proj")).toBe(true);
+    expect(isDangerousCommand("cmd /c robocopy C:\\src C:\\dst /MIR")).toBe(true);
+  });
 });
 
 describe("isReadOnlyCommand", () => {
@@ -131,21 +172,51 @@ describe("isReadOnlyCommand", () => {
     expect(isReadOnlyCommand("git status\ngit log")).toBe(false);
     expect(isReadOnlyCommand("")).toBe(false);
   });
+
+  it("rejects git flags that write or execute a program", () => {
+    expect(isReadOnlyCommand("git reflog expire --expire=now --all")).toBe(false);
+    expect(isReadOnlyCommand("git reflog delete HEAD@{0}")).toBe(false);
+    expect(isReadOnlyCommand("git reflog")).toBe(true);
+    expect(isReadOnlyCommand("git reflog show main")).toBe(true);
+    expect(isReadOnlyCommand("git log --output=log.txt")).toBe(false);
+    expect(isReadOnlyCommand("git diff --output out.diff")).toBe(false);
+    expect(isReadOnlyCommand("git grep -O'code' needle")).toBe(false);
+    expect(isReadOnlyCommand("git grep --open-files-in-pager=less needle")).toBe(false);
+    expect(isReadOnlyCommand("git grep needle")).toBe(true);
+  });
 });
 
 describe("bash tool permission skip", () => {
   const ctx = (overrides: Partial<ToolContext> = {}): ToolContext => ({
     cwd: process.cwd(),
-    askPermission: async () => {
-      throw new Error("read-only command must not prompt");
-    },
+    askPermission: async () => true,
     ...overrides,
   });
 
-  it("runs a read-only command without asking permission", async () => {
-    const r = await bashTool.execute({ command: "echo readonly-skip" }, ctx());
+  it("hands read-only commands to the manager, which answers without prompting", async () => {
+    let request: PermissionRequest | undefined;
+    const r = await bashTool.execute(
+      { command: "echo readonly-skip" },
+      ctx({
+        askPermission: async (_d, _r, _p, req) => {
+          request = req;
+          return true;
+        },
+      }),
+    );
+    expect(request?.readOnly).toBe(true);
     expect(r.isError).toBeFalsy();
     expect(r.content).toContain("readonly-skip");
+  });
+
+  it("honors a deny rule for a read-only command", async () => {
+    const r = await bashTool.execute(
+      { command: "echo should-not-run" },
+      ctx({ askPermission: async () => false }),
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("rejected");
+    expect(r.content).not.toContain("should-not-run\n");
   });
 
   it("still prompts for anything not classified read-only", async () => {
@@ -155,6 +226,23 @@ describe("bash tool permission skip", () => {
       ctx({ askPermission: async () => (asked++, false) }),
     );
     expect(asked).toBe(1);
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("rejected");
+  });
+
+  it("asks with high risk for git commands that discard uncommitted work", async () => {
+    let risk: string | undefined;
+    const r = await bashTool.execute(
+      { command: "git restore src/app.ts" },
+      ctx({
+        askPermission: async (_d, r) => {
+          risk = r;
+          return false;
+        },
+      }),
+    );
+    // Medium risk would be accepted silently in accept-edits (auto) mode.
+    expect(risk).toBe("high");
     expect(r.isError).toBe(true);
     expect(r.content).toContain("rejected");
   });
@@ -175,6 +263,7 @@ describe("bash tool permission skip", () => {
       values: ["echo one", "echo two", "cat"],
       raw: "echo one && echo two | cat",
       opaque: false,
+      readOnly: false,
       remember: "bash(echo one && echo two | cat)",
     });
   });
@@ -226,6 +315,16 @@ describe("bash tool execution", () => {
     expect(r.isError).toBe(true);
     expect(r.content).toContain("rejected");
   });
+
+  it("captures a screenshot larger than the plain-text output cap", async () => {
+    // ~300KB decoded (400k base64 chars): above the 200k text cap, well within
+    // the per-image budget the post-processor advertises.
+    const cmd = `node -e "process.stdout.write('data:image/png;base64,' + 'A'.repeat(400000))"`;
+    const r = await bashTool.execute({ command: cmd }, ctx());
+    expect(r.isError).toBeFalsy();
+    expect(r.images).toHaveLength(1);
+    expect(r.content).toContain("[image attached from output]");
+  }, 10_000);
 });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -343,10 +442,9 @@ describe("defaultTimeoutMs (graded policy)", () => {
 describe("readOnlyBashTool", () => {
   const ctx = (cwd: string): ToolContext => ({
     cwd,
-    askPermission: async () => {
-      throw new Error("research subagents must never prompt");
-    },
-  }) as unknown as ToolContext;
+    // The manager answers read-only requests silently; anything else is refused.
+    askPermission: async (_d, _r, _p, request) => request?.readOnly === true,
+  });
 
   it("rejects commands that are not read-only without spawning anything", async () => {
     for (const cmd of ["echo hi > out.txt", "node -e 1", "npm install", "rm -rf x", "cat a | findstr b"]) {

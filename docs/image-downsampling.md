@@ -11,14 +11,17 @@
 - `imagePrepareLimits()`：从 `mediaLimits().perImageBytes` 与 `AGENT_IMAGE_MAX_EDGE` 组装预算。
 - `prepareImagesForModel(images, limits?, { signal }?)`：逐张处理，返回 `{ images, resized }`；**已达标图片原对象返回**（`resized` 计数只统计真正被改写的图片）。
 - `prepareImageForModel`：只处理 `base64` 源；WebP 直接透传（jimp 1.6 不能转码 WebP）；先用文件头探测格式与长宽，只有超字节或超长边时才 `await import("jimp")`——**jimp 是惰性加载**，常规小图不付启动成本。
-- `detectMediaType` / `imageDimensions`：按 magic bytes 解析 PNG / JPEG / GIF（JPEG 扫描 SOF 段），不解码像素。
+- `detectMediaType` / `imageDimensions`：按 magic bytes 解析 PNG / JPEG / GIF / BMP（JPEG 扫描 SOF 段，BMP 支持负高度 top-down 位图），不解码像素。
 - 压缩阶梯（命中即停）：
   1. 最长边缩到 `maxEdge`；源格式保留（PNG deflate 9 仅试一次；JPEG 走质量阶梯；GIF 原格式重编码）。
   2. 同一尺寸的 JPEG 质量阶梯 `80/60/40/20`。
   3. 依次缩到 `0.75 / 0.5 / 0.25` 最短边，每档先试保留格式（PNG 除外）再试 JPEG。
   4. 激进档 `1000/800/600/400/300/200`，JPEG 质量 `60/40/20`。
 - 全部候选都超预算时返回原图，让 `validateImages` 给出原有的大小错误；无法解码的数据也原样放行（由 provider 或校验报错），不吞掉错误。
-- 解码前检查像素数：声明尺寸超过 2400 万像素（解压炸弹）直接报错，不进入 jimp，避免按 4 字节/像素分配内存。
+- 解码前防线：
+  - base64 解码后的输入超过 64 MiB（`MAX_INPUT_BYTES`）直接拒绝，配置的字节预算再大也不能让进程先吃下数百 MB；
+  - 头部声明尺寸超过 2400 万像素（解压炸弹）直接报错，不进入 jimp，避免按 4 字节/像素分配内存；
+  - 超预算且尺寸/格式都无法廉价测量的容器（TIFF、AVIF 等）不交给解码器，原样交给 `validateImages` 拒绝。
 - 每个阶段检查 `AbortSignal`，用户中断回合时立即抛 `aborted`。
 
 ## 环境变量
@@ -50,7 +53,7 @@
 
 ## 测试
 
-- `tests/imageResize.test.ts`（12）：PNG/JPEG/GIF 文件头探测、小图零改写、`maxEdge=0` 关闭尺寸缩放、按最长边等比缩放且保留 PNG、按字节上限多次重编码、必须转 JPEG 的场景、WebP 透传、不可解码数据放行、解压炸弹拒绝、abort、多图只改超限者。
+- `tests/imageResize.test.ts`（14）：PNG/JPEG/GIF 文件头探测、小图零改写、`maxEdge=0` 关闭尺寸缩放、按最长边等比缩放且保留 PNG、按字节上限多次重编码、必须转 JPEG 的场景、WebP 透传、不可解码数据放行、解压炸弹拒绝、abort、多图只改超限者。
 - `tests/mediaBudget.test.ts`（+2）：`imageMaxEdge` 默认/空值/显式值/`0`/非法值、运行时读取环境变量。
 - `tests/agent.test.ts`（+1）：`Agent.chat` 收到超限图片时首个请求里的图片已被压到字节上限内。
 

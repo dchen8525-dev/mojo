@@ -7,12 +7,20 @@ import { str, num, bool, truncate, describeError, hasOutsidePathArg } from "./ut
 import { backgroundManager } from "./background.js";
 import { isFormatterCommand, syncBashFileState } from "./bashFileState.js";
 import { mergeShellSnapshotEnv, shellSnapshotEnv } from "../shellSnapshot.js";
-import { postProcessBashOutput } from "../bashHints.js";
+import { postProcessBashOutput, imageCaptureChars } from "../bashHints.js";
 import { splitShellCommand } from "../permissionRules.js";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 /** Output beyond this is killed; the full capture is spilled to a file. */
 const HARD_OUTPUT_CAP = 200_000;
+/**
+ * Streaming capture ceiling once the output embeds a screenshot. A screenshot
+ * is legitimately larger than any sane text output; killing the process at the
+ * text cap would truncate the base64 mid-run (or mark a successful command as
+ * failed). Headroom matches the images the post-processor will actually attach.
+ */
+const HARD_IMAGE_OUTPUT_CAP = HARD_OUTPUT_CAP + imageCaptureChars();
+const IMAGE_MARKER = "data:image/";
 
 /**
  * Permission context for a shell command: the splitter names every simple
@@ -42,6 +50,18 @@ const DANGEROUS_PATTERNS: RegExp[] = [
   /\bchmod\b|\bchown\b/i,
   /\bcacls\b|\bicacls\b/i,
   /\bgit\s+(push\s+--force|reset\s+--hard|clean\s+-)/i,
+  // Discard uncommitted work, as irreversible as `reset --hard`: path checkout
+  // (`git checkout -- .`, `git checkout HEAD -- file`), forced checkout/switch,
+  // working-tree restore (unless it only unstages), and dropping the stash.
+  // Branch switching (`git checkout main`, `-b`) stays routine.
+  /\bgit\s+checkout\b[^;&|]*(?:\s--(?=\s|$)|\s\.(?=\s|$))/i,
+  /\bgit\s+(?:checkout|switch)\b[^;&|]*(?:\s(?:-f|--force|--discard-changes)(?=\s|$))/i,
+  // Git's short flags are case-sensitive: -S unstages (safe), -s names a
+  // source (restores over the working tree), so these two regexes are not /i.
+  /\b[Gg][Ii][Tt]\s+restore\b[^;&|]*(?:\s--worktree(?=\s|$)|\s--source(?=\s|=)|\s-W(?=\s|$)|\s-s(?=\s|$))/,
+  /\b[Gg][Ii][Tt]\s+restore\b(?![^;&|]*(?:\s--staged(?=\s|$)|\s-S(?=\s|$)))/,
+  // `git rm` deletes the working file; `--cached` only unstages it.
+  /\bgit\s+(?:stash\s+(?:drop|clear)|rm\b(?!\s+--cached\b))/i,
   /\b(curl|wget|invoke-webrequest|invoke-restmethod|iwr)\b[^|]*\|\s*[\w.-]*\b(bash|sh|zsh|ksh|dash|pwsh|powershell|iex)\b/i,
   /\bmkfs\b|\bdiskpart\b/i,
   /:\(\)\s*\{.*\};\s*:/, // fork bomb
@@ -62,15 +82,24 @@ const DANGEROUS_PATTERNS: RegExp[] = [
  */
 export function isWindowsDestructiveDelete(cmd: string): boolean {
   const tokens = cmd.trim().toLowerCase().split(/\s+/);
-  const name = tokens[0];
+  // Not just the first token: `cmd /c rd /s` and a full path to rmdir.exe are
+  // just as destructive. The scan is deliberately blunt (a false positive only
+  // costs an approval prompt).
+  const index = tokens.findIndex((t) => {
+    const name = executableName(t);
+    return name === "rd" || name === "rmdir" || name === "robocopy";
+  });
+  if (index < 0) return false;
+  // Strip quotes, a directory prefix and `.exe` from the command word itself.
+  const name = executableName(tokens[index]);
+  const rest = tokens.slice(index + 1);
   if (name === "rd" || name === "rmdir") {
-    const rest = tokens.slice(1);
     if (!rest.length) return false;
     if (rest.every((t) => t === "/?")) return false; // help, not a delete
     return rest.some((t) => t.startsWith("/") && t.split("/").includes("s"));
   }
   if (name === "robocopy") {
-    const args = tokens.slice(1);
+    const args = rest;
     if (args.length < 2) return false;
     let paths = 0;
     let deletion = false;
@@ -88,6 +117,12 @@ export function isWindowsDestructiveDelete(cmd: string): boolean {
     return paths >= 2 && deletion && !listOnly;
   }
   return false;
+}
+
+/** Bare executable name of a token: strips quotes/@, directories and `.exe`. */
+function executableName(token: string): string {
+  const bare = token.replace(/^[@'"\s]+|['"]+$/g, "").split(/[\\/]/).pop() ?? "";
+  return bare.replace(/\.exe$/, "");
 }
 
 export function isDangerousCommand(cmd: string): boolean {
@@ -129,8 +164,16 @@ export function isReadOnlyCommand(cmd: string): boolean {
     while (i < tokens.length && tokens[i].startsWith("-")) i++;
     const sub = tokens[i];
     if (!sub || !READONLY_GIT.has(sub)) return false;
+    const args = tokens.slice(i + 1);
+    // `git grep -O<program>` executes it and `--output` turns a read into a
+    // write; neither may ride on the read-only fast path.
+    if (args.some((a) => a.startsWith("-O") || a.startsWith("--open-files-in-pager") || a.startsWith("--output"))) {
+      return false;
+    }
     // `git config x y` writes; only --get/--list forms are reads.
-    if (sub === "config") return /^--(get|list)/.test(tokens[i + 1] ?? "");
+    if (sub === "config") return /^--(get|list)/.test(args[0] ?? "");
+    // `git reflog expire|delete` rewrites history; show is the default read.
+    if (sub === "reflog") return !args.length || args[0] === "show" || args[0].startsWith("--");
     return true;
   }
   return READONLY_PROGRAMS.has(tokens[0].toLowerCase());
@@ -230,16 +273,16 @@ export const bashTool: Tool = {
 
     const dangerous = isDangerousCommand(command);
     const readOnly = !dangerous && isReadOnlyCommand(command);
-    const ok =
-      readOnly ||
-      (await ctx.askPermission(
-        `Run command${bool(input, "run_in_background") ? " in background" : ""}: ` +
-          `${command.length > 200 ? command.slice(0, 200) + "..." : command}` +
-          (dangerous ? "  [matches a dangerous pattern]" : ""),
-        dangerous ? "high" : "medium",
-        undefined,
-        permissionRequestFor(command),
-      ));
+    // Even read-only commands go through the manager: it answers them without
+    // a prompt, but an explicit deny rule still has to be able to block one.
+    const ok = await ctx.askPermission(
+      `Run command${bool(input, "run_in_background") ? " in background" : ""}: ` +
+        `${command.length > 200 ? command.slice(0, 200) + "..." : command}` +
+        (dangerous ? "  [matches a dangerous pattern]" : ""),
+      dangerous ? "high" : readOnly ? "low" : "medium",
+      undefined,
+      { ...permissionRequestFor(command), readOnly },
+    );
     if (!ok) return { content: "The user rejected this command. Do not retry it unchanged.", isError: true };
 
     let workdir = ctx.cwd;
@@ -282,15 +325,26 @@ export const bashTool: Tool = {
 
       let out = "";
       let killed: string | null = null;
+      let seenImage = false;
+      let markerTail = "";
       const timer = setTimeout(() => {
         killed = `timed out after ${timeout}ms`;
         killTree(child, isWin);
       }, timeout);
 
       const onData = (d: Buffer) => {
-        out += d.toString("utf8");
-        if (out.length > HARD_OUTPUT_CAP) {
-          killed = `output exceeded ${(HARD_OUTPUT_CAP / 1000) | 0}KB`;
+        const chunk = d.toString("utf8");
+        out += chunk;
+        // Detect an embedded image across chunk boundaries: from that point on
+        // the capture may grow to the image-aware ceiling instead of the text cap.
+        if (!seenImage) {
+          const probe = markerTail + chunk;
+          if (probe.includes(IMAGE_MARKER)) seenImage = true;
+          else markerTail = probe.slice(-(IMAGE_MARKER.length - 1));
+        }
+        const cap = seenImage ? HARD_IMAGE_OUTPUT_CAP : HARD_OUTPUT_CAP;
+        if (out.length > cap) {
+          killed = `output exceeded ${(cap / 1000) | 0}KB`;
           killTree(child, isWin);
         }
       };

@@ -187,6 +187,17 @@ describe("renameSession / deleteSession", () => {
     expect(await session.deleteSession(id)).toBe(false);
   });
 
+  it("does not resurrect a deleted session when a late subcall arrives", async () => {
+    const { id } = await session.createSession("x");
+    expect(await session.deleteSession(id)).toBe(true);
+    // A detached subagent reports after its session was deleted: appending
+    // would create a meta-less file the loader silently ignores.
+    await session.appendSubCall(id, { toolUseId: "t1", name: "grep", inputPreview: "{}" });
+    const file = path.join(fakeHome, ".node-agent", "sessions", `${id}.jsonl`);
+    await expect(fs.access(file)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await session.loadSession(id)).toBeNull();
+  });
+
   it("listSessions surfaces titles", async () => {
     const { id } = await session.createSession("x");
     await session.renameSession(id, "listed");

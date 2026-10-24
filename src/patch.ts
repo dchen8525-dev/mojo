@@ -190,8 +190,13 @@ function computeReplacements(lines: string[], chunks: PatchChunk[]): Replacement
     }
 
     if (chunk.oldLines.length === 0) {
-      const insertionIndex =
-        lines.length > 0 && lines[lines.length - 1] === "" ? lines.length - 1 : lines.length;
+      // An insertion hunk with a context anchor belongs directly after that
+      // line; only an anchor-less hunk appends at end of file.
+      const insertionIndex = chunk.changeContext
+        ? lineIndex
+        : lines.length > 0 && lines[lines.length - 1] === ""
+          ? lines.length - 1
+          : lines.length;
       replacements.push([insertionIndex, 0, chunk.newLines]);
       continue;
     }

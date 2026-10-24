@@ -43,6 +43,30 @@ describe("buildReadStateReminder", () => {
     expect(await buildReadStateReminder(fileState, [{ role: "user", content: `reading ${f} now` }], cwd)).toBeNull();
   });
 
+  it("skips a read result still in the kept tail via its relative-path header", async () => {
+    const f = path.join(cwd, "kept-rel.ts");
+    await fs.writeFile(f, "still in history\n", "utf8");
+    fileState.record(f, await fs.stat(f), true);
+    // read_file reports the workspace-relative path, so the absolute path the
+    // record stores never appears in history.
+    const tail = [
+      {
+        role: "user" as const,
+        content: [{ type: "tool_result" as const, tool_use_id: "tu1", content: "kept-rel.ts\n1\tstill in history" }],
+      },
+    ];
+    expect(await buildReadStateReminder(fileState, tail, cwd)).toBeNull();
+  });
+
+  it("restores a file when the tail merely mentions its path in prose", async () => {
+    const f = path.join(cwd, "mention.ts");
+    await fs.writeFile(f, "content the model lost\n", "utf8");
+    fileState.record(f, await fs.stat(f), true);
+    const tail = [{ role: "user" as const, content: "please look at mention.ts\nand continue" }];
+    const reminder = await buildReadStateReminder(fileState, tail, cwd);
+    expect(reminder).toContain("content the model lost");
+  });
+
   it("degrades to a warning line when the file changed on disk since the read", async () => {
     const f = path.join(cwd, "changed.ts");
     await fs.writeFile(f, "v1\n", "utf8");

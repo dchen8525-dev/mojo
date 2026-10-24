@@ -34,7 +34,21 @@ export async function buildReadStateReminderBody(
     // match both the raw path and its JSON-escaped form (no surrounding quotes).
     const raw = rec.path.toLowerCase();
     const escaped = JSON.stringify(rec.path).slice(1, -1).toLowerCase();
-    if (tailText.includes(raw) || tailText.includes(escaped)) continue;
+    // read_file labels its output with the workspace-relative path, so a read
+    // that is still visible in the kept tail never contains the absolute path.
+    // Require the tool-result JSON prefix so a passing mention of the path in
+    // prose does not suppress a restore the model still needs.
+    const relRaw = relPath(cwd, rec.path);
+    const relHeader = relRaw.toLowerCase();
+    const relHeaderEscaped = JSON.stringify(relRaw).slice(1, -1).toLowerCase();
+    if (
+      tailText.includes(raw) ||
+      tailText.includes(escaped) ||
+      tailText.includes(`"content":"${relHeader}\\n`) ||
+      tailText.includes(`"content":"${relHeaderEscaped}\\n`)
+    ) {
+      continue;
+    }
     let stat;
     try {
       stat = await fs.stat(rec.path);

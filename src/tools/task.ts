@@ -42,6 +42,8 @@ export const sendMessageTool: Tool = {
     "or already-finished tasks.",
   isReadOnly: true,
   parallelSafe: true,
+  // Delivering a note is not idempotent: a stream restart would queue it twice.
+  earlySafe: false,
   inputSchema: {
     type: "object",
     properties: {
@@ -77,6 +79,7 @@ function makeMessageParentTool(holder: { id?: string }): Tool {
       "you must still produce the final report at the end.",
     isReadOnly: true,
     parallelSafe: true,
+    earlySafe: false, // delivery is not idempotent across a restarted attempt
     inputSchema: {
       type: "object",
       properties: {
@@ -190,6 +193,9 @@ export const taskTool: Tool = {
   // explicit consent prompt below, so the framework does not need to.
   isReadOnly: true,
   parallelSafe: true, // multiple subagents may work concurrently
+  // Spawning is a real side effect: re-running a discarded attempt would start
+  // a second (detached) subagent for the same call.
+  earlySafe: false,
   inputSchema: {
     type: "object",
     properties: {

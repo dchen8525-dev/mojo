@@ -143,4 +143,31 @@ describe("node_repl", () => {
     expect(result.content).toContain("characters omitted");
     expect(result.content).toContain("saved to");
   });
+
+  it("truncates an oversized single value without losing the kernel", async () => {
+    const result = await run("repl-value", 'Array.from({ length: 100 }, () => "x".repeat(20000))', {
+      max_output: 200_000,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain("[... value truncated]");
+    expect(result.content.length).toBeLessThan(150_000);
+    const after = await run("repl-value", "1 + 1");
+    expect(after.content).toContain("=> 2");
+  });
+
+  it("caps a stderr flood and restarts the kernel", async () => {
+    const flooded = await run("repl-stderr", 'console.error("e".repeat(300000))');
+    expect(flooded.isError).toBe(true);
+    expect(flooded.content).toContain("stderr exceeded");
+    const after = await run("repl-stderr", "2 + 2");
+    expect(after.content).toContain("=> 4");
+  });
+
+  it("caps a stdout line with no newline and restarts the kernel", async () => {
+    const flooded = await run("repl-line", 'process.stdout.write("y".repeat(300000))');
+    expect(flooded.isError).toBe(true);
+    expect(flooded.content).toContain("without a line break");
+    const after = await run("repl-line", "3 + 3");
+    expect(after.content).toContain("=> 6");
+  });
 });

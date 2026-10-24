@@ -41,7 +41,8 @@ export const toolSearchTool: Tool = {
   async execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const query = str(input, "query");
     const limit = Math.min(25, Math.max(1, num(input, "limit") ?? 8));
-    const available = deferredTools();
+    const sessionId = ctx.sessionId;
+    const available = deferredTools(sessionId);
 
     if (!available.length) {
       return { content: "No deferred tools are hidden right now - every tool is already in your tool list." };
@@ -55,7 +56,7 @@ export const toolSearchTool: Tool = {
         .filter(Boolean);
       const found: string[] = [];
       const missing: string[] = [];
-      for (const n of names) (exposeTool(n) ? found : missing).push(n);
+      for (const n of names) (exposeTool(n, sessionId) ? found : missing).push(n);
       const lines = [
         found.length ? `Exposed: ${found.join(", ")} - now directly callable.` : "",
         missing.length ? `Not found or not deferred: ${missing.join(", ")}.` : "",
@@ -82,7 +83,7 @@ export const toolSearchTool: Tool = {
     }
 
     const exposed: string[] = [];
-    for (const { tool } of ranked) exposeTool(tool.name) && exposed.push(tool.name);
+    for (const { tool } of ranked) exposeTool(tool.name, sessionId) && exposed.push(tool.name);
     return {
       content:
         `Exposed ${exposed.length} tool(s), now directly callable:\n` +

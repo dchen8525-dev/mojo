@@ -118,4 +118,11 @@ describe("derivePatchedContent", () => {
     expect(() => derivePatchedContent("a\n", [{ oldLines: ["zzz"], newLines: [] }])).toThrow(/Failed to find expected lines/);
     expect(() => derivePatchedContent("a\n", [{ oldLines: [], newLines: ["x"] as never, changeContext: "zzz" }])).toThrow(/Failed to find context/);
   });
+
+  it("inserts an anchored hunk after the context line instead of appending", () => {
+    const out = derivePatchedContent("h1\ninsert here\nh2\n", [
+      { oldLines: [], newLines: ["new line"], changeContext: "insert here" },
+    ]).content;
+    expect(out).toBe("h1\ninsert here\nnew line\nh2\n");
+  });
 });

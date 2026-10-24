@@ -268,7 +268,11 @@ async function compareOrCapture(name: string, frames: Frame[]) {
   }
   let expected: string[];
   try {
-    expected = (await fs.readFile(file, "utf8")).trim().split("\n").filter(Boolean);
+    expected = (await fs.readFile(file, "utf8"))
+      .replace(/\r\n/g, "\n")
+      .trim()
+      .split("\n")
+      .filter(Boolean);
   } catch {
     throw new Error(`missing fixture ${file} — run with AGENT_SSE_CAPTURE=1 to generate it`);
   }

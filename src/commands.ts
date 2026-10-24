@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { isSensitivePath } from "./tools/utils.js";
 
 /**
  * Custom slash commands: markdown files in ~/.node-agent/commands/ (global)
@@ -76,31 +77,99 @@ export function renderCommand(template: string, args: string[]): string {
 const AT_RE = /@("([^"]+)"|([^\s,;()]+))/g;
 const MAX_INLINE_BYTES = 200_000;
 
+function isInside(root: string, target: string): boolean {
+  const cmp = process.platform === "win32" ? (s: string) => s.toLowerCase() : (s: string) => s;
+  const r = cmp(root);
+  const t = cmp(target);
+  return t === r || t.startsWith(r + path.sep);
+}
+
+function escapeAttr(value: string): string {
+  return value
+    .replace(/&/gu, "&amp;")
+    .replace(/"/gu, "&quot;")
+    .replace(/</gu, "&lt;")
+    .replace(/>/gu, "&gt;");
+}
+
+/**
+ * Inline the first `cap` bytes of a file. Reading a bounded prefix keeps a
+ * stray `@big.dump` from buffering gigabytes just to throw the tail away;
+ * `O_NONBLOCK` keeps a FIFO from stalling the submit path.
+ */
+async function readPrefix(abs: string, cap: number): Promise<Buffer | undefined> {
+  const flags = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0);
+  let handle;
+  try {
+    handle = await fs.open(abs, flags);
+  } catch {
+    return undefined;
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) return undefined;
+    const size = Math.min(stat.size, cap);
+    const buf = Buffer.alloc(size);
+    const { bytesRead } = await handle.read(buf, 0, size, 0);
+    return buf.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Drop an incomplete UTF-8 sequence left by cutting at a byte boundary. */
+function trimPartialUtf8(data: Buffer): Buffer {
+  for (let back = 1; back <= 4 && back <= data.length; back++) {
+    const byte = data[data.length - back]!;
+    if ((byte & 0xc0) === 0x80) continue; // continuation byte: look further back
+    const need = byte >= 0xf0 ? 4 : byte >= 0xe0 ? 3 : byte >= 0xc0 ? 2 : 1;
+    return need > back ? data.subarray(0, data.length - back) : data;
+  }
+  return data;
+}
+
 export async function expandFileReferences(text: string, cwd: string): Promise<{ text: string; files: string[] }> {
   const files: string[] = [];
   let budget = MAX_INLINE_BYTES;
   const replacements = new Map<string, string>();
+  const root = path.resolve(cwd);
+  const realRoot = await fs.realpath(root).catch(() => root);
 
   const matches = [...text.matchAll(AT_RE)];
   for (const m of matches) {
     const ref = m[2] ?? m[3];
     if (!ref || replacements.has(m[0])) continue;
-    const abs = path.resolve(cwd, ref.replace(/\\/g, "/"));
+    const abs = path.resolve(root, ref.replace(/\\/g, "/"));
     // Keep it inside the workspace, like the file tools do.
-    if (!abs.startsWith(path.resolve(cwd) + path.sep) && abs !== path.resolve(cwd)) {
+    if (!isInside(root, abs) || budget <= 0) {
       replacements.set(m[0], m[0]);
       continue;
     }
     try {
       const stat = await fs.stat(abs);
-      if (stat.isDirectory() || budget <= 0) {
+      if (!stat.isFile()) {
         replacements.set(m[0], m[0]);
         continue;
       }
-      const content = await fs.readFile(abs, "utf8");
-      budget -= content.length;
-      const clipped = budget <= 0 ? content.slice(0, Math.max(0, content.length + budget)) + "\n[... truncated]" : content;
-      replacements.set(m[0], `\n<file path="${ref}">\n${clipped}\n</file>\n`);
+      // A workspace symlink can point at a credential store or outside the
+      // repo; the lexical check above cannot see the target.
+      const real = await fs.realpath(abs);
+      if (isSensitivePath(real) || !isInside(realRoot, real)) {
+        replacements.set(m[0], m[0]);
+        continue;
+      }
+      const data = await readPrefix(abs, budget + 1);
+      if (!data || data.subarray(0, 8192).includes(0)) {
+        replacements.set(m[0], m[0]); // unreadable or binary
+        continue;
+      }
+      const truncated = data.length > budget;
+      const content = (truncated ? trimPartialUtf8(data.subarray(0, budget)) : data).toString("utf8");
+      budget = truncated ? 0 : budget - data.length;
+      replacements.set(
+        m[0],
+        `\n<file path="${escapeAttr(ref)}">\n${content}${truncated ? "\n[... truncated]" : ""}\n</file>\n`,
+      );
       files.push(ref);
     } catch {
       replacements.set(m[0], m[0]); // unknown path: leave the literal text

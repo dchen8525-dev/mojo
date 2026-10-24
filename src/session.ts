@@ -209,8 +209,16 @@ export async function appendModel(id: string, model: string) {
  */
 export async function appendSubCall(id: string, call: SessionSubCall) {
   if (!ID_RE.test(id)) return;
-  await withFileLock(fileFor(id), async () => {
-    await fs.appendFile(fileFor(id), JSON.stringify({ type: "subcall", ...call }) + "\n", "utf8");
+  const file = fileFor(id);
+  await withFileLock(file, async () => {
+    // A detached subagent can report after its session was deleted; appending
+    // would recreate a meta-less file the loader silently ignores.
+    try {
+      await fs.access(file);
+    } catch {
+      return;
+    }
+    await fs.appendFile(file, JSON.stringify({ type: "subcall", ...call }) + "\n", "utf8");
     invalidateSession(id);
   });
 }

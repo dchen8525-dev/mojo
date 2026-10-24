@@ -20,6 +20,20 @@ describe("sanitizeErrorMessage", () => {
     );
   });
 
+  it("redacts other common token formats and private key blocks", () => {
+    expect(sanitizeErrorMessage("github_pat_11ABCDEFG0123456789_abcdefghijklmnop rejected")).toBe(
+      "{secret} rejected",
+    );
+    expect(sanitizeErrorMessage("glpat-abcdefghijklmnop1234 invalid")).toBe("{secret} invalid");
+    expect(sanitizeErrorMessage("xoxb-123456789012-abcdefghijkl bad")).toBe("{secret} bad");
+    expect(sanitizeErrorMessage(`npm_${"a".repeat(36)} failed`)).toBe("{secret} failed");
+    expect(sanitizeErrorMessage("stripe sk_live_51Habcdefghijkl rejected")).toBe("stripe {secret} rejected");
+    const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
+    expect(sanitizeErrorMessage(`token ${jwt} rejected`)).toBe("token {secret} rejected");
+    const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----";
+    expect(sanitizeErrorMessage(`load failed: ${pem}`)).toBe("load failed: {secret}");
+  });
+
   it("redacts api keys in query strings and key-value pairs", () => {
     // Inside a URL the whole query string is dropped by URL sanitization.
     expect(sanitizeErrorMessage("GET https://api.x.com/v1?api_key=supersecret123&x=1 failed")).toBe(

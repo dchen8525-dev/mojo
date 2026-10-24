@@ -384,6 +384,19 @@ describe("structured bash rules and compound commands", () => {
     ).toBe(false);
   });
 
+  it("applies explicit denies to read-only requests without prompting", async () => {
+    const tmp = await projectWith([{ match: "bash(cat .env:*)", decision: "deny" }]);
+    const pm = new PermissionManager(async () => {
+      throw new Error("read-only requests must never prompt");
+    });
+    await pm.loadProject(tmp);
+
+    const denied = { ...bashRequest("cat .env"), readOnly: true };
+    expect(await pm.check("Run command: cat .env", "low", true, undefined, denied)).toBe(false);
+    // Without a matching deny, read-only stays free.
+    expect(await pm.check("Run command: cat src/a.ts", "low", true, undefined, { ...bashRequest("cat src/a.ts"), readOnly: true })).toBe(true);
+  });
+
   it("opaque commands only match exact whole-command rules", async () => {
     let asked = 0;
     const tmp = await projectWith([{ match: "bash(echo:*)", decision: "allow" }]);

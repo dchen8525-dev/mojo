@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createNdjsonEvents } from "../src/headless.js";
 import { parseArgs } from "../src/cliArgs.js";
 
@@ -185,6 +185,37 @@ describe("headless NDJSON contract", () => {
       const e = JSON.parse(line); // throws on non-JSON noise
       expect(e.ts).toMatch(/^\d{4}-\d{2}-\d{2}T/);
       expect(line).not.toContain("\n");
+    }
+  });
+
+  it("keeps permission-prompt text out of the NDJSON stream", () => {
+    const { lines, write } = collect();
+    const humanLines: string[] = [];
+    const h = createNdjsonEvents(
+      { sessionId: "s", cwd: "c", permissionMode: "default", planMode: false },
+      write,
+      (line) => humanLines.push(line),
+    );
+    h.human("[high] Execute this plan?");
+    h.human("  @@ -1 +1 @@");
+    expect(lines).toEqual([]);
+    expect(humanLines).toEqual(["[high] Execute this plan?", "  @@ -1 +1 @@"]);
+  });
+
+  it("sends human diagnostics to stderr when no sink is injected", () => {
+    const stderr: string[] = [];
+    const errSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      stderr.push(String(chunk));
+      return true;
+    });
+    const outSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    try {
+      createNdjsonEvents({ sessionId: "s", cwd: "c", permissionMode: "default", planMode: false }).human("allow? [y]es / [n]o");
+      expect(stderr.join("")).toContain("allow? [y]es / [n]o");
+      expect(outSpy).not.toHaveBeenCalled();
+    } finally {
+      errSpy.mockRestore();
+      outSpy.mockRestore();
     }
   });
 });

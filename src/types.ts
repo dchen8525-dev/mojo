@@ -72,6 +72,11 @@ export interface PermissionRequest {
   raw?: string;
   /** True when the value could not be split safely; never auto-allow by prefix/glob. */
   opaque?: boolean;
+  /**
+   * The tool classified this request as side-effect free. The manager skips
+   * the prompt, but an explicit deny rule still wins.
+   */
+  readOnly?: boolean;
   /** Rule text persisted by "always"; defaults to `tool(first value)`. */
   remember?: string;
 }
@@ -98,8 +103,13 @@ export interface ToolContext {
    * Copy the file's current content to the session checkpoint store before it
    * is modified (enables /undo). Best-effort: must never throw or block. The
    * returned handle records the post-edit hash when finalize() is called.
+   * `movedTo` marks a move: the target is removed again when the edit is undone.
    */
-  checkpoint?: (absPath: string, label: string) => Promise<CheckpointHandle | void>;
+  checkpoint?: (
+    absPath: string,
+    label: string,
+    opts?: { movedTo?: string },
+  ) => Promise<CheckpointHandle | void>;
   /** Report LLM token usage incurred by this tool (e.g. subagents) to the session cost tracker. */
   reportUsage?: (usage: { input: number; output: number; cacheRead?: number; cacheWrite?: number }) => void;
   /**
@@ -131,6 +141,13 @@ export interface Tool {
   isReadOnly: boolean;
   /** Safe to run concurrently with other parallel-safe tools in the same turn (read-only, no shared state). */
   parallelSafe?: boolean;
+  /**
+   * May start as soon as its arguments are complete, before the response ends.
+   * A discarded attempt re-runs such calls, so tools whose execution has
+   * externally visible effects (spawning agents, delivering messages) must set
+   * this to false even when they are permission-read-only. Defaults to true.
+   */
+  earlySafe?: boolean;
   /**
    * Hidden from the model's tool list; discoverable via tool_search, which
    * exposes matches so they become callable. Used for bulky MCP servers.

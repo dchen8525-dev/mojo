@@ -38,6 +38,16 @@ const NEXT_ACTION_MAX = 600;
 const NOTE_MAX = 600;
 const VERIFIER_EXCERPT_MAX = 8_000;
 
+/**
+ * Goal text reaches the prompt outside any escaping wrapper: nextAction/note
+ * are verifier-authored and the excerpt is raw assistant output (which may
+ * quote a file or web page). A literal closing tag there would end the block
+ * early and let the rest read as top-level instructions.
+ */
+function escapeGoalTags(text: string): string {
+  return text.replace(/<(\/?)(goal_state|latest_turn)\b/gi, "&lt;$1$2");
+}
+
 function cleanText(value: unknown, max: number): string | undefined {
   if (typeof value !== "string") return undefined;
   const text = value.replace(/\s+/g, " ").trim();
@@ -169,14 +179,14 @@ export function goalStateBlock(goal: SessionGoal | null): string {
   if (!goal || (goal.status !== "active" && goal.status !== "paused")) return "";
   const lines = [
     `<goal_state status="${goal.status}">`,
-    `Objective: ${goal.objective}`,
+    `Objective: ${escapeGoalTags(goal.objective)}`,
     goal.tokenBudget === null
       ? `Tokens used: ${goal.tokensUsed.toLocaleString()} (no budget)`
       : `Tokens used: ${goal.tokensUsed.toLocaleString()} / ${goal.tokenBudget.toLocaleString()}`,
     `Automatic continuations: ${goal.continuations} / ${goal.maxContinuations}`,
   ];
-  if (goal.nextAction) lines.push(`Next action: ${goal.nextAction}`);
-  if (goal.note) lines.push(`Note: ${goal.note}`);
+  if (goal.nextAction) lines.push(`Next action: ${escapeGoalTags(goal.nextAction)}`);
+  if (goal.note) lines.push(`Note: ${escapeGoalTags(goal.note)}`);
   lines.push(
     goal.status === "active"
       ? "Work toward this objective across turns. If the user's message conflicts with it, follow the user."
@@ -233,7 +243,7 @@ export function buildGoalVerificationPrompt(goal: SessionGoal, lastAssistantText
     "",
     "Latest assistant output:",
     "<latest_turn>",
-    excerpt || "(empty)",
+    escapeGoalTags(excerpt) || "(empty)",
     "</latest_turn>",
     "",
     'Return JSON: {"done":boolean,"nextAction":"...","reason":"..."}',

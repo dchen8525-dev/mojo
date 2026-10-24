@@ -146,6 +146,16 @@ describe("formatAskOutcome", () => {
     expect(text).toContain("2. Which targets? → CLI, API");
   });
 
+  it("keeps a single choice for a single-select question", () => {
+    const text = formatAskOutcome(
+      questions,
+      { answers: [{ question: "Which database?", selected: ["Postgres", "SQLite"] }] },
+      120_000,
+    );
+    expect(text).toContain("1. Which database? → SQLite");
+    expect(text).not.toContain("SQLite, Postgres");
+  });
+
   it("reports unanswered questions when only some were answered", () => {
     const text = formatAskOutcome(questions, { answers: [{ question: "Which database?", selected: ["SQLite"] }] }, 120_000);
     expect(text).toContain("1. Which database? → SQLite");

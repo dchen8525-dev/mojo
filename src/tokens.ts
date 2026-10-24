@@ -199,10 +199,18 @@ export class TokenCounter {
    * Record the provider's exact count for `messagesSent` as they were sent.
    * The anchor covers the assistant reply that is about to be appended, so
    * `messagesSent + 1` becomes the anchored prefix length.
+   *
+   * `cachedTokens` is the prompt-cache read + creation count. Providers report
+   * those separately from the fresh input count, but they are still part of the
+   * context footprint; omitting them would let a cache-heavy session blow past
+   * the window without ever tripping auto-compaction.
    */
-  setAnchor(messagesSent: number, inputTokens: number, outputTokens: number) {
-    if (inputTokens <= 0) return; // some gateways omit usage; keep the estimate
-    this.anchorTokens = inputTokens + outputTokens;
+  setAnchor(messagesSent: number, inputTokens: number, outputTokens: number, cachedTokens = 0) {
+    const cached = Math.max(0, cachedTokens);
+    // A fully cached prompt can report zero fresh input tokens; that is still
+    // real usage, unlike a gateway that omits usage entirely (all zeros).
+    if (inputTokens <= 0 && cached <= 0) return;
+    this.anchorTokens = Math.max(0, inputTokens) + cached + outputTokens;
     this.anchorCount = messagesSent + 1;
   }
 

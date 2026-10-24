@@ -159,7 +159,11 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
       if (!rl) return res("n");
       rl.question(q, res);
     });
-  if (interactive) rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+  // In stream-json mode stdout carries only NDJSON lines, so the prompt UI
+  // (readline echo included) has to live on stderr.
+  const promptOut = ndjson ? process.stderr : process.stdout;
+  const human = (line: string) => (ndjson ? ndjson.human(line) : console.log(line));
+  if (interactive) rl = readline.createInterface({ input: process.stdin, output: promptOut, terminal: true });
   const askPermission = async (
     desc: string,
     risk: Risk,
@@ -168,7 +172,7 @@ async function runPrint(args: ReturnType<typeof parseArgs>) {
   ) => {
     if (!interactive) return "no" as const;
     const tag = risk === "high" ? ANSI.error("[high]") : ANSI.warn("[write]");
-    if (preview) console.log(ANSI.dim(preview.split("\n").map((l) => `  ${l}`).join("\n")));
+    if (preview) human(ANSI.dim(preview.split("\n").map((l) => `  ${l}`).join("\n")));
     const saves = meta ? `\n  ${ANSI.dim(`allow/deny-always saves: ${meta.rule}`)}` : "";
     const answer = (
       await ask(`${tag} ${ANSI.bold(desc)}${saves}\n  allow? [y]es / [n]o / [a]lways / [d]eny-always > `)
@@ -443,7 +447,6 @@ async function runGui(args: ReturnType<typeof parseArgs>) {
 
   let resume = args.resume || undefined;
   if (!resume && args.cont) resume = (await listSessions())[0]?.id;
-  scheduleRetentionCleanup({ keepIds: resume ? [resume] : [] });
 
   const backend = await startGuiBackend({
     cwd: process.cwd(),
@@ -459,6 +462,10 @@ async function runGui(args: ReturnType<typeof parseArgs>) {
       void backend.shutdown().then(() => process.exit(0));
     },
   });
+
+  // The GUI can open another (possibly stale) session at any time, so the
+  // protected id is read when cleanup fires rather than captured at startup.
+  scheduleRetentionCleanup({ keepIds: () => [backend.gui.currentSessionId()] });
 
   console.error(ANSI.success(`GUI ready: ${backend.gui.url}`));
   console.error(ANSI.dim("Ctrl+C to stop."));

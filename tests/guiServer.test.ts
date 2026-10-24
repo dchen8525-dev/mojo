@@ -3,7 +3,7 @@ import http from "node:http";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { Agent } from "../src/agent.js";
+import type { Agent, AgentEvents } from "../src/agent.js";
 import type { PermissionManager } from "../src/permissions.js";
 import { RuntimeCommandQueue } from "../src/runtimeQueue.js";
 import { SseHub } from "../src/gui/sse.js";
@@ -15,6 +15,13 @@ import { backgroundManager } from "../src/tools/background.js";
 import type { McpServerStatus } from "../src/mcp.js";
 import type { ProfileInput, PublicProfile } from "../src/llmProfiles.js";
 import type { SessionGoal } from "../src/goal.js";
+import { appendSubCall } from "../src/session.js";
+
+// Keep subagent persistence assertions off the real session store.
+vi.mock("../src/session.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/session.js")>();
+  return { ...actual, appendSubCall: vi.fn(async () => {}) };
+});
 
 const TOKEN = "testtoken123";
 
@@ -182,6 +189,71 @@ describe("gui server", () => {
           events?.onRoundStart?.(1);
           events?.onToolStart?.("t1", "read_file", '{"path":"a.ts"}', { path: "a.ts" });
           events?.onToolEnd?.("t1", "read_file", true, "file body", "file body");
+          return "done";
+        },
+      },
+    );
+  });
+
+  it("persists a detached subagent call to the session that owned the turn", async () => {
+    const mocked = vi.mocked(appendSubCall);
+    mocked.mockClear();
+    let captured: AgentEvents | undefined;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    await withServer(
+      async (gui, runtime, agent) => {
+        const post = await req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "delegate" } });
+        expect(post.status).toBe(202);
+        await vi.waitFor(() => expect(captured).toBeDefined());
+        release();
+        await vi.waitFor(() => expect(runtime.busy).toBe(false));
+
+        // The turn is over but a detached subagent still holds its events; by
+        // now the user has resumed another session.
+        agent.sessionId = "sess2";
+        captured?.onSubTool?.("tool-abc", "grep", "{}", true, "view", 1);
+        expect(mocked).toHaveBeenCalledWith(
+          "sess1",
+          expect.objectContaining({ toolUseId: "tool-abc", name: "grep", result: "view" }),
+        );
+        agent.sessionId = "sess1";
+      },
+      {
+        chat: async (_text, _signal, events) => {
+          captured = events;
+          await gate;
+          return "done";
+        },
+      },
+    );
+    expect(mocked).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists subagent calls to the session the agent creates on a first turn", async () => {
+    const mocked = vi.mocked(appendSubCall);
+    mocked.mockClear();
+    let captured: AgentEvents | undefined;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    await withServer(
+      async (gui, runtime, agent) => {
+        await req(gui.port, "/api/chat", { method: "POST", token: TOKEN, body: { text: "delegate" } });
+        await vi.waitFor(() => expect(captured).toBeDefined());
+        // A new session starts empty; `chat` creates the file, then round 1 runs.
+        agent.sessionId = "aaaa1111";
+        captured?.onRoundStart?.(1);
+        release();
+        await vi.waitFor(() => expect(runtime.busy).toBe(false));
+
+        captured?.onSubTool?.("tool-abc", "grep", "{}", true, "view", 1);
+        expect(mocked).toHaveBeenCalledWith("aaaa1111", expect.objectContaining({ toolUseId: "tool-abc" }));
+      },
+      {
+        sessionId: "",
+        chat: async (_text, _signal, events) => {
+          captured = events;
+          await gate;
           return "done";
         },
       },

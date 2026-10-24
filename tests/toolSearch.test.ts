@@ -46,6 +46,19 @@ describe("tool_search", () => {
     expect(isExposed("ts_def_gamma")).toBe(true);
   });
 
+  it("scopes exposure to the session that discovered the tool", async () => {
+    addDeferred("ts_def_zeta", "session scoped tool");
+    const r = await toolSearchTool.execute({ query: "select:ts_def_zeta" }, { sessionId: "s1" } as never);
+    expect(r.content).toContain("Exposed: ts_def_zeta");
+    expect(isExposed("ts_def_zeta", "s1")).toBe(true);
+
+    // Another session can still discover it for itself.
+    expect(isExposed("ts_def_zeta", "s2")).toBe(false);
+    expect(deferredTools("s2").map((t) => t.name)).toContain("ts_def_zeta");
+    const again = await toolSearchTool.execute({ query: "select:ts_def_zeta" }, { sessionId: "s2" } as never);
+    expect(again.content).toContain("Exposed: ts_def_zeta");
+  });
+
   it("suggests broader terms when nothing matches", async () => {
     addDeferred("ts_def_delta", "database migrations");
     const r = await toolSearchTool.execute({ query: "zzz-never-matches" }, ctx);

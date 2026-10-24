@@ -331,8 +331,12 @@ export class CronScheduler {
   /** True when the lease still looks owned by a live, heartbeating process. */
   private leaseIsFresh(lease: { pid?: number; mtimeMs?: number } | null): boolean {
     if (lease?.pid === undefined || !isAlive(lease.pid)) return false;
+    // File timestamps are rounded up to sub-millisecond precision (and a shared
+    // home can sit on a clock-skewed server), so a fresh lease may look slightly
+    // future-dated. Negative ages must count as fresh: treating them as stale
+    // lets a standby tear down the live owner's lease and both claim ownership.
     const age = Date.now() - (lease.mtimeMs ?? 0);
-    return age >= 0 && age < this.leaseStaleMs;
+    return age < this.leaseStaleMs;
   }
 
   private async ensureLease(): Promise<boolean> {

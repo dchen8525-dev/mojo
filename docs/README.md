@@ -36,7 +36,7 @@
 | [adversarial-analysis-2026-10-22.md](adversarial-analysis-2026-10-22.md) | 7ff28f1 | 十轮对抗性审计报告（cron → OAuth） |
 | [scroll-ownership-approval-diff.md](scroll-ownership-approval-diff.md) | 857575a | GUI 流式滚动所有权 + 审批弹窗结构化 diff |
 | [gui-notifications-conversation-find.md](gui-notifications-conversation-find.md) | 2026-10-22 | 失焦任务通知 + Ctrl+F 会话内查找 |
-| [headless-ndjson.md](headless-ndjson.md) | 2026-10-22 | 打印模式 NDJSON 事件契约（--output-format stream-json） |
+| [headless-ndjson.md](headless-ndjson.md) | 2026-10-22 | 打印模式 NDJSON 事件契约（--output-format stream-json；2026-10-24 复核补全事件表并把权限提示改道 stderr，保证 stdout 只有事件行） |
 | [journal-doctor.md](journal-doctor.md) | 2026-10-22 | 模型 I/O 日志（AGENT_JOURNAL）+ /doctor 体检 |
 | [command-center.md](command-center.md) | 2026-10-22 | GUI 命令中心（Ctrl/Cmd+P 面板） |
 | [edit-match-strategies.md](edit-match-strategies.md) | 2026-10-22 | edit_file 多策略模糊匹配与歧义检测 |
@@ -63,3 +63,4 @@
 | [session-retention-tui-file-mentions.md](session-retention-tui-file-mentions.md) | 2026-10-23 | 会话/journal 按 mtime 天数保留清理（AGENT_RETENTION_DAYS，启动延迟+keep 保护）；TUI @ 文件提及补全（git ls-files/目录遍历索引 + ↑/↓/Tab/Esc 面板） |
 | [error-sanitization.md](error-sanitization.md) | 2026-10-24 | 错误信息脱敏：journal error/GUI turn_error/TUI/print 边界清洗密钥·URL·路径·邮箱（2048 截断）；journal 请求体与工具输出保持原文 |
 | [image-downsampling.md](image-downsampling.md) | 2026-10-24 | 入站图片降采样：jimp 惰性加载，按最长边（AGENT_IMAGE_MAX_EDGE=1568）与字节预算多级缩放/转 JPEG；chat 与 GUI/TUI steer 预压缩 |
+| [adversarial-analysis-2026-10-24.md](adversarial-analysis-2026-10-24.md) | 2026-10-24 | 十轮对抗性审计报告（目标续跑 → 权限/提及/保留 → 流恢复与用量基线，含 cron 租约、提前执行可重放性、压缩后读状态恢复、Windows 树删除分类、大截图输出上限、tool_search 暴露按会话隔离、apply_patch 移动的撤销语义、git 丢弃工作区命令的危险分类、GUI 子代理调用跨会话写入、/context 分解加和、ask_user 单选多答与 NDJSON 事件流被权限提示污染） |

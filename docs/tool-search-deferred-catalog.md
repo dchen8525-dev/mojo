@@ -19,12 +19,18 @@
 
 ## 暴露语义
 
-- 暴露集合是进程内状态（`tools/index.ts`）：暴露后工具立即进入下一轮的 tool 列表并可直接调用。
+- 暴露集合按**会话**隔离（`tools/index.ts` 的 `Map<sessionId, Set<name>>`）：同一进程里的 GUI 会话
+  切换、MCP server 的多个 `agent_chat` 不会继承彼此的发现结果；`""` 键供无会话调用方（tool_search
+  单测、直接调用）使用。暴露后工具立即进入该会话下一轮的 tool 列表并可直接调用。
 - 直接调用未暴露的延迟工具 → 错误并提示先用 tool_search（不报 unknown tool）。
-- MCP 断开（`unregisterToolsByPrefix`）连带清除其暴露状态；会话重启后从精简状态重新发现（有意不持久化）。
-- plan 模式：延迟工具照常不可调用（非只读本就被阻止），tool_search 仍可用。
+- plan 模式同样只列出已暴露的延迟工具（此前列出全量只读工具、直接调用却被门禁拒绝）；tool_search
+  在 plan 模式仍可用，暴露后下一轮即可调用。
+- MCP 断开（`unregisterToolsByPrefix`）连带清除**所有会话**中该前缀的暴露状态。
+- 已发现的名称随会话元数据持久化（批次 38，`SessionMeta.exposedTools`）；/resume 时只恢复该会话
+  自己的列表，未知/非 deferred 名称静默跳过。
 
 ## 代码
 
 - `src/tools/toolSearch.ts`；暴露集合 `src/tools/index.ts`；标记 `src/mcp.ts`（`wrapTool`）。
-- 测试：`tests/toolSearch.test.ts`、`tests/agent.test.ts`（deferred tools 用例）。
+- 测试：`tests/toolSearch.test.ts`（按会话隔离用例）、`tests/agent.test.ts`（deferred tools、
+  plan 模式工具表用例）。

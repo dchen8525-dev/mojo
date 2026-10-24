@@ -62,6 +62,22 @@ describe("image header probing", () => {
     expect(detectMediaType(Buffer.from("hello world"))).toBeUndefined();
     expect(imageDimensions(Buffer.from("hello world"))).toBeUndefined();
   });
+
+  it("reads BMP dimensions so oversized bitmaps are refused before decoding", async () => {
+    const bmp = Buffer.alloc(54);
+    bmp.write("BM", 0, "latin1");
+    bmp.writeInt32LE(120, 18);
+    bmp.writeInt32LE(-80, 22);
+    expect(imageDimensions(bmp)).toEqual({ width: 120, height: 80 });
+
+    const bomb = Buffer.alloc(54);
+    bomb.write("BM", 0, "latin1");
+    bomb.writeInt32LE(30_000, 18);
+    bomb.writeInt32LE(30_000, 22);
+    await expect(
+      prepareImagesForModel([imageBlock(bomb, "image/bmp")], { perImageBytes: FIVE_MB, maxEdge: 1568 }),
+    ).rejects.toThrow(/too large to process/);
+  });
 });
 
 describe("prepareImagesForModel", () => {
@@ -136,6 +152,13 @@ describe("prepareImagesForModel", () => {
     png.writeUInt32BE(20_000, 20);
     await expect(
       prepareImagesForModel([imageBlock(png)], { perImageBytes: FIVE_MB, maxEdge: 1568 }),
+    ).rejects.toThrow(/too large to process/);
+  });
+
+  it("rejects an input above the absolute decode ceiling without decoding it", async () => {
+    const block = imageBlock(Buffer.alloc(200, 1), "image/png");
+    await expect(
+      prepareImagesForModel([block], { perImageBytes: 100, maxEdge: 100, maxInputBytes: 50 }),
     ).rejects.toThrow(/too large to process/);
   });
 

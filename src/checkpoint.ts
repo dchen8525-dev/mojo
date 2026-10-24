@@ -25,6 +25,13 @@ export interface CheckpointEntry {
   postHash?: string;
   /** Whether the file existed after the agent's write (false if it vanished). */
   postExisted?: boolean;
+  /**
+   * Absolute path the edit moved this file to (apply_patch). The target did
+   * not exist before the edit, so undo/rewind remove it as well.
+   */
+  movedTo?: string;
+  /** SHA-256 of the content written at `movedTo`; absent when it vanished. */
+  movedToHash?: string;
 }
 
 export interface UndoResult {
@@ -83,7 +90,11 @@ export class CheckpointStore {
   }
 
   /** Copy the file's current content aside before it is overwritten. Best-effort: never blocks the edit. */
-  async capture(absPath: string, label: string): Promise<CheckpointEntry | null> {
+  async capture(
+    absPath: string,
+    label: string,
+    opts: { movedTo?: string } = {},
+  ): Promise<CheckpointEntry | null> {
     try {
       await this.load();
       const existed = await fs
@@ -99,6 +110,7 @@ export class CheckpointStore {
         ts: new Date().toISOString(),
         restored: false,
       };
+      if (opts.movedTo) entry.movedTo = opts.movedTo;
       if (existed) {
         await fs.mkdir(this.dir, { recursive: true });
         entry.snapshot = path.join(this.dir, `snap-${entry.id}.bin`);
@@ -137,17 +149,26 @@ export class CheckpointStore {
     if (!stored) return;
     try {
       const stat = await fs.stat(stored.file);
-      if (!stat.isFile()) return;
-      stored.postHash = await hashFile(stored.file);
-      stored.postExisted = true;
-      await this.save();
+      if (stat.isFile()) {
+        stored.postHash = await hashFile(stored.file);
+        stored.postExisted = true;
+      }
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {
         stored.postExisted = false;
         delete stored.postHash;
-        await this.save();
       }
     }
+    // The move target is the second half of the edit: record what landed there
+    // so undo can verify nobody changed it before removing it.
+    if (stored.movedTo) {
+      try {
+        stored.movedToHash = await hashFile(stored.movedTo);
+      } catch {
+        delete stored.movedToHash;
+      }
+    }
+    await this.save();
   }
 
   /**
@@ -182,6 +203,19 @@ export class CheckpointStore {
             : "the file was modified after the agent's edit",
         };
       }
+      // A move wrote a second file; removing a copy the user has since edited
+      // would discard their work, so treat that like any other later edit.
+      if (entry.movedTo && entry.movedToHash) {
+        const currentTarget = await hashFileIfExists(entry.movedTo);
+        if (currentTarget !== null && currentTarget !== entry.movedToHash) {
+          return {
+            file: entry.file,
+            action: "refused",
+            conflict: true,
+            reason: "the moved-to file was modified after the agent's move",
+          };
+        }
+      }
     }
 
     if (entry.existed) {
@@ -190,6 +224,10 @@ export class CheckpointStore {
       await fs.copyFile(entry.snapshot, entry.file);
       entry.restored = true;
       await this.save();
+      if (entry.movedTo && entry.movedToHash) {
+        await fs.rm(entry.movedTo, { force: true });
+        return { file: entry.file, action: "restored previous content (removed the moved-to copy)" };
+      }
       return { file: entry.file, action: "restored previous content" };
     }
     // The checkpoint captured a file that did not exist: undo = delete it.
@@ -216,9 +254,41 @@ export class CheckpointStore {
     const plan = this.entries.filter((e) => e.id >= targetId && !e.restored);
     const outcome: RewindOutcome = { targetId, applied: [], conflicts: [], entryIds: plan.map((e) => e.id) };
 
+    // One edit can touch two paths: the file itself and, for a move, its target
+    // (which did not exist before, so rewinding past the move deletes it).
+    type Effect = {
+      id: number;
+      file: string;
+      existed: boolean;
+      snapshot: string;
+      postHash?: string;
+      postExisted?: boolean;
+    };
+    const effects: Effect[] = [];
+    for (const e of plan) {
+      effects.push({
+        id: e.id,
+        file: e.file,
+        existed: e.existed,
+        snapshot: e.snapshot,
+        postHash: e.postHash,
+        postExisted: e.postExisted,
+      });
+      if (e.movedTo) {
+        effects.push({
+          id: e.id,
+          file: e.movedTo,
+          existed: false,
+          snapshot: "",
+          postHash: e.movedToHash,
+          postExisted: e.movedToHash === undefined ? undefined : true,
+        });
+      }
+    }
+
     // Conflict check: current content must match what the agent last left behind.
-    const latest = new Map<string, CheckpointEntry>();
-    for (const e of plan) if (!latest.has(e.file) || latest.get(e.file)!.id < e.id) latest.set(e.file, e);
+    const latest = new Map<string, Effect>();
+    for (const e of effects) if (!latest.has(e.file) || latest.get(e.file)!.id < e.id) latest.set(e.file, e);
     if (!opts.force) {
       for (const e of latest.values()) {
         if (e.postHash === undefined && e.postExisted === undefined) continue; // legacy checkpoint, unverifiable
@@ -239,8 +309,8 @@ export class CheckpointStore {
     }
 
     // Restore: per file, the earliest entry's pre-image wins.
-    const earliest = new Map<string, CheckpointEntry>();
-    for (const e of plan) if (!earliest.has(e.file)) earliest.set(e.file, e);
+    const earliest = new Map<string, Effect>();
+    for (const e of effects) if (!earliest.has(e.file)) earliest.set(e.file, e);
     for (const e of earliest.values()) {
       if (e.existed) {
         if (!e.snapshot) continue; // snapshot lost (pruned): nothing to restore from

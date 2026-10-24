@@ -47,6 +47,8 @@ export function matchBashHint(output: string, now = Date.now()): string | null {
 }
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+/** Embedded images attached per command output (extra ones stay text). */
+export const MAX_OUTPUT_IMAGES = 2;
 const IMAGE_KINDS = new Set(["png", "jpeg", "jpg", "gif", "webp"]);
 const B64_RUN = /^[A-Za-z0-9+/=]+/;
 
@@ -75,6 +77,15 @@ export interface BashOutputPost {
 }
 
 /**
+ * Streaming-capture headroom for embedded images, in base64 characters. The
+ * bash tool caps plain text output; screenshots legitimately exceed that cap,
+ * so its capture loop needs the base64 size of the images this module accepts.
+ */
+export function imageCaptureChars(): number {
+  return MAX_OUTPUT_IMAGES * Math.ceil((MAX_IMAGE_BYTES / 3) * 4);
+}
+
+/**
  * Extract data-URL images from command output and compute the hint reminder.
  * `now` is injectable for cooldown tests.
  */
@@ -83,7 +94,7 @@ export function postProcessBashOutput(output: string, now = Date.now()): BashOut
   const cuts: Array<[number, number, string]> = [];
   const MARKER = "data:image/";
   let idx = output.indexOf(MARKER);
-  while (idx >= 0 && images.length < 2) {
+  while (idx >= 0 && images.length < MAX_OUTPUT_IMAGES) {
     const semi = output.indexOf(";base64,", idx + MARKER.length);
     if (semi < 0) break;
     const kind = output.slice(idx + MARKER.length, semi);

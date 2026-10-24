@@ -483,7 +483,7 @@ Rules:
 5. Be concise in replies: results and decisions, not narration.${planRules}
 ${TURN_COMPLETION}
 
-${COMMUNICATION}${toolGuidance(toolNames, { hasDeferred: deferredTools().length > 0 })}`;
+${COMMUNICATION}${toolGuidance(toolNames, { hasDeferred: deferredTools(this.sessionId).length > 0 })}`;
     const goalBlock = goalStateBlock(this.goal);
     const volatile =
       `<session_status>\n` +
@@ -510,8 +510,13 @@ ${COMMUNICATION}${toolGuidance(toolNames, { hasDeferred: deferredTools().length 
   /** The tool list the model sees this round (plan mode narrows to read-only). */
   private activeTools(): typeof tools {
     return this.planMode
-      ? [...tools.filter((t) => t.isReadOnly), exitPlanTool]
-      : tools.filter((t) => !t.deferred || isExposed(t.name));
+      ? [
+          ...tools.filter(
+            (t) => t.isReadOnly && (!t.deferred || isExposed(t.name, this.sessionId)),
+          ),
+          exitPlanTool,
+        ]
+      : tools.filter((t) => !t.deferred || isExposed(t.name, this.sessionId));
   }
 
   /**
@@ -531,8 +536,14 @@ ${COMMUNICATION}${toolGuidance(toolNames, { hasDeferred: deferredTools().length 
     const anchored = this.tokens.anchored;
     // The API input count already includes system + tools; only a pure
     // history estimate (fresh or just-compacted) needs them added on top.
-    const input = anchored ? counted : counted + system + toolTokens;
-    const history = anchored ? Math.max(0, input - system - toolTokens) : counted;
+    // The anchor describes the prompt that was actually sent, so a tool set or
+    // system prompt that grew since then (a newly connected MCP server, an
+    // edited memory file) is not covered by it; the next request is at least
+    // the current prompt estimate. Taking the larger value keeps /context's
+    // parts additive instead of clamping history to zero and overshooting.
+    const promptTokens = system + toolTokens;
+    const input = anchored ? Math.max(counted, promptTokens) : counted + promptTokens;
+    const history = anchored ? input - promptTokens : counted;
     const outputReserve = this.outputReserve();
     return {
       window: this.contextWindow,
@@ -939,7 +950,7 @@ ${COMMUNICATION}${toolGuidance(toolNames, { hasDeferred: deferredTools().length 
               },
               onToolReady: (tu) => {
                 const tool = getTool(tu.name);
-                if (!tool || !tool.isReadOnly || !tool.parallelSafe || !tu.id) return;
+                if (!tool || !tool.isReadOnly || !tool.parallelSafe || tool.earlySafe === false || !tu.id) return;
                 if (earlyAbort.signal.aborted || earlyRuns.has(tu.id)) return;
                 const epoch = earlyEpoch;
                 earlyRuns.set(
@@ -1001,8 +1012,14 @@ ${COMMUNICATION}${toolGuidance(toolNames, { hasDeferred: deferredTools().length 
           }
           throw new Error("the model returned an empty completion twice; check the provider and model settings");
         }
-        this.tokens.setAnchor(sent, turn.inputTokens, turn.outputTokens);
-        turnTokens += turn.inputTokens + turn.outputTokens;
+        this.tokens.setAnchor(
+          sent,
+          turn.inputTokens,
+          turn.outputTokens,
+          (turn.cacheReadTokens ?? 0) + (turn.cacheWriteTokens ?? 0),
+        );
+        turnTokens +=
+          turn.inputTokens + turn.outputTokens + (turn.cacheReadTokens ?? 0) + (turn.cacheWriteTokens ?? 0);
         events?.onUsage?.(turn.inputTokens, turn.outputTokens);
         const spec = `${this.llm.provider}:${this.llm.model}`;
         this.costs.record(spec, {
@@ -1175,7 +1192,7 @@ ${COMMUNICATION}${toolGuidance(toolNames, { hasDeferred: deferredTools().length 
     this.runtimeQueue.cancelBySource("goal");
     this.goal = null;
     this.lastPersistedUsage = null;
-    this.lastPersistedExposed = exposedToolNames();
+    this.lastPersistedExposed = exposedToolNames(this.sessionId);
     if (!this.sessionId) return;
     try {
       const parsed = await loadSession(this.sessionId);
@@ -1192,9 +1209,9 @@ ${COMMUNICATION}${toolGuidance(toolNames, { hasDeferred: deferredTools().length 
       const stored = parsed?.meta.exposedTools;
       if (Array.isArray(stored)) {
         for (const n of stored) {
-          if (typeof n === "string" && !isExposed(n)) exposeTool(n);
+          if (typeof n === "string" && !isExposed(n, this.sessionId)) exposeTool(n, this.sessionId);
         }
-        this.lastPersistedExposed = exposedToolNames();
+        this.lastPersistedExposed = exposedToolNames(this.sessionId);
       }
     } catch {
       this.goal = null; // a corrupt session must not crash a resume
@@ -1398,6 +1415,9 @@ ${COMMUNICATION}${toolGuidance(toolNames, { hasDeferred: deferredTools().length 
     events?.onGoalChecking?.();
     const verdict = await this.verifyGoal(finalText, signal, events);
     if (!verdict) return; // verifyGoal paused the goal / reported why
+    // The user may have replaced or cleared the goal while the verifier ran;
+    // its verdict (and the continuation it would queue) belongs to the old one.
+    if (this.goal !== goal) return;
     await this.persistGoal();
     if (verdict.done) {
       goal.status = "completed";
@@ -1445,8 +1465,6 @@ ${COMMUNICATION}${toolGuidance(toolNames, { hasDeferred: deferredTools().length 
         undefined,
         auxiliarySendOptions(),
       );
-      goal.tokensUsed += res.inputTokens + res.outputTokens;
-      goal.updatedAt = new Date().toISOString();
       this.costs.record(`${this.llm.provider}:${this.llm.model}`, {
         input: res.inputTokens,
         output: res.outputTokens,
@@ -1454,6 +1472,12 @@ ${COMMUNICATION}${toolGuidance(toolNames, { hasDeferred: deferredTools().length 
         cacheWrite: res.cacheWriteTokens,
       });
       events?.onUsage?.(res.inputTokens, res.outputTokens);
+      // A goal replaced or cleared mid-verification must not absorb the cost
+      // or the verdict of a turn that belonged to its predecessor.
+      if (this.goal !== goal) return null;
+      goal.tokensUsed +=
+        res.inputTokens + res.outputTokens + (res.cacheReadTokens ?? 0) + (res.cacheWriteTokens ?? 0);
+      goal.updatedAt = new Date().toISOString();
       const text = res.content
         .filter((b) => b.type === "text")
         .map((b) => (b as { text: string }).text)
@@ -1465,6 +1489,7 @@ ${COMMUNICATION}${toolGuidance(toolNames, { hasDeferred: deferredTools().length 
       }
       return verdict;
     } catch (err) {
+      if (this.goal !== goal) return null; // stale verdict: the goal was replaced
       if (signal?.aborted) await this.pauseGoal("paused automatically: turn interrupted during verification", events);
       else if (timedOut) await this.pauseGoal("paused automatically: completion verification timed out", events);
       else {
@@ -1597,8 +1622,14 @@ ${COMMUNICATION}${toolGuidance(toolNames, { hasDeferred: deferredTools().length 
         await saveUsage(this.sessionId, usage);
         this.lastPersistedUsage = usage;
       }
+    } else if (this.lastPersistedUsage) {
+      // The anchor was invalidated (compaction, pruning, media elision) but no
+      // new turn re-anchored. Drop the stored usage so a resume cannot pin a
+      // token count to history it no longer describes.
+      await saveUsage(this.sessionId, null);
+      this.lastPersistedUsage = null;
     }
-    const exposed = exposedToolNames();
+    const exposed = exposedToolNames(this.sessionId);
     const prev = this.lastPersistedExposed;
     if (
       exposed.length !== prev.length ||
@@ -1663,7 +1694,7 @@ ${COMMUNICATION}${toolGuidance(toolNames, { hasDeferred: deferredTools().length 
     if (!tool) {
       return { type: "tool_result", tool_use_id: tu.id, content: `Unknown tool "${tu.name}".`, is_error: true };
     }
-    if (tool.deferred && !isExposed(tool.name)) {
+    if (tool.deferred && !isExposed(tool.name, this.sessionId)) {
       return {
         type: "tool_result",
         tool_use_id: tu.id,
@@ -1701,9 +1732,9 @@ ${COMMUNICATION}${toolGuidance(toolNames, { hasDeferred: deferredTools().length 
         // when the outer tool is read-only (task's worker subagents), so never
         // apply the read-only shortcut to this callback.
         askPermission: (desc, risk, preview, request) =>
-          this.permissions.check(desc, risk, false, preview, request),
-        checkpoint: async (absPath, label) => {
-          const entry = await this.checkpoints.capture(absPath, label);
+          this.permissions.check(desc, risk, request?.readOnly === true, preview, request),
+        checkpoint: async (absPath, label, opts) => {
+          const entry = await this.checkpoints.capture(absPath, label, opts);
           return entry ? { finalize: () => this.checkpoints.finalize(entry) } : undefined;
         },
         reportUsage: (usage) => this.costs.record(`${this.llm.provider}:${this.llm.model}`, usage),

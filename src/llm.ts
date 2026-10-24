@@ -580,9 +580,11 @@ export class LLM {
         // only special-case the "aborted" message, so keep it and attach the
         // streamed-so-far text for the agent to salvage.
         if (signal?.aborted) {
-          throw new CancelledStreamError(
-            partial ? partial + (this.provider === "anthropic" ? resumedDelta : "") : visible,
-          );
+          // A resumed OpenAI stream re-emits text from the start, so merge the
+          // attempts instead of concatenating: the overlap would otherwise be
+          // salvaged into history twice. Anthropic resumes with prefill, where
+          // mergeText simply appends the new suffix.
+          throw new CancelledStreamError(partial ? LLM.mergeText(partial, resumedDelta) : visible);
         }
         if (!(err instanceof StreamInterrupted)) throw err;
 

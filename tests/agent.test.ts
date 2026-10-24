@@ -10,6 +10,8 @@ const h = vi.hoisted(() => ({
     content: ContentBlock[];
     inputTokens: number;
     outputTokens: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
     /** Scripted failure: throw instead of returning this turn. */
     error?: unknown;
   }>,
@@ -81,6 +83,8 @@ vi.mock("../src/llm.js", async (importOriginal) => {
         content: t.content,
         inputTokens: t.inputTokens,
         outputTokens: t.outputTokens,
+        cacheReadTokens: t.cacheReadTokens ?? 0,
+        cacheWriteTokens: t.cacheWriteTokens ?? 0,
         stopReason: toolUses.length ? "tool_use" : "end_turn",
       };
     }
@@ -489,6 +493,38 @@ describe("Agent.chat early read-only execution", () => {
     expect(results.map((r) => r.content)).toEqual(["S1", "P2"]);
   });
 
+  it("does not early-start a side-effecting tool that merely reports read-only", async () => {
+    const starts: string[] = [];
+    const spy = vi.spyOn(subagentTasks, "start").mockImplementation((desc) => {
+      starts.push(desc);
+      return "sub-99";
+    });
+    h.onStream = async (events, toolUses) => {
+      if (!toolUses.length) return; // final text round
+      events?.onToolReady?.(toolUses[0]);
+      await new Promise((r) => setTimeout(r, 20));
+      (events as unknown as { onStreamRecovery?: (info: Record<string, unknown>) => void }).onStreamRecovery?.({
+        attempt: 1,
+        maxAttempts: 4,
+        mode: "restart",
+        discardedChars: 5,
+        delayMs: 0,
+        reason: "connection",
+      });
+      await new Promise((r) => setTimeout(r, 20));
+    };
+    h.turns = [
+      toolTurn([["task", { description: "dup", prompt: "research things", run_in_background: true }]]),
+      textTurn("done"),
+    ];
+    try {
+      await makeAgent().chat("go");
+    } finally {
+      spy.mockRestore();
+    }
+    expect(starts).toEqual(["dup"]);
+  });
+
   it("drops stale early-run events once a restart discards the attempt", async () => {
     let runs = 0;
     registerTool({
@@ -562,6 +598,35 @@ describe("Agent.contextBreakdown", () => {
     expect(b.history).toBeGreaterThan(0);
     expect(b.projected).toBe(b.input + b.outputReserve);
     expect(b.historyDetail.total).toBeGreaterThan(0);
+  });
+
+  it("stays additive when the tool set grows after the provider anchor", async () => {
+    const agent = makeAgent();
+    const base = await agent.contextBreakdown(); // unanchored prompt estimate
+    h.turns = [textTurn("ok", base.input, 20)];
+    await agent.chat("hello");
+
+    // An MCP server connects between turns: its schema joins the next request,
+    // but the stored provider count still describes the smaller old prompt.
+    registerTool({
+      name: "mcp__big__inspect",
+      description: "x".repeat(40_000),
+      isReadOnly: true,
+      inputSchema: { type: "object", properties: {} },
+      async execute() {
+        return { content: "ok" };
+      },
+    });
+    try {
+      const b = await agent.contextBreakdown();
+      expect(b.anchored).toBe(true);
+      expect(b.system + b.tools).toBeGreaterThan(agent.tokenEstimate());
+      expect(b.history).toBe(0);
+      // The documented invariant: the three rows add up to the input total.
+      expect(b.input).toBe(b.system + b.tools + b.history);
+    } finally {
+      unregisterToolsByPrefix("mcp__big__");
+    }
   });
 });
 
@@ -694,6 +759,14 @@ describe("Agent.chat token accounting", () => {
     // Second turn re-anchored exactly; nothing appended since.
     expect(agent.tokenEstimate()).toBe(4105);
   });
+  it("counts cached prompt tokens in the context anchor", async () => {
+    h.turns = [{ ...textTurn("hi", 5000, 200), cacheReadTokens: 40_000, cacheWriteTokens: 300 }];
+    const agent = makeAgent();
+    await agent.chat("hello");
+    // Cache hits are reported outside inputTokens but still occupy the window.
+    expect(agent.tokenEstimate()).toBe(45_500);
+    expect(h.savedUsages.at(-1)?.usage).toEqual({ messages: 2, tokens: 45_500 });
+  });
 });
 
 describe("Agent goal autopilot", () => {
@@ -758,6 +831,25 @@ describe("Agent goal autopilot", () => {
     expect(agent.currentGoal()).toMatchObject({ status: "active", continuations: 2, nextAction: "rerun the compiler" });
   });
 
+  it("drops a verifier verdict when the goal was replaced mid-check", async () => {
+    const agent = makeAgent();
+    await agent.setGoal("old objective");
+    const first = agent.runtimeQueue.take("send_prompt")!;
+    h.turns = [textTurn("partial work", 100, 10), verdict(false, "keep going")];
+    h.onStream = async () => {
+      if (h.calls === 2) await agent.setGoal("new objective", { maxContinuations: 2 });
+    };
+    await agent.chat(first.prompt, undefined, undefined, undefined, { goalContinuation: true });
+
+    expect(agent.currentGoal()).toMatchObject({
+      objective: "new objective",
+      status: "active",
+      continuations: 1,
+    });
+    const accepted = agent.runtimeQueue.list().filter((c) => c.source === "goal" && c.status === "accepted");
+    expect(accepted).toHaveLength(1);
+  });
+
   it("pauses at the continuation cap instead of looping forever", async () => {
     const agent = makeAgent();
     await agent.setGoal("polish the docs", { maxContinuations: 2 });
@@ -805,6 +897,17 @@ describe("Agent goal autopilot", () => {
     expect(agent.currentGoal()).toMatchObject({ status: "paused" });
     expect(agent.currentGoal()?.note).toContain("token budget exhausted");
     expect(agent.currentGoal()?.tokensUsed).toBe(120);
+  });
+
+  it("counts cached prompt tokens against the goal budget", async () => {
+    const agent = makeAgent();
+    await agent.setGoal("optimize the cached query", { tokenBudget: 100 });
+    const cmd = agent.runtimeQueue.take("send_prompt")!;
+    h.turns = [{ ...textTurn("working", 100, 20), cacheReadTokens: 500, cacheWriteTokens: 30 }];
+    await agent.chat(cmd.prompt, undefined, undefined, undefined, { goalContinuation: true });
+    expect(agent.currentGoal()).toMatchObject({ status: "paused" });
+    expect(agent.currentGoal()?.note).toContain("token budget exhausted");
+    expect(agent.currentGoal()?.tokensUsed).toBe(650);
   });
 
   it("pauses when the verifier cannot be parsed", async () => {
@@ -1648,6 +1751,25 @@ describe("Agent ask_user", () => {
     setTimeout(() => ctrl.abort(), 50);
     await expect(chat).rejects.toThrow("aborted");
   });
+
+  it("reports an interrupted turn even when the transport resolves a timeout on abort", async () => {
+    h.turns = [toolTurn([["ask_user", { questions: portQuestions }]]), textTurn("never reached")];
+    const ctrl = new AbortController();
+    const agent = makeAgent();
+    const chat = agent.chat("which port?", ctrl.signal, {
+      // Some transports settle {timedOut:true} when their signal aborts; that
+      // resolution must not outrank the agent's own turn-abort outcome.
+      onUserQuestion: (_request, signal) =>
+        new Promise((resolve) => {
+          signal.addEventListener("abort", () => resolve({ answers: [], timedOut: true }), { once: true });
+        }),
+    });
+    setTimeout(() => ctrl.abort(), 50);
+    await expect(chat).rejects.toThrow("aborted");
+    const persisted = JSON.stringify(agent.debugMessages());
+    expect(persisted).toContain("turn was interrupted");
+    expect(persisted).not.toContain("timed out");
+  });
 });
 
 describe("Agent session references", () => {
@@ -1810,6 +1932,41 @@ describe("batch 38: session meta (usage anchor + exposed tools)", () => {
     expect(agent.tokenEstimate()).toBe(estimateMessagesTokens(history));
   });
 
+  it("clears persisted usage when an invalidated anchor is not re-anchored", async () => {
+    process.env.AGENT_MAX_SESSION_IMAGES = "1";
+    try {
+      const image = {
+        type: "image",
+        source: { type: "base64", media_type: "image/png", data: "AAAA" },
+      } as ContentBlock;
+      const history: MessageParam[] = [
+        { role: "user", content: [image, { ...image }] },
+        { role: "assistant", content: "noted" },
+      ];
+      h.sessionMeta = { meta: { usage: { messages: 2, tokens: 5000 } } };
+      const agent = makeAgent();
+      await agent.resetSession("test-session", history);
+      expect(agent.tokenEstimate()).toBe(5000);
+
+      // Media elision rewrites history in place and invalidates the anchor; the
+      // turn then fails with salvage, so no new provider count arrives.
+      h.turns = [
+        {
+          content: [],
+          inputTokens: 0,
+          outputTokens: 0,
+          error: new StreamRecoveryExhausted("partial reply", 0, new Error("stream broke")),
+        },
+      ];
+      await expect(agent.chat("next")).rejects.toThrow("stream broke");
+      expect(h.savedUsages.at(-1)).toEqual({ id: "test-session", usage: null });
+      // The salvaged reply is still persisted for the next request.
+      expect(JSON.stringify(h.appended.at(-1))).toContain("partial reply");
+    } finally {
+      delete process.env.AGENT_MAX_SESSION_IMAGES;
+    }
+  });
+
   it("persists tool_search exposures at turn end", async () => {
     deferredTool("exp38_beta");
     h.turns = [
@@ -1827,8 +1984,41 @@ describe("batch 38: session meta (usage anchor + exposed tools)", () => {
     h.sessionMeta = { meta: { exposedTools: ["exp38_alpha", "gone38_tool"] } };
     const agent = makeAgent();
     await agent.resetSession("test-session", []);
-    expect(isExposed("exp38_alpha")).toBe(true);
-    expect(deferredTools().map((t) => t.name)).not.toContain("exp38_alpha");
-    expect(isExposed("gone38_tool")).toBe(false);
+    expect(isExposed("exp38_alpha", "test-session")).toBe(true);
+    expect(deferredTools("test-session").map((t) => t.name)).not.toContain("exp38_alpha");
+    expect(isExposed("gone38_tool", "test-session")).toBe(false);
+  });
+
+  it("scopes exposures to the session that discovered them", async () => {
+    deferredTool("exp38_leak");
+    h.sessionMeta = { meta: {} };
+    const agent = makeAgent();
+    await agent.resetSession("session-a", []);
+    h.turns = [toolTurn([["tool_search", { query: "select:exp38_leak" }]]), textTurn("ok")];
+    await agent.chat("expose it");
+    expect(isExposed("exp38_leak", "session-a")).toBe(true);
+    expect(h.savedExposed.at(-1)).toEqual({ id: "session-a", names: ["exp38_leak"] });
+
+    // Switching to a session that never discovered the tool must not inherit it.
+    h.sessionMeta = { meta: {} };
+    await agent.resetSession("session-b", []);
+    expect(isExposed("exp38_leak", "session-b")).toBe(false);
+    h.turns = [textTurn("hi")];
+    h.calls = 0;
+    await agent.chat("hello");
+    expect(h.sentTools.at(-1)).not.toContain("exp38_leak");
+    // The discovering session still remembers it.
+    expect(isExposed("exp38_leak", "session-a")).toBe(true);
+  });
+
+  it("keeps unexposed deferred tools out of the plan-mode tool list", async () => {
+    deferredTool("exp38_plan");
+    h.turns = [toolTurn([["tool_search", { query: "select:exp38_plan" }]]), textTurn("done")];
+    const agent = makeAgent();
+    agent.planMode = true;
+    await agent.chat("plan it");
+    expect(h.sentTools[0]).not.toContain("exp38_plan");
+    // Discovering it in plan mode makes it usable from the next round.
+    expect(h.sentTools[1]).toContain("exp38_plan");
   });
 });

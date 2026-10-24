@@ -15,8 +15,12 @@ export const RETENTION_CLEANUP_DELAY_MS = 60_000;
 
 export interface RetentionCleanupOptions {
   home?: string;
-  /** Session ids (and journal-sanitized variants) whose files are never deleted. */
-  keepIds?: string[];
+  /**
+   * Session ids (and journal-sanitized variants) whose files are never deleted.
+   * A function is evaluated at cleanup time so a long-lived host (GUI) can
+   * report the session it currently has open.
+   */
+  keepIds?: string[] | (() => string[]);
   now?: Date;
   retentionDays?: number;
   envRetentionDays?: string;
@@ -64,7 +68,8 @@ export async function cleanupRetention(
 
   const now = options.now ?? new Date();
   const cutoffMs = now.getTime() - days * 24 * 60 * 60 * 1000;
-  const keep = new Set((options.keepIds ?? []).flatMap((id) => [id.toLowerCase(), sanitizeRetentionId(id)]));
+  const keepSource = typeof options.keepIds === "function" ? options.keepIds() : (options.keepIds ?? []);
+  const keep = new Set(keepSource.flatMap((id) => [id.toLowerCase(), sanitizeRetentionId(id).toLowerCase()]));
   const home = options.home ?? os.homedir();
 
   for (const dir of retentionDirs(home)) {
@@ -82,6 +87,10 @@ export async function cleanupRetention(
       try {
         const stat = await fs.lstat(full);
         if (!stat.isFile() || stat.mtimeMs >= cutoffMs) continue;
+        // Re-check right before unlinking: another process may have resumed
+        // this session between the two calls, and a fresh append must win.
+        const latest = await fs.lstat(full);
+        if (!latest.isFile() || latest.mtimeMs >= cutoffMs) continue;
         await fs.unlink(full);
         result.deletedFiles.push(name);
       } catch (error) {

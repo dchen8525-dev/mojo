@@ -142,6 +142,41 @@ describe("CheckpointStore", () => {
     expect(await fs.readFile(f, "utf8")).toBe("someone else's file\n");
   });
 
+  it("undo of a move restores the source and deletes the moved-to copy", async () => {
+    const s = store();
+    const from = path.join(work, "move-from.ts");
+    const to = path.join(work, "move-to.ts");
+    await fs.writeFile(from, "v1\n", "utf8");
+    const entry = (await s.capture(from, "apply_patch", { movedTo: to }))!;
+    await fs.writeFile(to, "v2\n", "utf8");
+    await fs.rm(from);
+    await s.finalize(entry);
+
+    const r = await s.undoLast();
+    expect(r?.conflict).toBeFalsy();
+    expect(r?.action).toContain("restored");
+    expect(await fs.readFile(from, "utf8")).toBe("v1\n");
+    await expect(fs.access(to)).rejects.toThrow();
+  });
+
+  it("refuses to undo a move when the moved-to copy was modified", async () => {
+    const s = store();
+    const from = path.join(work, "move-refuse-from.ts");
+    const to = path.join(work, "move-refuse-to.ts");
+    await fs.writeFile(from, "v1\n", "utf8");
+    const entry = (await s.capture(from, "apply_patch", { movedTo: to }))!;
+    await fs.writeFile(to, "v2\n", "utf8");
+    await fs.rm(from);
+    await s.finalize(entry);
+    await fs.writeFile(to, "user's later edit\n", "utf8");
+
+    const r = await s.undoLast();
+    expect(r?.conflict).toBe(true);
+    expect(r?.reason).toContain("moved-to");
+    expect(await fs.readFile(to, "utf8")).toBe("user's later edit\n");
+    await expect(fs.access(from)).rejects.toThrow();
+  });
+
   it("capture is best-effort: a failing copy never throws", async () => {
     const s = new CheckpointStore("bad", path.join(dir, "nested", "does", "not", "matter"));
     // A directory cannot be copied as a file -> internal error swallowed.
@@ -254,6 +289,27 @@ describe("CheckpointStore rewind", () => {
     expect(head!.applied).toHaveLength(1); // the target's own edit is reverted
     expect(await fs.readFile(f, "utf8")).toBe("v1\n");
     expect(await s.rewindTo(e1.id)!.then((o) => o!.applied)).toHaveLength(0); // nothing left
+  });
+
+  it("rewinds a move plus later edits to the moved file", async () => {
+    const s = store();
+    const from = path.join(work, "rew-move-from.ts");
+    const to = path.join(work, "rew-move-to.ts");
+    await fs.writeFile(from, "v1\n", "utf8");
+    const e1 = (await s.capture(from, "apply_patch", { movedTo: to }))!;
+    await fs.writeFile(to, "v2\n", "utf8");
+    await fs.rm(from);
+    await s.finalize(e1);
+    const e2 = (await s.capture(to, "edit_file"))!;
+    await fs.writeFile(to, "v3\n", "utf8");
+    await s.finalize(e2);
+
+    const out = await s.rewindTo(e1.id);
+    expect(out!.conflicts).toHaveLength(0);
+    // The source comes back; the moved-to file did not exist before the move.
+    expect(await fs.readFile(from, "utf8")).toBe("v1\n");
+    await expect(fs.access(to)).rejects.toThrow();
+    expect(out!.applied).toHaveLength(2);
   });
 
   it("legacy entries without postHash rewind without a conflict check", async () => {

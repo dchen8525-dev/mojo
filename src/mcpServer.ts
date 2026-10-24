@@ -12,7 +12,7 @@ import { Agent } from "./agent.js";
 import { PermissionManager } from "./permissions.js";
 import { createSession } from "./session.js";
 import { tools } from "./tools/index.js";
-import type { Tool } from "./types.js";
+import type { Tool, ToolContext } from "./types.js";
 
 /**
  * MCP server mode (`agent --mcp-server`): expose mojo itself as a Model
@@ -128,7 +128,7 @@ export function buildMcpServer(cwd: string): Server {
     // Headless context: read-only tools never prompt; anything else is refused.
     const ctx = {
       cwd,
-      askPermission: async () => false,
+      askPermission: (async (_d, _r, _p, request) => request?.readOnly === true) as ToolContext["askPermission"],
     };
     try {
       const result = await tool.execute(input, ctx);

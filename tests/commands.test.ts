@@ -76,4 +76,48 @@ describe("expandFileReferences", () => {
     expect(text).toContain("Hello world");
     expect(text).toContain("xxxx");
   });
+
+  it("does not mark a file that exactly fits the inline budget as truncated", async () => {
+    const exact = "y".repeat(200_000);
+    await fs.writeFile(path.join(dir, "exact.txt"), exact);
+    const { text } = await expandFileReferences("@exact.txt", dir);
+    expect(text).toContain(exact);
+    expect(text).not.toContain("[... truncated]");
+  });
+
+  it("truncates multi-byte content on a character boundary", async () => {
+    await fs.writeFile(path.join(dir, "unicode.txt"), "a" + "é".repeat(150_000));
+    const { text, files } = await expandFileReferences("@unicode.txt", dir);
+    expect(files).toEqual(["unicode.txt"]);
+    expect(text).toContain("[... truncated]");
+    expect(text).not.toContain("\uFFFD");
+    const body = text.slice(text.indexOf(">\n") + 2, text.indexOf("\n[... truncated]"));
+    expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(200_000);
+  });
+
+  it("leaves credential files as literal text", async () => {
+    await fs.writeFile(path.join(dir, ".netrc"), "machine internal login admin password s3cret");
+    try {
+      const { text, files } = await expandFileReferences("look at @.netrc", dir);
+      expect(files).toEqual([]);
+      expect(text).toBe("look at @.netrc");
+    } finally {
+      await fs.rm(path.join(dir, ".netrc"), { force: true });
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("does not inline a workspace symlink that escapes the repo", async () => {
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), "agent-cmds-outside-"));
+    const link = path.join(dir, "escape.txt");
+    await fs.writeFile(path.join(outside, "secret.txt"), "outside-secret");
+    await fs.symlink(path.join(outside, "secret.txt"), link);
+    try {
+      const { text, files } = await expandFileReferences("@escape.txt", dir);
+      expect(files).toEqual([]);
+      expect(text).toBe("@escape.txt");
+    } finally {
+      await fs.rm(link, { force: true });
+      await fs.rm(outside, { recursive: true, force: true });
+    }
+  });
 });

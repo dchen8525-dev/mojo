@@ -34,6 +34,12 @@ Survey 第 3 轮剩下的两个 S 项：
 
 - 新事件：`ToolContext.onSubToolStart(name, inputPreview, round)` / `AgentEvents.onSubToolStart(parentId, ...)`；`src/tools/task.ts` 在 `tool.execute` **之前**发出（未知工具分支不发，因为它从未真正运行）。
 - 完成事件 `onSubTool` 语义不变，仍是唯一会被持久化的阶段（session `subcall` 行、GUI 调用链重建都依赖它）。
+- 归属会话：detached 子代理在父回合结束后仍持有事件闭包。GUI 在 turn 存活期间记住所属
+  `sessionId`（新会话由 `chat` 内 `ensureSession` 在首轮前创建，故在 `onRoundStart` /
+  `onSubToolStart` 刷新），`onSubTool` 落盘只用记住的值；回合结束后不再刷新，迟到的报告
+  仍写入原会话，而不会落到用户已切过去的新会话。若原会话此时已被删除，`appendSubCall`
+  只在既有文件上追加（先 `access` 再写，与 `deleteSession` 共用文件锁），不会重建出没有
+  meta、加载器会忽略的孤儿文件。
 - GUI（`src/gui/server.ts`）：`sub_tool_start` 只做实时广播并在 live turn 的调用链里插入 `running: true` 行；`sub_tool` 到达时按 `name + round + inputPreview` 回填最近的 running 行（窗口重连、错过 start 时退化为追加）。`UiSubCall.running` 是纯 UI 字段，不写盘。前端 `app.js` 对应显示“运行中…”脉冲状态；`session_title` 事件触发侧栏重载。
 - NDJSON（`src/headless.ts`）：新增 `{"type":"sub_tool_start","parent_id","name","input_preview","round"?}`，与既有 `sub_tool` 一起构成完整生命周期；`session_title` 也会作为一行事件输出（仅自动命名成功时出现一次）。
 - 不镜子代理的权限弹窗/思考增量（ZCode 也不镜像权限事件；思考属于子代理私有上下文）。

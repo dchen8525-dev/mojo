@@ -20,6 +20,8 @@ export interface ImagePrepareLimits {
   perImageBytes: number;
   /** Longest edge target; 0 disables dimension-based resizing. */
   maxEdge: number;
+  /** Hard ceiling on the decoded input; larger payloads are rejected undecoded. */
+  maxInputBytes?: number;
 }
 
 export interface PreparedImage {
@@ -37,6 +39,12 @@ const AGGRESSIVE_EDGES = [1000, 800, 600, 400, 300, 200] as const;
 const AGGRESSIVE_QUALITIES = [60, 40, 20] as const;
 /** Decoding allocates 4 bytes per pixel; refuse decompression bombs. */
 const MAX_DECODE_PIXELS = 24_000_000;
+/**
+ * Absolute size ceiling for an inbound payload. A configured byte budget can
+ * be raised arbitrarily; decoding hundreds of MB is never useful and risks
+ * the process before validation sees it.
+ */
+export const MAX_INPUT_BYTES = 64 * 1024 * 1024;
 
 let jimpPromise: Promise<JimpModule> | undefined;
 
@@ -81,12 +89,23 @@ export async function prepareImageForModel(
   }
   const input = Buffer.from(source.data, "base64");
   if (!input.length) return { image, changed: false };
+  const inputCeiling = limits.maxInputBytes ?? MAX_INPUT_BYTES;
+  if (input.byteLength > inputCeiling) {
+    throw new Error(
+      `image too large to process: ${Math.round(input.byteLength / 1024 / 1024)} MB ` +
+        `(max ${Math.round(inputCeiling / 1024 / 1024)} MB)`,
+    );
+  }
 
   const detected = detectMediaType(input);
   if (detected === "image/webp") return { image, changed: false };
 
   const dims = imageDimensions(input);
   const overBytes = input.byteLength > limits.perImageBytes;
+  // A container we cannot measure cheaply (TIFF, AVIF, ...) must not be
+  // handed to the decoder just because it is over budget: a tiny header can
+  // declare a bitmap that exhausts memory. validateImages rejects it instead.
+  if (overBytes && dims === undefined && detected === undefined) return { image, changed: false };
   const overEdge =
     limits.maxEdge > 0 && dims !== undefined && Math.max(dims.width, dims.height) > limits.maxEdge;
   if (!overBytes && !overEdge) return { image, changed: false };
@@ -264,7 +283,7 @@ export function detectMediaType(data: Buffer): SupportedMedia | undefined {
   return undefined;
 }
 
-/** Pixel dimensions from PNG/GIF/JPEG headers, without decoding pixels. */
+/** Pixel dimensions from PNG/GIF/JPEG/BMP headers, without decoding pixels. */
 export function imageDimensions(data: Buffer): { width: number; height: number } | undefined {
   if (data.length >= 24 && detectMediaType(data) === "image/png") {
     return { width: data.readUInt32BE(16), height: data.readUInt32BE(20) };
@@ -273,6 +292,11 @@ export function imageDimensions(data: Buffer): { width: number; height: number }
     return { width: data.readUInt16LE(6), height: data.readUInt16LE(8) };
   }
   if (data.length >= 4 && data[0] === 0xff && data[1] === 0xd8) return jpegDimensions(data);
+  if (data.length >= 26 && data[0] === 0x42 && data[1] === 0x4d) {
+    const width = data.readInt32LE(18);
+    const height = Math.abs(data.readInt32LE(22)); // negative = top-down bitmap
+    if (width > 0 && height > 0) return { width, height };
+  }
   return undefined;
 }
 

@@ -270,7 +270,13 @@ export class PermissionManager {
     preview?: string,
     request?: PermissionRequest,
   ): Promise<boolean> {
-    if (readOnly) return true;
+    if (readOnly) {
+      // Read-only commands never prompt, but they must not bypass a rule the
+      // user added to stop them (e.g. a deny on `cat .env`). Only an explicit
+      // deny wins; a read-only request needs no allow rule.
+      if (this.mode !== "yolo" && this.ruleDecision(description, request) === false) return false;
+      return true;
+    }
 
     // Project-scoped rules are decided first (so a project can deny even a
     // global "allow"), then persisted global rules. "always deny" survives

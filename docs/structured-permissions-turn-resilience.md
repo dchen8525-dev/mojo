@@ -54,6 +54,12 @@ edit_file(*)              # 任意 edit_file 调用
 - 旧版描述 allow 规则仍能覆盖**单个简单命令**（例如 `"Run command: npm test"`），但**绝不能**覆盖复合命令的任一子命令。
 - 没有结构化请求时，`tool(pattern)` 规则不会退化为描述匹配。
 
+## 只读请求与显式 deny
+
+- bash 的只读命令仍构造 `PermissionRequest { tool: "bash", values, raw, opaque, readOnly: true }` 交给管理器：跳过人工询问，但**先查规则**，显式 deny（如 `bash(cat .env:*)`）优先；yolo 模式仍全放行。只读请求不需要 allow 规则。
+- 无头/MCP 的 `askPermission` 以 `request.readOnly === true` 放行，与交互端语义一致；非只读请求一律拒绝。
+- `isReadOnlyCommand` 的 git 分类收紧：`reflog` 只允许无参/`show`/`--` 开头，`config` 只允许 `--get`/`--list`；参数含 `-O`、`--open-files-in-pager`、`--output` 时一律视为有副作用（可执行外部程序或写文件）。
+
 ## 持久化与呈现
 
 - `"session"` / `"project"` / `"always"` / `"always_deny"` 保存提示框中展示的同一条规则：优先 `request.remember`，否则 `tool(raw)`。
@@ -83,8 +89,8 @@ edit_file(*)              # 任意 edit_file 调用
 ## 测试
 
 - `tests/permissionRules.test.ts`（14）：规则解析、前缀/精确/glob 匹配、Windows 路径归一、引号/转义/管道/重定向/替换/heredoc/注释/未闭合引号拆分。
-- `tests/permissions.test.ts`（33）：旧版复合命令绕过回归、逐子命令覆盖、子命令 deny、opaque 仅精确整条规则、前缀词边界、`always` 精确保存、session/always_deny、文件工具规则。
-- `tests/bash.test.ts`：bash 传入结构化权限请求（值、raw、opaque、remember）。
+- `tests/permissions.test.ts`（34）：旧版复合命令绕过回归、逐子命令覆盖、子命令 deny、opaque 仅精确整条规则、前缀词边界、`always` 精确保存、session/always_deny、文件工具规则。
+- `tests/bash.test.ts`：bash 传入结构化权限请求（值、raw、opaque、remember），只读命令带 `readOnly: true` 且可被 deny 拦截；git `reflog expire/delete`、`grep -O`、`config --unset` 等不再判为只读。
 - `tests/llmRetry.test.ts`：多 provider 上下文溢出识别，普通错误不误判。
 - `tests/agent.test.ts`：溢出后压缩并重试、普通 400 不压缩、历史过小保留原错误；空补全重试成功/二次失败；预算告警 50/75/90% 且最多 3 条、普通回合不告警。
 - `tests/toolBudget.test.ts`（5）：阈值、百分比、去重、上限、跨阈值补齐。

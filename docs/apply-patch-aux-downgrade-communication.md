@@ -34,14 +34,16 @@
 
 ### hunk 匹配（四级递进）
 
-上下文匹配按 `精确 → trimEnd → trim → unicode 归一`（弯引号/破折号/省略号/nbsp）递进。`@@` 锚是**整行**查找，命中后从锚之后开始匹配 oldLines；空 oldLines 表示追加；尾随空行模式先裁剪再重试；`End of File` 只允许锚到末尾。匹配失败抛 `Failed to find expected lines`，工具把它包成 "Re-read the file and copy the exact lines into the hunk."
+上下文匹配按 `精确 → trimEnd → trim → unicode 归一`（弯引号/破折号/省略号/nbsp）递进。`@@` 锚是**整行**查找，命中后从锚之后开始匹配 oldLines；空 oldLines 表示纯插入——带锚点时插在锚点行之后，只有无锚点时才追加到文件尾；尾随空行模式先裁剪再重试；`End of File` 只允许锚到末尾。匹配失败抛 `Failed to find expected lines`，工具把它包成 "Re-read the file and copy the exact lines into the hunk."
 
 ### 工具行为（src/tools/patch.ts）
 
 - **先全量规划，后落盘**：所有段先解析+校验（存在性、读状态守卫、hunk 可应用、重复段 `类型:路径` 去重），任何一段失败则整个补丁不碰磁盘。
+- **移动安全**：目标路径与源相同直接拒绝（实现是先写目标再删源，同路径会删掉刚写入的内容）；目标已存在也拒绝，不静默覆盖。
+- **跨段冲突检测**：两个段触碰同一路径（update+delete、move 源/目标交叉等）时整包拒绝，避免后写入覆盖前一段的结果。
 - **读状态守卫**：update/delete 目标必须先被本会话读过（复用 `FileStateStore.check`），未读/过期/部分读分别给出 `editGuardMessage` 文案。
 - **权限**：每个受影响路径一次结构化请求 `{ tool: "apply_patch", values: [显示路径] }`，risk `high`，预览带 `@@` 头（move 用目标路径、上限 120 行裁剪）。既有 allow 规则静默放行（move 规则键在目标路径上）；任一路径被拒则整个补丁中止。
-- **执行**：delete → checkpoint → unlink → finalize → invalidate；add/move/update → checkpoint →（add 建目录）→ `atomicWriteFile` → finalize → `recordCurrent`；move 另行 unlink 源并失效读状态；内容 <400k 时追加 `diagnosticsHint`。
+- **执行**：delete → checkpoint → unlink → finalize → invalidate；add/update → checkpoint →（add 建目录）→ `atomicWriteFile` → finalize → `recordCurrent`；move → 带 `movedTo` 的 checkpoint → `atomicWriteFile` 目标 → unlink 源并失效读状态 → finalize → `recordCurrent`。move 的 finalize 必须在 unlink 之后，否则 checkpoint 记录的是移动前的源内容，`/undo` 会把它当成用户改动而拒绝；`movedTo` 让 `/undo`/`/rewind` 同时删除目标副本。内容 <400k 时追加 `diagnosticsHint`。
 - **结果**：`Patch applied.` + 每路径一行 `A/M/D 路径 (+N/-M)`，move 显示 `M old -> new`。
 - 工具列表注册在 `multi_edit` 之后；`toolGuidance` 新增 apply_patch 块（多文件改动一次调用、逐字拷贝行、失败时加宽上下文，不得用 shell 替代），仅在工具在场时注入。
 
@@ -60,8 +62,8 @@
 
 ## 测试
 
-- `tests/patch.test.ts`：解析（add/delete/update/move/EOF、heredoc、错误路径）+ 应用（上下文 hunk、追加、EOF 锚、trimEnd、unicode 归一、锚行、尾空行裁剪、失败报错）。
-- `tests/patchTool.test.ts`：单调用四操作、逐路径结构化权限请求与预览、拒绝即全停、读守卫拦截 update/delete、hunk 失配不动盘、add 已存在、重复段/空补丁/无标记、写入后读状态已记录。
+- `tests/patch.test.ts`：解析（add/delete/update/move/EOF、heredoc、错误路径）+ 应用（上下文 hunk、追加、带锚点插入、EOF 锚、trimEnd、unicode 归一、锚行、尾空行裁剪、失败报错）。
+- `tests/patchTool.test.ts`：单调用四操作、逐路径结构化权限请求与预览、拒绝即全停、读守卫拦截 update/delete、hunk 失配不动盘、add 已存在、重复段/空补丁/无标记、移动到自身/目标已存在/跨段冲突被拒、写入后读状态已记录、move 后 `/undo` 恢复源并删除目标副本。
 - `tests/auxiliary.test.ts`：默认 5000/thinking:false、env 覆盖、非法值忽略。
 - `tests/prompts.test.ts`：COMMUNICATION 内容、apply_patch 块随工具出现/缺席。
 - `tests/agent.test.ts`：压缩摘要调用断言 `sentOpts[0] = { maxOutput: 5000, thinking: false }`。

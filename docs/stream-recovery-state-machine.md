@@ -31,6 +31,7 @@
 4. **可恢复性**。仅瞬时原因恢复：408/429/5xx、连接类错误（含 undici 的 `terminated`/`premature close`/socket 码）、`StreamIdleError`；400/401/403 等直接终止，不浪费预算。无 `cause` 视为瞬时（测试与直接断 socket 的网关）。
 5. **预算与退避**。`recoveries < maxRecoveries` 才继续；退避复用重试参数：`min(baseMs * 2^n, maxDelayMs)` 加 ±jitter，等待期间可被用户取消。
 6. **终止**。预算耗尽或不可恢复时抛 `StreamRecoveryExhausted(partialText, attempts, cause)`。`partialText` 是 `visible`（restart）或 `combined`（resume），与用户屏幕上看到的内容一致。
+7. **续写中被取消**。用户取消发生在续写尝试中时，先 `mergeText(partial, 本次累计增量)` 再抛 `CancelledStreamError`：OpenAI 无 prefill 会从头发送，直接拼接会把重叠段落重复打捞进历史；Anthropic 的 prefill 续写则退化为追加。打捞文本因此与屏幕内容一致且不重复。
 
 ### 事件与前端同步
 
@@ -81,7 +82,7 @@ interface StreamRecoveryInfo {
 ## 测试
 
 - `tests/llmRetry.test.ts`：resume 合并与只补发后缀；resume 事件与退避；restart 从原 messages 重发并上报 `discardedChars`；续写中断的增量 flush；400 不重试直接 `StreamRecoveryExhausted`；503 恢复且 `reason=server`；`AGENT_STREAM_RECOVERY_ATTEMPTS=2` 时共 3 次请求后终止；`=0` 关闭；退避期间取消得到 `CancelledStreamError`。
-- `tests/llmCancel.test.ts`：resume 等待中取消保留已产出文本。
+- `tests/llmCancel.test.ts`：resume 等待中取消保留已产出文本；续写尝试中取消按 `mergeText` 去重（Anthropic prefill 追加、OpenAI 从头重发均不产生重复段）。
 - `tests/agent.test.ts`：`StreamRecoveryExhausted` 打捞持久化；restart 后旧提前工具的迟到事件被抑制，重新执行仅上报一次。
 - `tests/guiRetryE2E.test.ts`：真实 HTTP/SSE——先输出文本与半截 `tool_use` 后断开，GUI 服务端收到 `stream_recovery(restart, discardedChars=9)`，第二次请求正常返回，无 `turn_error`。
 - `tests/guiDom.test.ts`：DOM 回滚旧文本与工具卡片，显示中断提示，新文本出现在新气泡。
