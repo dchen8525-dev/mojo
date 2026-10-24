@@ -11,6 +11,7 @@ import type { ImageBlockParam, MessageParam } from "./types.js";
 const DEFAULT_MAX_IMAGES_PER_MESSAGE = 5;
 const DEFAULT_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const DEFAULT_MAX_SESSION_IMAGES = 20;
+const DEFAULT_IMAGE_MAX_EDGE = 1568;
 
 export interface MediaLimits {
   /** Images accepted per chat()/steer() call. */
@@ -32,6 +33,17 @@ export function mediaLimits(): MediaLimits {
     perImageBytes: envInt("AGENT_MAX_IMAGE_BYTES", DEFAULT_MAX_IMAGE_BYTES),
     sessionImages: envInt("AGENT_MAX_SESSION_IMAGES", DEFAULT_MAX_SESSION_IMAGES),
   };
+}
+
+/**
+ * Longest-edge target for inbound images before they are sent. Matches the
+ * edge Anthropic downsizes to server-side, so local shrinking costs no
+ * fidelity while cutting upload bytes. `AGENT_IMAGE_MAX_EDGE=0` disables it.
+ */
+export function imageMaxEdge(envValue: string | undefined = process.env.AGENT_IMAGE_MAX_EDGE): number {
+  if (envValue?.trim() === "0") return 0;
+  const v = Number(envValue);
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : DEFAULT_IMAGE_MAX_EDGE;
 }
 
 /** Decoded byte size of a base64 data image (no full decode needed). */

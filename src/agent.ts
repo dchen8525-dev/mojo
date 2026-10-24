@@ -14,6 +14,7 @@ import type {
 import { validateToolInput } from "./types.js";
 import { RuntimeCommandQueue, type RuntimeCommandImage } from "./runtimeQueue.js";
 import { enforceSessionMediaBudget, mediaLimits, validateImages } from "./mediaBudget.js";
+import { imagePrepareLimits, prepareImagesForModel } from "./imageResize.js";
 import { LLM, isContextOverflowError, type Config, type StreamEvents } from "./llm.js";
 import { CancelledStreamError, StreamRecoveryExhausted } from "./llm/types.js";
 import { lookupModel } from "./llm/models.js";
@@ -752,9 +753,12 @@ ${COMMUNICATION}${toolGuidance(toolNames, { hasDeferred: deferredTools().length 
     images?: ImageBlockParam[],
     opts: { goalContinuation?: boolean } = {},
   ): Promise<string> {
-    // Media budget: reject inbound images past the per-message/per-image caps
-    // before anything is recorded.
-    validateImages(images, mediaLimits());
+    // Media budget: downscale oversized images (longest edge + byte cap) first,
+    // then reject whatever still does not fit before anything is recorded.
+    const limits = mediaLimits();
+    const preparedImages = await prepareImagesForModel(images, imagePrepareLimits(), { signal });
+    images = preparedImages.images;
+    validateImages(images, limits);
     const goalContinuation = !!opts.goalContinuation;
     // Real user input always wins over a queued automatic continuation.
     if (!goalContinuation) this.runtimeQueue.cancelBySource("goal");

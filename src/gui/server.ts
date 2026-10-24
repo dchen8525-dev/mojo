@@ -8,6 +8,7 @@ import { createRequire } from "node:module";
 import type { AgentEvents } from "../agent.js";
 import { renderCommand, expandFileReferences } from "../commands.js";
 import { sanitizeErrorMessage } from "../errorSanitizer.js";
+import { imagePrepareLimits, prepareImagesForModel } from "../imageResize.js";
 import { runAgentCommand, type CommandResult } from "../agentCommands.js";
 import {
   toUiTranscript,
@@ -931,7 +932,8 @@ export function createGuiHandler(opts: GuiServerOptions): (req: http.IncomingMes
           // a send_prompt runtime command and runs as its own turn after.
           if (body.steer === true && !runtime.commandBusy) {
             try {
-              if (!project.agent.steer(text, images)) return sendJson(res, 409, { error: "busy" });
+              const prepared = await prepareImagesForModel(images, imagePrepareLimits());
+              if (!project.agent.steer(text, prepared.images)) return sendJson(res, 409, { error: "busy" });
             } catch (err) {
               return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
             }

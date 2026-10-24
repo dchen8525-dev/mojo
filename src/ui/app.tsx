@@ -14,6 +14,7 @@ import { backgroundManager } from "../tools/background.js";
 import { expandFileReferences, renderCommand, type SlashCommand } from "../commands.js";
 import { goalSummaryLine } from "../goal.js";
 import { sanitizeErrorMessage } from "../errorSanitizer.js";
+import { imagePrepareLimits, prepareImagesForModel } from "../imageResize.js";
 import {
   completeMention,
   filterMentionPaths,
@@ -861,7 +862,8 @@ export function AgentApp({
       if (!text && !images.length) return;
       if (busyRef.current) {
         // Mid-turn input steers the running turn instead of being dropped.
-        if (!agent.steer(text, images)) return; // turn just ended; next submit runs normally
+        const prepared = await prepareImagesForModel(images, imagePrepareLimits());
+        if (!agent.steer(text, prepared.images)) return; // turn just ended; next submit runs normally
         setItems((prev) => [...prev, { kind: "user", text }]);
         setItems((prev) => [...prev, { kind: "system", text: "(queued — applied at the next step)" }]);
         return;

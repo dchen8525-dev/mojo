@@ -332,7 +332,9 @@ describe("Agent session titles", () => {
 describe("Agent.chat media budget", () => {
   afterEach(() => {
     delete process.env.AGENT_MAX_IMAGES_PER_MESSAGE;
+    delete process.env.AGENT_MAX_IMAGE_BYTES;
     delete process.env.AGENT_MAX_SESSION_IMAGES;
+    delete process.env.AGENT_IMAGE_MAX_EDGE;
   });
 
   function img(): ContentBlock {
@@ -347,6 +349,34 @@ describe("Agent.chat media budget", () => {
     const agent = makeAgent();
     await expect(agent.chat("hi", undefined, undefined, [img(), img()] as never)).rejects.toThrow(/limit 1 per message/);
     expect(h.appended).toHaveLength(0);
+  });
+
+  it("downscales oversized inbound images before the first send", async () => {
+    process.env.AGENT_MAX_IMAGE_BYTES = "60000";
+    process.env.AGENT_IMAGE_MAX_EDGE = "128";
+    const { Jimp, JimpMime } = await import("jimp");
+    const canvas = new Jimp({ width: 400, height: 400, color: 0x000000ff });
+    let seed = 7;
+    const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) & 255;
+    canvas.scan((_x, _y, idx) => {
+      canvas.bitmap.data[idx] = rnd();
+      canvas.bitmap.data[idx + 1] = rnd();
+      canvas.bitmap.data[idx + 2] = rnd();
+      canvas.bitmap.data[idx + 3] = 255;
+    });
+    const data = (await canvas.getBuffer(JimpMime.png)).toString("base64");
+    expect(Math.floor((data.length * 3) / 4)).toBeGreaterThan(60_000);
+
+    h.turns = [textTurn("ok")];
+    const agent = makeAgent();
+    await agent.chat("hi", undefined, undefined, [
+      { type: "image", source: { type: "base64", media_type: "image/png", data } },
+    ] as never);
+
+    const sent = h.sentMessages[0][h.sentMessages[0].length - 1].content as Array<Record<string, unknown>>;
+    const image = sent.find((b) => b.type === "image")!;
+    const out = image.source as { data: string };
+    expect(Math.floor((out.data.length * 3) / 4)).toBeLessThanOrEqual(60_000);
   });
 
   it("elides oldest resident images when the session cap trips, before the next send", async () => {

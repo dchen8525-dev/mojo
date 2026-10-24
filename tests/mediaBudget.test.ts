@@ -3,6 +3,7 @@ import type { ImageBlockParam, MessageParam } from "../src/types.js";
 import {
   enforceSessionMediaBudget,
   imageByteSize,
+  imageMaxEdge,
   mediaLimits,
   validateImages,
 } from "../src/mediaBudget.js";
@@ -19,6 +20,7 @@ afterEach(() => {
   delete process.env.AGENT_MAX_IMAGES_PER_MESSAGE;
   delete process.env.AGENT_MAX_IMAGE_BYTES;
   delete process.env.AGENT_MAX_SESSION_IMAGES;
+  delete process.env.AGENT_IMAGE_MAX_EDGE;
 });
 
 describe("mediaLimits", () => {
@@ -34,6 +36,22 @@ describe("mediaLimits", () => {
   it("ignores non-positive env values", () => {
     process.env.AGENT_MAX_SESSION_IMAGES = "0";
     expect(mediaLimits().sessionImages).toBe(20);
+  });
+});
+
+describe("imageMaxEdge", () => {
+  it("defaults to 1568 and honors explicit / zero / invalid values", () => {
+    expect(imageMaxEdge(undefined)).toBe(1568);
+    expect(imageMaxEdge("")).toBe(1568);
+    expect(imageMaxEdge("512")).toBe(512);
+    expect(imageMaxEdge("0")).toBe(0);
+    expect(imageMaxEdge("abc")).toBe(1568);
+    expect(imageMaxEdge("-8")).toBe(1568);
+  });
+
+  it("reads the environment at call time", () => {
+    process.env.AGENT_IMAGE_MAX_EDGE = "640";
+    expect(imageMaxEdge()).toBe(640);
   });
 });
 
